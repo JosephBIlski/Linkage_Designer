@@ -32,7 +32,7 @@ import { ModelRenderer, type DesignSpaceView, type EditPointView, type OverlayVi
 import { Viewport, type PickResult } from './viewport/scene';
 
 export type Mode = 'construction' | 'simulation' | 'preview';
-export type ToolName = 'select' | 'bar' | 'polygon' | 'prism' | 'cylinder' | 'cpoint' | 'caxis' | 'cplane' | 'joint' | 'ground' | 'driver' | 'delete';
+export type ToolName = 'select' | 'bar' | 'sketch' | 'polygon' | 'prism' | 'cylinder' | 'edit' | 'cpoint' | 'caxis' | 'cplane' | 'joint' | 'ground' | 'driver' | 'mirror' | 'pattern' | 'delete';
 
 export interface ToolOptions {
   sides: number;
@@ -43,6 +43,9 @@ export interface ToolOptions {
   offset: number;
   jointType: JointType;
   pitch: number;
+  patternKind: 'linear' | 'polar';
+  patternCount: number;
+  patternAngle: number;
 }
 
 export interface SimState {
@@ -77,7 +80,7 @@ export class App {
   settings: AppSettings;
   mode: Mode = 'construction';
   tool: ToolName = 'select';
-  toolOptions: ToolOptions = { sides: 4, radius: 1, height: 1, mode2d: true, planeMode: 'three', offset: 1, jointType: 'revolute', pitch: 1 };
+  toolOptions: ToolOptions = { sides: 4, radius: 1, height: 1, mode2d: true, planeMode: 'three', offset: 1, jointType: 'revolute', pitch: 1, patternKind: 'linear', patternCount: 3, patternAngle: 360 };
   selection: SelectionView | null = null;
   hover: PickResult | null = null;
   overlay: OverlayView = {};

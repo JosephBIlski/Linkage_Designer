@@ -35,6 +35,10 @@ export const ICONS: Record<string, string> = {
   screw: svg('<path d="M4 12h16"/><path d="M6 8c2 2 2 6 0 8M10 8c2 2 2 6 0 8M14 8c2 2 2 6 0 8M18 8c2 2 2 6 0 8"/>'),
   none: svg('<circle cx="12" cy="12" r="7" stroke-dasharray="3 3"/>'),
   target: svg('<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/>'),
+  sketch: svg('<path d="M4 18l4-11 6 3 6-6" stroke-dasharray="3 2"/><circle cx="4" cy="18" r="1.6" fill="currentColor"/><circle cx="8" cy="7" r="1.6" fill="currentColor"/><circle cx="14" cy="10" r="1.6" fill="currentColor"/><circle cx="20" cy="4" r="1.6" fill="currentColor"/>'),
+  edit: svg('<path d="M4 20l4-1 11-11-3-3L5 16z"/><path d="M14 7l3 3"/><circle cx="19" cy="17" r="2"/>'),
+  mirror: svg('<path d="M12 3v18" stroke-dasharray="3 2"/><path d="M9 7L4 12l5 5z"/><path d="M15 7l5 5-5 5z"/>'),
+  pattern: svg('<rect x="3" y="3" width="6" height="6"/><rect x="15" y="3" width="6" height="6"/><rect x="3" y="15" width="6" height="6"/><rect x="15" y="15" width="6" height="6"/>'),
 };
 
 export function icon(name: string): string {

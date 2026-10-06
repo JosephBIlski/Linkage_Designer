@@ -18,11 +18,13 @@ import { isConstructionRef } from '../core/types';
 import { createColorPicker } from './colorPicker';
 import { icon } from './icons';
 import { DEFAULT_SETTINGS, type AppSettings } from './settings';
-import { APP, EXAMPLES, HELP, JOINTS, MENU, MODES, PANEL, POPUP, PREVIEW, SETTINGS, SIM, STATUS, TOOLS, TOOL_OPTIONS } from './strings';
+import { APP, EXAMPLES, HELP, JOINTS, MENU, MODES, PANEL, POPUP, PREVIEW, SETTINGS, SIM, STATUS, TOOLS, TOOL_OPTIONS, TREE } from './strings';
+import { duplicateLink, extrudePolygon, translation } from '../core/patterns';
+import { modelSize } from '../core/kinematics';
 import { ToolManager, parseTypedPoint } from '../viewport/tools';
 
 const JOINT_TYPES: JointType[] = ['spherical', 'revolute', 'planar', 'prismatic', 'cylindrical', 'screw'];
-const TOOL_LIST: ToolName[] = ['select', 'bar', 'polygon', 'prism', 'cylinder', 'cpoint', 'caxis', 'cplane', 'joint', 'ground', 'driver', 'delete'];
+const TOOL_LIST: ToolName[] = ['select', 'bar', 'sketch', 'polygon', 'prism', 'cylinder', 'edit', 'cpoint', 'caxis', 'cplane', 'joint', 'ground', 'driver', 'mirror', 'pattern', 'delete'];
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: string): HTMLElementTagNameMap[K] {
   const e = document.createElement(tag);
@@ -98,6 +100,8 @@ export class UI {
   private toolbar!: HTMLElement;
   private toolOptions!: HTMLElement;
   private props!: HTMLElement;
+  private tree!: HTMLElement;
+  private treeOpen: Record<string, boolean> = { links: true, joints: true, construction: false, drivers: true, targets: true };
   private modePanel!: HTMLElement;
   private statusText!: HTMLElement;
   private dofChip!: HTMLElement;
@@ -192,9 +196,10 @@ export class UI {
     left.append(this.toolbar, this.toolOptions);
 
     const right = el('aside', 'right');
+    this.tree = el('section', 'panel tree-panel');
     this.modePanel = el('section', 'panel mode-panel');
     this.props = el('section', 'panel props-panel');
-    right.append(this.modePanel, this.props);
+    right.append(this.tree, this.modePanel, this.props);
 
     const bottom = el('footer', 'statusbar');
     this.statusText = el('span', 'status-text');
@@ -269,8 +274,155 @@ export class UI {
       return;
     }
     this.renderToolOptions();
+    this.renderTree();
     this.renderModePanel();
     this.renderProps();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Feature tree
+  // ---------------------------------------------------------------------------
+
+  private renderTree(): void {
+    const app = this.app;
+    const m = app.model;
+    const box = this.tree;
+    box.replaceChildren();
+    box.appendChild(el('h3', 'panel__title', TREE.title));
+    const sel = app.selection;
+    const group = (key: string, title: string, count: number, fill: (list: HTMLElement) => void) => {
+      const details = el('details', 'tree-group');
+      details.open = this.treeOpen[key] ?? true;
+      details.addEventListener('toggle', () => (this.treeOpen[key] = details.open));
+      const summary = el('summary', 'tree-group__summary', `${title} (${count})`);
+      details.appendChild(summary);
+      const list = el('div', 'tree-list');
+      if (count === 0) list.appendChild(el('span', 'hint hint--small', TREE.empty));
+      else fill(list);
+      details.appendChild(list);
+      box.appendChild(details);
+    };
+    const item = (label: string, active: boolean, onClick: () => void, opts: { badges?: string[]; hover?: () => void; rename?: (v: string) => void; extra?: HTMLElement; iconName?: string } = {}) => {
+      const row = el('div', `tree-item ${active ? 'active' : ''}`);
+      if (opts.iconName) {
+        const ic = el('span', 'tree-item__icon');
+        ic.innerHTML = icon(opts.iconName);
+        row.appendChild(ic);
+      }
+      const name = el('span', 'tree-item__label', label);
+      if (opts.rename) name.title = TREE.rename;
+      row.appendChild(name);
+      for (const b of opts.badges ?? []) row.appendChild(el('span', 'tree-badge', b));
+      if (opts.extra) row.appendChild(opts.extra);
+      row.addEventListener('click', onClick);
+      if (opts.hover) {
+        row.addEventListener('mouseenter', opts.hover);
+        row.addEventListener('mouseleave', () => app.setHover(null));
+      }
+      if (opts.rename) {
+        name.addEventListener('dblclick', (e) => {
+          e.stopPropagation();
+          const input = el('input', 'tree-item__rename');
+          input.value = label;
+          name.replaceWith(input);
+          input.focus();
+          input.select();
+          const commit = () => {
+            if (input.value.trim() && input.value !== label) opts.rename!(input.value.trim());
+            else this.refresh();
+          };
+          input.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Enter') commit();
+            if (ev.key === 'Escape') this.refresh();
+            ev.stopPropagation();
+          });
+          input.addEventListener('blur', commit);
+        });
+      }
+      return row;
+    };
+    const links = Object.values(m.links);
+    group('links', TREE.links, links.length, (list) => {
+      for (const link of links) {
+        const badges: string[] = [];
+        if (link.ground) badges.push(TREE.ground);
+        if (link.locked) badges.push(TREE.locked);
+        if (link.flexible) badges.push(TREE.flexible);
+        if (link.hidden) badges.push(TREE.hidden);
+        const eye = el('button', `tree-eye ${link.hidden ? 'off' : ''}`);
+        eye.innerHTML = icon('eye');
+        eye.title = link.hidden ? TREE.show : TREE.hide;
+        eye.addEventListener('click', (e) => {
+          e.stopPropagation();
+          app.beginChange();
+          link.hidden = !link.hidden;
+          app.endChange();
+        });
+        const active = !!sel && (sel.type === 'link' || sel.type === 'vertex' || sel.type === 'edge' || sel.type === 'face' || sel.type === 'axis') && sel.id === link.id;
+        list.appendChild(
+          item(link.name, active, () => app.select({ type: 'link', id: link.id }), {
+            badges,
+            extra: eye,
+            iconName: link.kind,
+            hover: () => app.setHover({ type: 'edge', id: link.id, linkId: link.id, point: [0, 0, 0], distance: 0 }),
+            rename: (v) => {
+              app.beginChange();
+              link.name = v;
+              app.endChange();
+            },
+          }),
+        );
+      }
+    });
+    const joints = Object.values(m.joints).filter((j) => j.a.kind !== 'body');
+    group('joints', TREE.joints, joints.length, (list) => {
+      for (const j of joints) {
+        const a = m.links[j.a.linkId]?.name ?? '';
+        const b = isConstructionRef(j.b) ? m.construction[j.b.constructionId]?.name ?? '' : m.links[j.b.linkId]?.name ?? '';
+        list.appendChild(
+          item(`${JOINTS[j.type].short} · ${a} ↔ ${b}`, sel?.type === 'joint' && sel.id === j.id, () => app.select({ type: 'joint', id: j.id }), {
+            iconName: j.type,
+            hover: () => app.setHover({ type: 'joint', id: j.id, point: [0, 0, 0], distance: 0 }),
+          }),
+        );
+      }
+    });
+    const cons = Object.values(m.construction);
+    group('construction', TREE.construction, cons.length, (list) => {
+      for (const c of cons) {
+        list.appendChild(
+          item(`${c.name} (${c.kind})`, sel?.type === 'construction' && sel.id === c.id, () => app.select({ type: 'construction', id: c.id }), {
+            iconName: c.kind === 'point' ? 'cpoint' : c.kind === 'axis' ? 'caxis' : 'cplane',
+            badges: m.settings.sketchPlaneId === c.id ? [PANEL.isSketchPlane] : [],
+            hover: () => app.setHover({ type: 'construction', id: c.id, point: [0, 0, 0], distance: 0 }),
+            rename: c.builtin
+              ? undefined
+              : (v) => {
+                  app.beginChange();
+                  c.name = v;
+                  app.endChange();
+                },
+          }),
+        );
+      }
+    });
+    group('drivers', TREE.drivers, m.drivers.length, (list) => {
+      m.drivers.forEach((d, i) => {
+        list.appendChild(item(this.driverLabel(d), app.sim.activeDriver === i && app.mode !== 'construction', () => app.setActiveDriver(i), { iconName: 'driver' }));
+      });
+    });
+    group('targets', TREE.targets, m.targets.length, (list) => {
+      for (const t of m.targets) {
+        const pt = m.points[t.pointId];
+        if (!pt) continue;
+        const label = `${m.links[pt.linkId]?.name ?? ''} ${pt.name} · ${TREE.pose} ${t.pose} · ${t.kind}`;
+        list.appendChild(
+          item(label, sel?.type === 'editPoint' && sel.pointId === t.pointId && sel.pose === t.pose, () => app.select({ type: 'editPoint', id: t.pointId, pointId: t.pointId, pose: t.pose }), {
+            iconName: t.locked ? 'lock' : 'target',
+          }),
+        );
+      }
+    });
   }
 
   private updateLiveReadouts(): void {
@@ -303,8 +455,13 @@ export class UI {
       box.appendChild(el('p', 'hint', JOINTS[o.jointType].description));
       if (o.jointType === 'screw') box.appendChild(row(TOOL_OPTIONS.pitch, numberInput(o.pitch, (v) => (o.pitch = v))));
     }
-    if (t === 'bar') {
+    if (t === 'bar' || t === 'edit') {
       box.appendChild(row(TOOL_OPTIONS.jointType, select(JOINT_TYPES.filter((j) => j === 'revolute' || j === 'spherical').map((j) => ({ value: j, label: JOINTS[j].label })), app.model.settings.defaultJoint, (v) => (app.model.settings.defaultJoint = v))));
+    }
+    if (t === 'pattern') {
+      box.appendChild(row(TOOL_OPTIONS.patternKind, select([{ value: 'linear', label: TOOL_OPTIONS.patternLinear }, { value: 'polar', label: TOOL_OPTIONS.patternPolar }], o.patternKind, (v) => { o.patternKind = v; this.refresh(); })));
+      box.appendChild(row(TOOL_OPTIONS.patternCount, numberInput(o.patternCount, (v) => (o.patternCount = Math.max(1, Math.round(v))), { step: 1, min: 1 })));
+      if (o.patternKind === 'polar') box.appendChild(row(TOOL_OPTIONS.patternAngle, numberInput(o.patternAngle, (v) => (o.patternAngle = v), { step: 15 })));
     }
     box.appendChild(row(TOOL_OPTIONS.snapGrid, checkbox(app.settings.gridSnap, (v) => app.updateSettings({ gridSnap: v }))));
     if (app.settings.gridSnap) box.appendChild(row(TOOL_OPTIONS.gridStep, numberInput(app.settings.gridStep, (v) => app.updateSettings({ gridStep: Math.max(0.01, v) }), { step: 0.1 })));
@@ -475,6 +632,7 @@ export class UI {
     if (link.params.radius) box.appendChild(row(PANEL.radius, el('span', 'value', link.params.radius.toFixed(3))));
     if (link.params.height) box.appendChild(row(PANEL.height, el('span', 'value', link.params.height.toFixed(3))));
     box.appendChild(row(PANEL.locked, checkbox(link.locked, (v) => change(() => (link.locked = v)))));
+    box.appendChild(row(PANEL.hidden, checkbox(!!link.hidden, (v) => change(() => (link.hidden = v)))));
     box.appendChild(row(PANEL.ground, checkbox(link.ground, (v) => change(() => setGround(m, v ? link.id : null)))));
     box.appendChild(row(PANEL.flexible, checkbox(link.flexible, (v) => change(() => (link.flexible = v)))));
     if (link.flexible) {
@@ -507,7 +665,63 @@ export class UI {
       show.appendChild(b);
     }
     box.appendChild(show);
-    box.appendChild(button(PANEL.deleteItem, () => this.tools.deletePick({ type: 'link', id: link.id }), { icon: 'delete', cls: 'btn--danger' }));
+    if (link.kind === 'polygon') {
+      let height = this.extrudeHeight;
+      const h = numberInput(height, (v) => (height = v), { step: 0.1 });
+      const r = row(TOOL_OPTIONS.extrudeHeight, h);
+      const b = button(PANEL.extrude, () => {
+        this.extrudeHeight = height;
+        change(() => {
+          if (extrudePolygon(m, link, height)) app.setStatus(STATUS.extruded);
+        });
+      }, { icon: 'prism' });
+      b.title = PANEL.extrudeHelp;
+      r.appendChild(b);
+      box.appendChild(r);
+    }
+    const actions = el('div', 'actions');
+    actions.appendChild(button(PANEL.copyLink, () => this.duplicateSelected(), { icon: 'polygon', cls: 'btn--small' }));
+    actions.appendChild(button(PANEL.deleteItem, () => this.tools.deletePick({ type: 'link', id: link.id }), { icon: 'delete', cls: 'btn--danger btn--small' }));
+    box.appendChild(actions);
+  }
+
+  private extrudeHeight = 1;
+  private clipboardLinkId: ID | null = null;
+
+  /** Ctrl+C: remember the selected link. */
+  copySelected(): void {
+    const sel = this.app.selection;
+    const id = sel && (sel.type === 'link' || sel.type === 'vertex' || sel.type === 'edge' || sel.type === 'face' || sel.type === 'axis') ? sel.id : null;
+    if (!id || !this.app.model.links[id]) {
+      this.app.setStatus(STATUS.nothingToCopy);
+      return;
+    }
+    this.clipboardLinkId = id;
+    this.app.setStatus(STATUS.copied);
+  }
+
+  /** Ctrl+V: paste a translated copy of the remembered link. */
+  pasteCopied(): void {
+    const app = this.app;
+    const src = this.clipboardLinkId ? app.model.links[this.clipboardLinkId] : null;
+    if (!src) {
+      this.app.setStatus(STATUS.nothingToCopy);
+      return;
+    }
+    const offset = Math.max(0.5, modelSize(app.model) * 0.15);
+    app.beginChange();
+    const copy = duplicateLink(app.model, src, translation([offset, offset, 0]), `${src.name} copy`);
+    app.endChange();
+    if (copy) {
+      app.select({ type: 'link', id: copy.id });
+      app.setStatus(STATUS.pasted);
+    }
+  }
+
+  /** Properties → Duplicate: copy the selected link next to itself. */
+  duplicateSelected(): void {
+    this.copySelected();
+    if (this.clipboardLinkId) this.pasteCopied();
   }
 
   private pointProps(box: HTMLElement, pointId: ID): void {
@@ -847,8 +1061,16 @@ export class UI {
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
       e.preventDefault();
       app.redo();
+    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c' && app.mode === 'construction') {
+      e.preventDefault();
+      this.copySelected();
+    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v' && app.mode === 'construction') {
+      e.preventDefault();
+      this.pasteCopied();
+    } else if (e.key === 'Enter' && app.mode === 'construction') {
+      this.tools.finishSketch();
     } else if (app.mode === 'construction' && !e.ctrlKey && !e.metaKey) {
-      const map: Record<string, ToolName> = { '1': 'select', '2': 'bar', '3': 'polygon', '4': 'prism', '5': 'cylinder', g: 'ground', j: 'joint', d: 'driver' };
+      const map: Record<string, ToolName> = { '1': 'select', '2': 'bar', '3': 'polygon', '4': 'prism', '5': 'cylinder', g: 'ground', j: 'joint', d: 'driver', s: 'sketch', e: 'edit', m: 'mirror', p: 'pattern' };
       const t = map[e.key.toLowerCase()];
       if (t) this.tools.setTool(t);
       if (e.key.toLowerCase() === 'f') app.zoomToFit();

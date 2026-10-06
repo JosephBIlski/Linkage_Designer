@@ -79,6 +79,8 @@ export interface Link {
   stiffness: number;
   /** Optional per-link colour override (HEX). */
   color?: string;
+  /** Hidden links are not drawn or pickable but still take part in the solve. */
+  hidden?: boolean;
 }
 
 // ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ import type {
   JointType,
   Link,
   LinkKind,
+  LinkParams,
   Model,
   Point,
   PointRole,
@@ -296,6 +297,17 @@ export function addPolygon(m: Model, center: Vec3, normal: Vec3, radius: number,
     link.pointIds.push(addPoint(m, link.id, p, 'vertex', `V${i}`).id);
   }
   link.params = { sides, radius };
+  return finishLink(m, link, opts);
+}
+
+/**
+ * Generic link from explicit vertex positions (bars, polygons and prisms).
+ * Rigidity is built from the given positions; `params` is stored as given.
+ */
+export function addLinkFromPoints(m: Model, kind: 'bar' | 'polygon' | 'prism', pts: Vec3[], params: LinkParams, opts: LinkOptions = {}): Link {
+  const link = baseLink(m, kind, opts.name);
+  pts.forEach((p, i) => link.pointIds.push(addPoint(m, link.id, p, 'vertex', kind === 'bar' ? (i === 0 ? 'A' : 'B') : `V${i}`).id));
+  link.params = { ...params };
   return finishLink(m, link, opts);
 }
 

@@ -30,6 +30,9 @@ import {
   sketchNormal,
 } from '../core/model';
 import type { ConstructionRef, Feature, ID, Target, Vec3 } from '../core/types';
+import { moveVertex } from '../core/edit';
+import { duplicateLink, linearArray, mirrorAcrossPlane, polarArray } from '../core/patterns';
+import { addPolygonFromPoints } from '../core/model';
 import { isConstructionRef } from '../core/types';
 import { FEATURES, STATUS, TOOLS, CONSTRUCTION_NAMES } from '../ui/strings';
 import type { PickResult, ViewportPointerEvent } from './scene';
@@ -73,6 +76,9 @@ type DragState =
 export class ToolManager {
   private points: PlacedPoint[] = [];
   private featureA: Feature | null = null;
+  /** Edit / mirror / pattern tools: the vertex or link picked first. */
+  private editSource: { pointId: ID; linkId: ID } | null = null;
+  private patternLinkId: ID | null = null;
   private pendingLength: number | null = null;
   private drag: DragState = { kind: 'none' };
   private lastPointer: { x: number; y: number } | null = null;
@@ -85,6 +91,8 @@ export class ToolManager {
   reset(): void {
     this.points = [];
     this.featureA = null;
+    this.editSource = null;
+    this.patternLinkId = null;
     this.pendingLength = null;
     this.drag = { kind: 'none' };
     this.app.setOverlay({});
@@ -101,7 +109,7 @@ export class ToolManager {
       // abort drag: restore from undo snapshot
       this.app.undo();
     }
-    if (this.points.length === 0 && !this.featureA && this.drag.kind === 'none') this.app.setTool('select');
+    if (this.points.length === 0 && !this.featureA && !this.editSource && !this.patternLinkId && this.drag.kind === 'none') this.app.setTool('select');
     this.reset();
   }
 
@@ -134,7 +142,7 @@ export class ToolManager {
     const vp = this.app.viewport;
     let pos: Vec3 | null = null;
     const last = this.points[this.points.length - 1]?.pos;
-    if (this.app.toolOptions.mode2d || this.app.tool === 'cpoint' || this.app.tool === 'caxis' || this.app.tool === 'cplane') {
+    if (this.app.toolOptions.mode2d || this.app.tool === 'cpoint' || this.app.tool === 'caxis' || this.app.tool === 'cplane' || this.app.tool === 'sketch') {
       const pl = this.sketchPlane();
       pos = vp.projectToPlane(ev.clientX, ev.clientY, pl.o, pl.n);
     }
@@ -197,11 +205,23 @@ export class ToolManager {
       if (this.drag.kind !== 'none') this.dragEnd(ev);
       return;
     }
+    if (ev.kind === 'dblclick') {
+      if (app.tool === 'sketch') this.finishSketch();
+      return;
+    }
     if (ev.kind !== 'down' || ev.button !== 0) return;
     this.onPopup?.(null);
     switch (app.tool) {
       case 'select':
         return this.selectDown(ev);
+      case 'sketch':
+        return this.sketchTool(ev);
+      case 'edit':
+        return this.editTool(ev);
+      case 'mirror':
+        return this.mirrorTool(ev);
+      case 'pattern':
+        return this.patternTool(ev);
       case 'bar':
       case 'caxis':
         return this.twoPointTool(ev);
@@ -270,6 +290,12 @@ export class ToolManager {
         return this.pointTool(fake, { pos });
       case 'cplane':
         return this.planeTool(fake, { pos });
+      case 'sketch':
+        return this.sketchTool(fake, { pos });
+      case 'edit':
+        return this.editTool(fake, { pos });
+      case 'pattern':
+        return this.patternTool(fake, { pos });
       default:
         app.setStatus(STATUS.coordHelp);
     }
@@ -282,7 +308,7 @@ export class ToolManager {
   private updatePreview(ev: ViewportPointerEvent): void {
     const app = this.app;
     const tool = app.tool;
-    if (tool === 'select' || tool === 'ground' || tool === 'driver' || tool === 'delete' || tool === 'joint') {
+    if (tool === 'select' || tool === 'ground' || tool === 'driver' || tool === 'delete' || tool === 'joint' || tool === 'mirror' || (tool === 'edit' && !this.editSource) || (tool === 'pattern' && (!this.patternLinkId || this.app.toolOptions.patternKind === 'polar'))) {
       app.setOverlay({});
       return;
     }
@@ -297,7 +323,178 @@ export class ToolManager {
       overlay.rubberBand = { a: first, b: placed.pos };
     }
     if (tool === 'cplane' && this.points.length > 0) overlay.polyline = [...this.points.map((p) => p.pos), placed.pos];
+    if (tool === 'sketch' && this.points.length > 0) {
+      overlay.polyline = [...this.points.map((p) => p.pos), placed.pos];
+      overlay.rubberBand = { a: this.points[this.points.length - 1].pos, b: placed.pos };
+    }
+    if (tool === 'pattern' && this.patternLinkId && this.points.length === 1 && app.toolOptions.patternKind === 'linear') overlay.rubberBand = { a: this.points[0].pos, b: placed.pos };
+    if (tool === 'edit' && this.editSource) overlay.rubberBand = { a: app.model.points[this.editSource.pointId]?.pos ?? placed.pos, b: placed.pos };
     app.setOverlay(overlay);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Sketch (free polygon) tool
+  // ---------------------------------------------------------------------------
+
+  private sketchTool(ev: ViewportPointerEvent, forced?: PlacedPoint): void {
+    const app = this.app;
+    const placed = forced ?? this.place(ev, false);
+    if (!placed) return;
+    // clicking near the first vertex closes the polygon
+    if (this.points.length >= 3 && !forced) {
+      const s0 = app.viewport.worldToScreen(this.points[0].pos);
+      if (Math.hypot(s0.x - ev.clientX, s0.y - ev.clientY) < 12) {
+        this.finishSketch();
+        return;
+      }
+    }
+    // project onto the sketch plane so the polygon is planar
+    const pl = this.sketchPlane();
+    const pos = sub(placed.pos, scale(pl.n, dot(sub(placed.pos, pl.o), pl.n)));
+    if (dist(pos, placed.pos) > 1e-6) app.setStatus(STATUS.sketchNotPlanar);
+    const last = this.points[this.points.length - 1];
+    if (last && dist(last.pos, pos) < 1e-9) return;
+    this.points.push({ pos });
+    app.setHint(TOOLS.sketch.hint);
+  }
+
+  /** Close the sketched polygon (Enter / double-click / click on the first vertex). */
+  finishSketch(): void {
+    const app = this.app;
+    if (app.tool !== 'sketch') return;
+    if (this.points.length < 3) {
+      app.setStatus(STATUS.sketchNeedsThree);
+      return;
+    }
+    const m = app.model;
+    app.beginChange();
+    const link = addPolygonFromPoints(m, this.points.map((p) => p.pos), { name: app.nextLinkName('polygon'), onPlaneId: m.settings.sketchPlaneId });
+    app.select({ type: 'link', id: link.id });
+    app.endChange();
+    this.points = [];
+    app.setOverlay({});
+  }
+
+  // ---------------------------------------------------------------------------
+  // Edit (move / snap vertex) tool
+  // ---------------------------------------------------------------------------
+
+  private editTool(ev: ViewportPointerEvent, forced?: PlacedPoint): void {
+    const app = this.app;
+    const m = app.model;
+    if (!this.editSource) {
+      const pick = ev.pick;
+      if (pick?.type === 'vertex' && pick.pointId && pick.linkId) {
+        if (m.links[pick.linkId].locked) {
+          app.setStatus(STATUS.linkLocked);
+          return;
+        }
+        this.editSource = { pointId: pick.pointId, linkId: pick.linkId };
+        app.select({ type: 'vertex', id: pick.linkId, pointId: pick.pointId });
+        app.setStatus(STATUS.editPickTarget);
+      } else app.setStatus(TOOLS.edit.hint);
+      return;
+    }
+    const placed = forced ?? this.place(ev);
+    if (!placed) return;
+    const joinTo = placed.snappedPointId && placed.snappedPointId !== this.editSource.pointId && m.points[placed.snappedPointId]?.linkId !== this.editSource.linkId ? placed.snappedPointId : undefined;
+    app.beginChange();
+    const res = moveVertex(m, this.editSource.pointId, placed.pos, joinTo);
+    app.endChange();
+    app.setStatus(res.ok ? STATUS.editDone + (res.joinedTo ? ` · ${STATUS.jointCreated}` : '') : STATUS.violated);
+    app.select({ type: 'vertex', id: this.editSource.linkId, pointId: this.editSource.pointId });
+    this.editSource = null;
+    app.setOverlay({});
+  }
+
+  // ---------------------------------------------------------------------------
+  // Mirror & pattern tools
+  // ---------------------------------------------------------------------------
+
+  private mirrorTool(ev: ViewportPointerEvent): void {
+    const app = this.app;
+    const m = app.model;
+    const pick = ev.pick;
+    if (!this.patternLinkId) {
+      if (pick?.linkId && m.links[pick.linkId]) {
+        this.patternLinkId = pick.linkId;
+        app.select({ type: 'link', id: pick.linkId });
+        app.setStatus(STATUS.mirrorPickPlane);
+      } else app.setStatus(TOOLS.mirror.hint);
+      return;
+    }
+    if (pick?.type === 'construction') {
+      const c = m.construction[pick.id];
+      if (c?.kind === 'plane' && c.dir) {
+        const src = m.links[this.patternLinkId];
+        app.beginChange();
+        const copy = duplicateLink(m, src, mirrorAcrossPlane(c.origin, c.dir), `${src.name} mirror`);
+        app.endChange();
+        if (copy) app.select({ type: 'link', id: copy.id });
+        this.patternLinkId = null;
+        return;
+      }
+    }
+    app.setStatus(STATUS.mirrorPickPlane);
+  }
+
+  private patternTool(ev: ViewportPointerEvent, forced?: PlacedPoint): void {
+    const app = this.app;
+    const m = app.model;
+    const o = app.toolOptions;
+    const pick = ev.pick;
+    if (!this.patternLinkId) {
+      if (pick?.linkId && m.links[pick.linkId]) {
+        this.patternLinkId = pick.linkId;
+        app.select({ type: 'link', id: pick.linkId });
+        app.setStatus(STATUS.patternPickFirst);
+      } else app.setStatus(TOOLS.pattern.hint);
+      return;
+    }
+    const src = m.links[this.patternLinkId];
+    const count = Math.max(1, Math.round(o.patternCount));
+    if (o.patternKind === 'polar') {
+      let origin: Vec3 | null = null;
+      let axis: Vec3 = sketchNormal(m);
+      if (pick?.type === 'construction') {
+        const c = m.construction[pick.id];
+        if (c?.kind === 'axis' && c.dir) {
+          origin = c.origin;
+          axis = c.dir;
+        } else if (c?.kind === 'point') origin = c.origin;
+      }
+      if (!origin) {
+        const placed = forced ?? this.place(ev);
+        if (!placed) return;
+        origin = placed.pos;
+      }
+      app.beginChange();
+      const copies = polarArray(m, src, origin, axis, count, (i) => `${src.name} ${i + 1}`, (o.patternAngle * Math.PI) / 180);
+      app.endChange();
+      if (copies.length) app.select({ type: 'link', id: copies[copies.length - 1].id });
+      app.setStatus(STATUS.patternDone);
+      this.patternLinkId = null;
+      app.setOverlay({});
+      return;
+    }
+    // linear: two points define the spacing vector
+    const placed = forced ?? this.place(ev);
+    if (!placed) return;
+    if (this.points.length === 0) {
+      this.points.push(placed);
+      app.setStatus(STATUS.patternPickSecond);
+      return;
+    }
+    const step = sub(placed.pos, this.points[0].pos);
+    if (len(step) < 1e-9) return;
+    app.beginChange();
+    const copies = linearArray(m, src, step, count, (i) => `${src.name} ${i + 1}`);
+    app.endChange();
+    if (copies.length) app.select({ type: 'link', id: copies[copies.length - 1].id });
+    app.setStatus(STATUS.patternDone);
+    this.patternLinkId = null;
+    this.points = [];
+    app.setOverlay({});
   }
 
   // ---------------------------------------------------------------------------

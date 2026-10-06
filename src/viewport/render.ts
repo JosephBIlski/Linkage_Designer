@@ -258,6 +258,7 @@ export class ModelRenderer {
     const r = this.r;
     const P = (id: ID): Vec3 => pos.get(id) ?? model.points[id].pos;
     for (const link of Object.values(model.links)) {
+      if (link.hidden) continue;
       const selected = !ghost && this.isSelected(state, 'link', link.id);
       const hovered = !ghost && state.hover !== null && (state.hover.type === 'edge' || state.hover.type === 'face' || state.hover.type === 'axis') && state.hover.id === link.id;
       const baseColor = ghost ? '#888888' : this.linkColor(link, state);
@@ -356,6 +357,7 @@ export class ModelRenderer {
     const r = this.r;
     for (const j of Object.values(model.joints)) {
       if (j.type === 'planar' && j.a.kind === 'body') continue; // sketch-plane constraints are implicit
+      if (model.links[j.a.linkId]?.hidden) continue;
       const pl = this.jointPlacement(model, j, state.positions);
       if (!pl) continue;
       const selected = this.isSelected(state, 'joint', j.id);

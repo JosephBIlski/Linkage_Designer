@@ -136,3 +136,20 @@ hr { border: none; border-top: 1px solid var(--border); margin: 6px 0; width: 10
   .app { grid-template-columns: 160px 1fr 260px; }
   .coord__input { width: 200px; }
 }
+
+.tree-panel { max-height: 34vh; overflow-y: auto; flex: 0 0 auto; }
+.tree-group { border-left: 2px solid var(--border); padding-left: 6px; }
+.tree-group__summary { cursor: pointer; font-size: 12px; color: var(--fg-dim); user-select: none; padding: 2px 0; }
+.tree-list { display: flex; flex-direction: column; gap: 1px; padding: 2px 0 4px; }
+.tree-item { display: flex; align-items: center; gap: 6px; padding: 2px 6px; border-radius: 4px; cursor: pointer; font-size: 12.5px; min-height: 24px; }
+.tree-item:hover { background: var(--bg-3); }
+.tree-item.active { background: var(--accent); color: #fff; }
+.tree-item__icon { display: flex; opacity: 0.8; }
+.tree-item__icon svg { width: 15px; height: 15px; }
+.tree-item__label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tree-item__rename { flex: 1; background: var(--bg); border: 1px solid var(--accent); color: var(--fg); border-radius: 3px; padding: 1px 4px; font-size: 12px; }
+.tree-badge { font-size: 10px; text-transform: uppercase; letter-spacing: 0.4px; background: rgba(255,255,255,0.12); padding: 1px 5px; border-radius: 8px; }
+.tree-item.active .tree-badge { background: rgba(255,255,255,0.25); }
+.tree-eye { background: transparent; border: none; color: inherit; cursor: pointer; display: flex; padding: 2px; opacity: 0.8; }
+.tree-eye.off { opacity: 0.3; }
+.tree-eye svg { width: 15px; height: 15px; }

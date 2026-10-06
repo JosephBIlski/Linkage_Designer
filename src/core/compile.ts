@@ -300,6 +300,7 @@ export function compile(m: Model, opts: CompileOptions): CompiledSystem {
             break;
           }
           case 'coplanar': {
+            if (mode === 'sketch' && opts.freePointIds?.has(r.p)) break; // released vertex may leave its face plane
             const A0 = len(cross(sub(pos(r.b), pos(r.a)), sub(pos(r.c), pos(r.a))));
             constraints.push(pointOnBodyPlane(R(k, r.p), R(k, r.a), R(k, r.b), R(k, r.c), Math.max(A0, 1e-9), 1, true, tag));
             break;

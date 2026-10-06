@@ -66,6 +66,10 @@ export const TOOLS = {
   ground: { label: 'Ground', hint: 'Click a link to make it the ground (fixed) link.' },
   driver: { label: 'Driver', hint: 'Click a link with a grounded pivot to drive its angle, or a revolute/prismatic joint to drive its fold angle / slide.' },
   delete: { label: 'Delete', hint: 'Click an item to delete it (Del key deletes the selection).' },
+  sketch: { label: 'Sketch polygon', hint: 'Click the vertices of a polygon on the sketch plane. Click the first vertex again, double-click or press Enter to close it. Extrude it later from its Properties.' },
+  edit: { label: 'Edit points', hint: 'Click a vertex of existing geometry, then click where it should go: another link\'s vertex (joins them), a datum point, or type coordinates below.' },
+  mirror: { label: 'Mirror', hint: 'Click a link, then click a datum plane to create its mirror image.' },
+  pattern: { label: 'Pattern', hint: 'Click a link, then two points for the spacing (linear) or a datum axis / centre point (polar). Count and angle are in the tool options.' },
   cancel: 'Esc cancels the current tool.',
 };
 
@@ -83,6 +87,12 @@ export const TOOL_OPTIONS = {
   snapGrid: 'Snap to grid',
   gridStep: 'Grid step',
   lengthLock: 'Length',
+  patternKind: 'Pattern type',
+  patternLinear: 'Linear array (two points set the spacing)',
+  patternPolar: 'Polar array (about a datum axis or a point)',
+  patternCount: 'Copies',
+  patternAngle: 'Total angle (°)',
+  extrudeHeight: 'Extrude height',
 };
 
 export const JOINTS: Record<string, { label: string; short: string; dof: string; description: string }> = {
@@ -121,6 +131,10 @@ export const PANEL = {
   stiffness: 'Relative stiffness',
   showPath: 'Show output path & design space for',
   deleteItem: 'Delete',
+  extrude: 'Extrude to prism',
+  extrudeHelp: 'Turns this polygon into a prism of the given height along its normal (negative = other side).',
+  copyLink: 'Duplicate',
+  hidden: 'Hidden (not drawn, still simulated)',
   position: 'Position',
   pointConstraints: 'Constraints at this point',
   none: 'none',
@@ -194,6 +208,24 @@ export const PREVIEW = {
   range: 'Range',
 };
 
+export const TREE = {
+  title: 'Model tree',
+  links: 'Links',
+  joints: 'Joints',
+  construction: 'Construction geometry',
+  drivers: 'Drivers',
+  targets: 'Editing-point constraints',
+  empty: '— none —',
+  ground: 'ground',
+  locked: 'locked',
+  flexible: 'flexible',
+  hidden: 'hidden',
+  show: 'Show',
+  hide: 'Hide',
+  rename: 'Double-click to rename',
+  pose: 'pose',
+};
+
 export const STATUS = {
   ready: 'Ready',
   dof: 'DOF',
@@ -212,6 +244,18 @@ export const STATUS = {
   pickSecondFeature: 'Now pick a compatible feature on another link or construction geometry.',
   linkLocked: 'This link is locked.',
   nothingToUndo: 'Nothing to undo.',
+  sketchNeedsThree: 'A polygon needs at least three vertices.',
+  sketchNotPlanar: 'Vertices must lie on one plane; the point was projected onto the sketch plane.',
+  editPickTarget: 'Now click the destination (a vertex, a datum point) or type coordinates.',
+  editDone: 'Vertex moved',
+  mirrorPickPlane: 'Now click a datum plane to mirror across.',
+  patternPickFirst: 'Now click the first point of the spacing vector (or a datum axis / point for a polar pattern).',
+  patternPickSecond: 'Now click the second point of the spacing vector.',
+  patternDone: 'Pattern created',
+  copied: 'Copied — press Ctrl+V to paste a copy.',
+  pasted: 'Pasted',
+  nothingToCopy: 'Select a link to copy.',
+  extruded: 'Polygon extruded to a prism',
 };
 
 export const POPUP = {
@@ -263,7 +307,9 @@ export const HELP = {
     'Ground tool: click a link to fix it. The DOF readout updates live.',
     'Simulation mode: pick which points to display (Properties → Show output path). Drag the green editing points; the mechanism adapts. Constrained points turn red; lock them in Properties.',
     'Preview mode: play the motion through the driver range.',
-    'Keyboard: Esc cancel, Del delete, Ctrl+Z / Ctrl+Y undo / redo, 1 select, 2 link, 3 polygon, G ground, J joint, F zoom to fit.',
+    'Sketch tool: click vertices on the sketch plane, close the loop, then Extrude from Properties to make a prism. Edit tool: click a vertex, then its destination, to snap geometry together.',
+    'Patterning: Ctrl+C / Ctrl+V duplicates the selected link; Mirror reflects across a datum plane; Pattern makes linear or polar arrays.',
+    'Keyboard: Esc cancel, Del delete, Ctrl+Z / Ctrl+Y undo / redo, Ctrl+C / Ctrl+V copy / paste, 1 select, 2 link, 3 polygon, S sketch, E edit, G ground, J joint, F zoom to fit.',
   ],
 };
 

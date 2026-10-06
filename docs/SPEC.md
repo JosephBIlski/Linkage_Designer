@@ -362,7 +362,73 @@ assumptions."
 - **Examples** menu: four-bar crank-rocker, slider-crank, spherical pendulum,
   rigid-origami Miura vertex (`examples/*.linkage.json` are the same files).
 
-## 13. Out of scope for this prototype
+## 13. Sketching and editing geometry (added in v0.2)
+
+### 13.1 Sketch tool (free polygon) and extrusion
+
+- Tool **Sketch polygon** (`S`): click any sequence of vertices on the active
+  sketch plane (points are projected onto the plane, so the polygon is always
+  planar); a dashed preview follows the pointer. Close the polygon by clicking
+  the first vertex again, double-clicking, or pressing `Enter`. At least three
+  vertices are required. Coordinates can also be typed in the status bar.
+- **Extrude to prism** (Properties of a polygon): enter a height and press
+  *Extrude*. The polygon becomes a prism of that height along its normal
+  (negative = other side). The bottom face keeps its point ids so joints
+  attached to the polygon's vertices / edges / face stay valid; the
+  sketch-plane constraint is removed because the body is now 3-D. The prism's
+  rigidity is rebuilt from the new positions (joint helper attachments kept).
+
+### 13.2 Edit tool (snap vertices)
+
+- Tool **Edit points** (`E`): click a vertex of existing geometry, then click
+  its destination: another link's vertex (the two are joined with the default
+  joint type shown in the tool options), a datum point, any position on the
+  sketch plane, or typed coordinates.
+- The vertex is released from its own link's shape constraints (distances and
+  the coplanarity constraint it is the subject of), every other constraint is
+  re-solved, and the link's rest geometry is rebuilt from the result. If the
+  destination lies off the link's sketch plane, that planar constraint is
+  removed first, so a flat panel can be lifted into 3-D (e.g. to close the
+  fourth panel of a degree-4 origami vertex whose other panels are already
+  folded). Locked links cannot be edited.
+
+**Deviation / note:** moving one vertex of a quad off its plane makes a bent
+(non-planar) panel; the rebuilt rigidity then treats it as a rigid tetrahedral
+body. Keep the destination in the panel's plane for rigid origami.
+
+## 14. Patterning (added in v0.2)
+
+All patterning operations copy a single link's geometry, parameters, colour
+and flexibility. Joints, ground and lock state are **not** copied; the
+sketch-plane constraint is copied only when the copy still lies on that plane.
+
+- **Copy / paste**: `Ctrl+C` remembers the selected link, `Ctrl+V` pastes a
+  copy offset diagonally by about 15 % of the model size; Properties →
+  *Duplicate* does both at once.
+- **Mirror** (`M`): click a link, then a datum plane; a mirror image is
+  created (edge lengths preserved; the polygon's vertex order is kept).
+- **Pattern** (`P`): click a link, then
+  - *Linear array*: click two points defining the spacing vector; *Copies*
+    sets how many copies are added;
+  - *Polar array*: click a datum axis (rotation about it) or a datum point /
+    any position (rotation about the sketch-plane normal through it);
+    *Copies* and *Total angle* (360° spreads copies evenly around the circle).
+
+**Deviation / note:** multi-link selections and copying of the joints between
+copied links are not supported in this version; join the copies with the Joint
+or Edit tool.
+
+## 15. Model tree (added in v0.2)
+
+A collapsible **Model tree** at the top of the right column lists Links (with
+ground / locked / flexible / hidden badges and an eye toggle), Joints,
+Construction geometry (marking the active sketch plane), Drivers and
+Editing-point constraints. Click selects (Drivers: makes it the active
+driver), hovering highlights the item in the viewport, double-click renames
+links and user datums. Hidden links are neither drawn nor pickable but still
+take part in the solve (useful for scaffolding geometry).
+
+## 16. Out of scope for this prototype
 
 Collision detection, dynamics, fabrication output (thickening, hinge design
 as in Crane), free-timing synthesis, multi-selection, measuring tools.
