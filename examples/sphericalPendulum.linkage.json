@@ -1,0 +1,248 @@
+{
+  "version": 1,
+  "points": {
+    "p_2": {
+      "id": "p_2",
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "linkId": "link_1",
+      "role": "vertex",
+      "name": "A"
+    },
+    "p_3": {
+      "id": "p_3",
+      "pos": [
+        1.5,
+        1,
+        1.2
+      ],
+      "linkId": "link_1",
+      "role": "vertex",
+      "name": "B"
+    }
+  },
+  "links": {
+    "link_1": {
+      "id": "link_1",
+      "kind": "bar",
+      "name": "Pendulum",
+      "pointIds": [
+        "p_2",
+        "p_3"
+      ],
+      "helperIds": [],
+      "params": {},
+      "rigidity": [
+        {
+          "kind": "dist",
+          "a": "p_2",
+          "b": "p_3",
+          "length": 2.1656407827707715
+        }
+      ],
+      "locked": false,
+      "ground": false,
+      "flexible": false,
+      "stiffness": 0.5
+    }
+  },
+  "joints": {
+    "joint_4": {
+      "id": "joint_4",
+      "type": "spherical",
+      "a": {
+        "linkId": "link_1",
+        "kind": "vertex",
+        "pointIds": [
+          "p_2"
+        ]
+      },
+      "b": {
+        "constructionId": "point_origin"
+      }
+    }
+  },
+  "construction": {
+    "point_origin": {
+      "id": "point_origin",
+      "kind": "point",
+      "name": "ORIGIN",
+      "origin": [
+        0,
+        0,
+        0
+      ],
+      "builtin": true
+    },
+    "axis_x": {
+      "id": "axis_x",
+      "kind": "axis",
+      "name": "X",
+      "origin": [
+        0,
+        0,
+        0
+      ],
+      "dir": [
+        1,
+        0,
+        0
+      ],
+      "size": 20,
+      "builtin": true
+    },
+    "axis_y": {
+      "id": "axis_y",
+      "kind": "axis",
+      "name": "Y",
+      "origin": [
+        0,
+        0,
+        0
+      ],
+      "dir": [
+        0,
+        1,
+        0
+      ],
+      "size": 20,
+      "builtin": true
+    },
+    "axis_z": {
+      "id": "axis_z",
+      "kind": "axis",
+      "name": "Z",
+      "origin": [
+        0,
+        0,
+        0
+      ],
+      "dir": [
+        0,
+        0,
+        1
+      ],
+      "size": 20,
+      "builtin": true
+    },
+    "plane_top": {
+      "id": "plane_top",
+      "kind": "plane",
+      "name": "TOP",
+      "origin": [
+        0,
+        0,
+        0
+      ],
+      "dir": [
+        0,
+        0,
+        1
+      ],
+      "xDir": [
+        1,
+        0,
+        0
+      ],
+      "size": 6,
+      "builtin": true
+    },
+    "plane_front": {
+      "id": "plane_front",
+      "kind": "plane",
+      "name": "FRONT",
+      "origin": [
+        0,
+        0,
+        0
+      ],
+      "dir": [
+        0,
+        1,
+        0
+      ],
+      "xDir": [
+        1,
+        0,
+        0
+      ],
+      "size": 6,
+      "builtin": true
+    },
+    "plane_right": {
+      "id": "plane_right",
+      "kind": "plane",
+      "name": "RIGHT",
+      "origin": [
+        0,
+        0,
+        0
+      ],
+      "dir": [
+        1,
+        0,
+        0
+      ],
+      "xDir": [
+        0,
+        1,
+        0
+      ],
+      "size": 6,
+      "builtin": true
+    }
+  },
+  "drivers": [
+    {
+      "id": "drv_5",
+      "kind": "angle",
+      "linkId": "link_1",
+      "pivotId": "p_2",
+      "tipId": "p_3",
+      "axis": [
+        0,
+        0,
+        1
+      ],
+      "ref": [
+        1,
+        0,
+        0
+      ],
+      "value": 33.690067525979785
+    },
+    {
+      "id": "drv_6",
+      "kind": "angle",
+      "linkId": "link_1",
+      "pivotId": "p_2",
+      "tipId": "p_3",
+      "axis": [
+        0,
+        1,
+        0
+      ],
+      "ref": [
+        1,
+        0,
+        0
+      ],
+      "value": -38.65980825409009
+    }
+  ],
+  "targets": [],
+  "settings": {
+    "poseCount": 16,
+    "softAssumptions": true,
+    "sketchPlaneId": "plane_top",
+    "displayPointIds": [
+      "p_3"
+    ],
+    "defaultJoint": "revolute",
+    "helperOffset": 1
+  },
+  "nextId": 7
+}

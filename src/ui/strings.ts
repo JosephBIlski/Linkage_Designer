@@ -1,0 +1,281 @@
+/**
+ * ALL user-visible text lives in this file so wording can be edited in one place.
+ * Keys are grouped by UI area. Keep values short; tooltips may be longer.
+ */
+
+export const APP = {
+  title: 'Linkage Designer',
+  subtitle: 'Inverse design of linkages & origami mechanisms — prototype',
+  untitled: 'Untitled mechanism',
+};
+
+export const MODES = {
+  construction: 'Construction',
+  simulation: 'Simulation',
+  preview: 'Preview',
+  tooltips: {
+    construction: 'Build the mechanism: links, joints, construction geometry, ground link.',
+    simulation: 'Inverse design: drag editing points along the output path; the mechanism adapts.',
+    preview: 'Animate the mechanism through the range of the selected driver.',
+  },
+};
+
+export const MENU = {
+  file: 'File',
+  newModel: 'New',
+  open: 'Open…',
+  save: 'Save (.linkage.json)',
+  exportCsv: 'Export output paths (CSV)',
+  exportObj: 'Export geometry (OBJ)',
+  exportPng: 'Export image (PNG)',
+  examples: 'Examples',
+  settings: 'Settings',
+  undo: 'Undo',
+  redo: 'Redo',
+  help: 'Help',
+  view: 'View',
+  viewTop: 'Top',
+  viewFront: 'Front',
+  viewRight: 'Right',
+  viewIso: 'Isometric',
+  viewFit: 'Zoom to fit',
+  viewOrtho: 'Orthographic',
+  viewPersp: 'Perspective',
+  confirmNew: 'Discard the current mechanism and start a new one?',
+  confirmLoad: 'Replace the current mechanism with the loaded file?',
+  loadError: 'Could not read the file: ',
+};
+
+export const EXAMPLES: Record<string, { label: string; description: string }> = {
+  fourBar: { label: 'Four-bar crank-rocker', description: 'Grashof four-bar with a triangular coupler; coupler point C traces a coupler curve.' },
+  sliderCrank: { label: 'Slider-crank', description: 'Crank, connecting rod and a slider on a prismatic joint to a construction axis.' },
+  sphericalPendulum: { label: 'Spherical pendulum', description: 'A bar on a spherical joint: output path is a sphere, design space is a ball.' },
+  miuraVertex: { label: 'Rigid origami vertex (Miura)', description: 'Four rigid panels around a degree-4 vertex; one folding degree of freedom driven by a crease angle.' },
+};
+
+export const TOOLS = {
+  select: { label: 'Select', hint: 'Click to select. Drag links or link ends to relocate them. Click a link end for its constraint pop-up.' },
+  bar: { label: 'Link', hint: 'Click the first point, then the second point. Click an existing link end to join to it. Or type a coordinate, "length<angle" or a length below.' },
+  polygon: { label: 'Polygon', hint: 'Click the centre, then a point on the circumcircle. Set the number of sides in the tool options.' },
+  prism: { label: 'Prism (3-D polygon)', hint: 'Click the centre, then a point on the circumcircle. Height and sides are set in the tool options.' },
+  cylinder: { label: 'Cylinder', hint: 'Click the start of the axis, then the end of the axis. Radius is set in the tool options.' },
+  cpoint: { label: 'Datum point', hint: 'Click to place a construction point (or type coordinates below).' },
+  caxis: { label: 'Datum axis', hint: 'Click two points to define a construction axis.' },
+  cplane: { label: 'Datum plane', hint: 'Click three points for a plane, or choose "Offset" in the tool options and click a base plane.' },
+  joint: { label: 'Joint', hint: 'Choose a joint type, click a feature on the first link, then a compatible feature on the second link (or construction geometry).' },
+  ground: { label: 'Ground', hint: 'Click a link to make it the ground (fixed) link.' },
+  driver: { label: 'Driver', hint: 'Click a link with a grounded pivot to drive its angle, or a revolute/prismatic joint to drive its fold angle / slide.' },
+  delete: { label: 'Delete', hint: 'Click an item to delete it (Del key deletes the selection).' },
+  cancel: 'Esc cancels the current tool.',
+};
+
+export const TOOL_OPTIONS = {
+  sides: 'Sides',
+  radius: 'Radius',
+  height: 'Height',
+  mode2d: 'Place on sketch plane (2-D)',
+  planeMode: 'Plane definition',
+  planeThree: 'Through 3 points',
+  planeOffset: 'Offset from a plane',
+  offset: 'Offset',
+  jointType: 'Joint type',
+  pitch: 'Pitch (per revolution)',
+  snapGrid: 'Snap to grid',
+  gridStep: 'Grid step',
+  lengthLock: 'Length',
+};
+
+export const JOINTS: Record<string, { label: string; short: string; dof: string; description: string }> = {
+  spherical: { label: 'Spherical joint', short: 'S', dof: '3 DOF', description: 'Ball joint: two vertices coincide; all rotations free.' },
+  revolute: { label: 'Revolute joint', short: 'R', dof: '1 DOF', description: 'Pin / hinge: rotation about one axis (vertex–vertex pin, or edge–edge crease).' },
+  planar: { label: 'Planar constraint', short: 'E', dof: '3 DOF', description: 'A face, edge or vertex stays in a plane (another face or a construction plane).' },
+  prismatic: { label: 'Prismatic joint', short: 'P', dof: '1 DOF', description: 'Slider: translation along an axis without rotation.' },
+  cylindrical: { label: 'Cylindrical joint', short: 'C', dof: '2 DOF', description: 'Rotation about and translation along a common axis.' },
+  screw: { label: 'Screw joint', short: 'H', dof: '1 DOF', description: 'Helical: translation coupled to rotation by the pitch.' },
+};
+
+export const FEATURES = {
+  vertex: 'vertex',
+  edge: 'edge',
+  face: 'face',
+  axis: 'axis',
+  body: 'body',
+  construction: 'construction geometry',
+  of: 'of',
+};
+
+export const PANEL = {
+  properties: 'Properties',
+  nothingSelected: 'Nothing selected. Pick a tool on the left or select an item in the viewport.',
+  name: 'Name',
+  type: 'Type',
+  length: 'Length',
+  sides: 'Sides',
+  radius: 'Radius',
+  height: 'Height',
+  color: 'Colour (override)',
+  resetColor: 'Use default colour',
+  locked: 'Locked (no edits in any mode)',
+  ground: 'Ground link (fixed)',
+  flexible: 'Flexible (compliant) link',
+  stiffness: 'Relative stiffness',
+  showPath: 'Show output path & design space for',
+  deleteItem: 'Delete',
+  position: 'Position',
+  pointConstraints: 'Constraints at this point',
+  none: 'none',
+  jointAxis: 'Axis',
+  jointPitch: 'Pitch',
+  jointHinge: 'Compliant hinge (torsional spring)',
+  hingeRest: 'Rest angle (°)',
+  hingeStiffness: 'Hinge stiffness',
+  jointLinks: 'Connects',
+  changeType: 'Change joint type',
+  constructionOrigin: 'Origin',
+  constructionDir: 'Direction / normal',
+  builtin: 'Built-in datum (cannot be deleted)',
+  sketchPlane: 'Use as sketch plane',
+  isSketchPlane: 'Active sketch plane',
+  driverValue: 'Current value',
+  driverKind: 'Driver kind',
+  driverRemove: 'Remove driver',
+  editPoint: 'Editing point',
+  editPointPose: 'Pose',
+  editPointTarget: 'Target',
+  editPointFree: 'free (follows the design)',
+  editPointLocked: 'Locked',
+  editPointRelease: 'Release (remove constraint)',
+  constrainTo: 'Constrain to construction geometry',
+  constrainToNone: '— choose —',
+  mechanism: 'Mechanism',
+  links: 'links',
+  joints: 'joints',
+  pointsShown: 'points displayed',
+};
+
+export const SIM = {
+  panelTitle: 'Simulation & inverse design',
+  driver: 'Driver (input)',
+  noDriver: 'No driver defined. Use the Driver tool, or a default is chosen automatically.',
+  addDriver: 'Add driver',
+  range: 'Range',
+  crank: 'full rotation (crank)',
+  rocker: 'limited range (rocker)',
+  poseCount: 'Sampled poses (editing points)',
+  softAssumptions: 'Soft assumptions (preview under-specified designs)',
+  softAssumptionsHelp: 'When on, remaining design freedom is resolved by staying as close as possible to the current design, so a motion preview is always shown. When off, the preview is only shown once the design is fully specified.',
+  solidify: 'Solidify assumptions',
+  solidifyHelp: 'Commit the current link geometry as the design. Saving or exporting does this automatically.',
+  motionDOF: 'Mechanism DOF',
+  designDOF: 'Design DOF left',
+  editPointsConstrained: 'Editing points constrained',
+  fullySpecified: 'Design fully specified',
+  overConstrained: 'Targets cannot all be met (over-constrained or unreachable). Release an editing point.',
+  notGrounded: 'No ground link: set one with the Ground tool.',
+  underSpecifiedHidden: 'Design not fully specified. Enable soft assumptions to preview the motion.',
+  designSpaceDim: ['fully determined (path only)', 'curve (1-D)', 'surface (2-D)', 'volume (3-D)'],
+  designSpaceFor: 'Design space of',
+  showDesignSpace: 'Show design space',
+  showEditPoints: 'Show editing points',
+  showPath: 'Show output path',
+  clearTargets: 'Release all editing points',
+  rigidBodyModes: 'includes rigid-body modes of the floating assembly',
+  solveFailed: 'The mechanism cannot be assembled at this input value.',
+  timing: 'Timing: prescribed (each editing point keeps its input value)',
+};
+
+export const PREVIEW = {
+  panelTitle: 'Motion preview',
+  play: 'Play',
+  pause: 'Pause',
+  speed: 'Speed',
+  value: 'Input value',
+  trace: 'Trace displayed points',
+  range: 'Range',
+};
+
+export const STATUS = {
+  ready: 'Ready',
+  dof: 'DOF',
+  violated: 'Constraints violated',
+  coordPlaceholder: 'x,y[,z]  |  @dx,dy  |  length<angle  |  length',
+  coordHelp: 'Type a coordinate and press Enter while placing points.',
+  snapped: 'snapped to',
+  pose: 'pose',
+  solving: 'solving…',
+  dragHint: 'Drag the editing point. Shift: free direction. Esc: cancel.',
+  groundSet: 'Ground link set',
+  driverSet: 'Driver added',
+  jointCreated: 'Joint created',
+  jointIncompatible: 'These features cannot be connected with this joint type.',
+  jointSameLink: 'Pick a feature on a different link.',
+  pickSecondFeature: 'Now pick a compatible feature on another link or construction geometry.',
+  linkLocked: 'This link is locked.',
+  nothingToUndo: 'Nothing to undo.',
+};
+
+export const POPUP = {
+  constraintTitle: 'Constraint at this link end',
+  removeConstraint: 'Remove constraint',
+  addConstraint: 'Add constraint',
+  changeConstraint: 'Change constraint type',
+  noConstraint: 'No constraint',
+  lockLink: 'Lock link',
+  unlockLink: 'Unlock link',
+};
+
+export const SETTINGS = {
+  title: 'Settings',
+  colors: 'Colours',
+  geometry: 'Default geometry colour',
+  ground: 'Ground link colour',
+  construction: 'Construction geometry colour',
+  designSpace: 'Design space',
+  designSpaceOpacity: 'Design space opacity',
+  outputPath: 'Output path',
+  editPointFree: 'Editing point (unconstrained)',
+  editPointConstrained: 'Editing point (constrained)',
+  background: 'Viewport background',
+  gridMajor: 'Grid lines (major)',
+  gridMinor: 'Grid lines (minor)',
+  selection: 'Selection highlight',
+  display: 'Display',
+  showLabels: 'Show labels',
+  showConstruction: 'Show construction geometry',
+  showHelpers: 'Show hidden helper points (debug)',
+  gridSnap: 'Snap to grid',
+  gridStep: 'Grid step',
+  resetDefaults: 'Reset to defaults',
+  close: 'Close',
+  hue: 'Hue',
+  whiteness: 'Whiteness',
+  blackness: 'Blackness',
+  hex: 'HEX',
+  helperOffset: 'Joint helper offset',
+};
+
+export const HELP = {
+  title: 'Quick help',
+  lines: [
+    'Right-drag: orbit. Middle-drag (or Shift+right-drag): pan. Wheel: zoom.',
+    'Link tool: click two points; click an existing link end to join with a pin (default joint type is set in the tool options).',
+    'Select tool: drag a link to relocate it (joined links follow). Drag a link end to change its length. Click an end for the constraint pop-up.',
+    'Ground tool: click a link to fix it. The DOF readout updates live.',
+    'Simulation mode: pick which points to display (Properties → Show output path). Drag the green editing points; the mechanism adapts. Constrained points turn red; lock them in Properties.',
+    'Preview mode: play the motion through the driver range.',
+    'Keyboard: Esc cancel, Del delete, Ctrl+Z / Ctrl+Y undo / redo, 1 select, 2 link, 3 polygon, G ground, J joint, F zoom to fit.',
+  ],
+};
+
+export const LINK_NAMES: Record<string, string> = {
+  bar: 'Link',
+  polygon: 'Polygon',
+  prism: 'Prism',
+  cylinder: 'Cylinder',
+};
+
+export const CONSTRUCTION_NAMES: Record<string, string> = {
+  point: 'PNT',
+  axis: 'AXIS',
+  plane: 'DTM',
+};

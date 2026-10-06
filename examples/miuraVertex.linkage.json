@@ -1,0 +1,707 @@
+{
+  "version": 1,
+  "points": {
+    "p_2": {
+      "id": "p_2",
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "linkId": "link_1",
+      "role": "vertex",
+      "name": "V0"
+    },
+    "p_3": {
+      "id": "p_3",
+      "pos": [
+        2,
+        0,
+        0
+      ],
+      "linkId": "link_1",
+      "role": "vertex",
+      "name": "V1"
+    },
+    "p_4": {
+      "id": "p_4",
+      "pos": [
+        3,
+        1.7320508075688772,
+        0
+      ],
+      "linkId": "link_1",
+      "role": "vertex",
+      "name": "V2"
+    },
+    "p_5": {
+      "id": "p_5",
+      "pos": [
+        1.0000000000000002,
+        1.7320508075688772,
+        0
+      ],
+      "linkId": "link_1",
+      "role": "vertex",
+      "name": "V3"
+    },
+    "p_7": {
+      "id": "p_7",
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "linkId": "link_6",
+      "role": "vertex",
+      "name": "V0"
+    },
+    "p_8": {
+      "id": "p_8",
+      "pos": [
+        1.0000000000000002,
+        1.7320508075688772,
+        0
+      ],
+      "linkId": "link_6",
+      "role": "vertex",
+      "name": "V1"
+    },
+    "p_9": {
+      "id": "p_9",
+      "pos": [
+        -0.9702820761715583,
+        1.7148931562467693,
+        -0.34306581776417133
+      ],
+      "linkId": "link_6",
+      "role": "vertex",
+      "name": "V2"
+    },
+    "p_10": {
+      "id": "p_10",
+      "pos": [
+        -1.9702820759033928,
+        -0.017157652810270235,
+        -0.3430658175546411
+      ],
+      "linkId": "link_6",
+      "role": "vertex",
+      "name": "V3"
+    },
+    "p_12": {
+      "id": "p_12",
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "linkId": "link_11",
+      "role": "vertex",
+      "name": "V0"
+    },
+    "p_13": {
+      "id": "p_13",
+      "pos": [
+        -1.9702820759033928,
+        -0.017157652810270235,
+        -0.3430658175546411
+      ],
+      "linkId": "link_11",
+      "role": "vertex",
+      "name": "V1"
+    },
+    "p_14": {
+      "id": "p_14",
+      "pos": [
+        -2.9702820781624806,
+        -1.7492084590811747,
+        -0.34306579954602784
+      ],
+      "linkId": "link_11",
+      "role": "vertex",
+      "name": "V2"
+    },
+    "p_15": {
+      "id": "p_15",
+      "pos": [
+        -1.0000000011405008,
+        -1.7320508065843807,
+        1.8223208558820673e-8
+      ],
+      "linkId": "link_11",
+      "role": "vertex",
+      "name": "V3"
+    },
+    "p_17": {
+      "id": "p_17",
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "linkId": "link_16",
+      "role": "vertex",
+      "name": "V0"
+    },
+    "p_18": {
+      "id": "p_18",
+      "pos": [
+        -1.0000000011405008,
+        -1.7320508065843807,
+        1.8223208558820673e-8
+      ],
+      "linkId": "link_16",
+      "role": "vertex",
+      "name": "V1"
+    },
+    "p_19": {
+      "id": "p_19",
+      "pos": [
+        0.9999999988582954,
+        -1.7320508082313772,
+        1.8235558692680797e-8
+      ],
+      "linkId": "link_16",
+      "role": "vertex",
+      "name": "V2"
+    },
+    "p_20": {
+      "id": "p_20",
+      "pos": [
+        2,
+        0,
+        0
+      ],
+      "linkId": "link_16",
+      "role": "vertex",
+      "name": "V3"
+    }
+  },
+  "links": {
+    "link_1": {
+      "id": "link_1",
+      "kind": "polygon",
+      "name": "Panel 1",
+      "pointIds": [
+        "p_2",
+        "p_3",
+        "p_4",
+        "p_5"
+      ],
+      "helperIds": [],
+      "params": {
+        "sides": 4
+      },
+      "rigidity": [
+        {
+          "kind": "dist",
+          "a": "p_2",
+          "b": "p_3",
+          "length": 2
+        },
+        {
+          "kind": "dist",
+          "a": "p_2",
+          "b": "p_4",
+          "length": 3.4641016151377544
+        },
+        {
+          "kind": "dist",
+          "a": "p_3",
+          "b": "p_4",
+          "length": 2
+        },
+        {
+          "kind": "dist",
+          "a": "p_5",
+          "b": "p_2",
+          "length": 2
+        },
+        {
+          "kind": "dist",
+          "a": "p_5",
+          "b": "p_3",
+          "length": 1.9999999999999998
+        },
+        {
+          "kind": "coplanar",
+          "a": "p_2",
+          "b": "p_3",
+          "c": "p_4",
+          "p": "p_5"
+        }
+      ],
+      "locked": false,
+      "ground": true,
+      "flexible": false,
+      "stiffness": 0.5
+    },
+    "link_6": {
+      "id": "link_6",
+      "kind": "polygon",
+      "name": "Panel 2",
+      "pointIds": [
+        "p_7",
+        "p_8",
+        "p_9",
+        "p_10"
+      ],
+      "helperIds": [],
+      "params": {
+        "sides": 4
+      },
+      "rigidity": [
+        {
+          "kind": "dist",
+          "a": "p_7",
+          "b": "p_8",
+          "length": 2
+        },
+        {
+          "kind": "dist",
+          "a": "p_7",
+          "b": "p_10",
+          "length": 1.9999999997126439
+        },
+        {
+          "kind": "dist",
+          "a": "p_8",
+          "b": "p_10",
+          "length": 3.4641016156385183
+        },
+        {
+          "kind": "dist",
+          "a": "p_9",
+          "b": "p_7",
+          "length": 1.999999999999999
+        },
+        {
+          "kind": "dist",
+          "a": "p_9",
+          "b": "p_8",
+          "length": 1.9999999999999993
+        },
+        {
+          "kind": "coplanar",
+          "a": "p_7",
+          "b": "p_8",
+          "c": "p_10",
+          "p": "p_9"
+        }
+      ],
+      "locked": false,
+      "ground": false,
+      "flexible": false,
+      "stiffness": 0.5
+    },
+    "link_11": {
+      "id": "link_11",
+      "kind": "polygon",
+      "name": "Panel 3",
+      "pointIds": [
+        "p_12",
+        "p_13",
+        "p_14",
+        "p_15"
+      ],
+      "helperIds": [],
+      "params": {
+        "sides": 4
+      },
+      "rigidity": [
+        {
+          "kind": "dist",
+          "a": "p_12",
+          "b": "p_13",
+          "length": 1.9999999997126439
+        },
+        {
+          "kind": "dist",
+          "a": "p_12",
+          "b": "p_14",
+          "length": 3.4641016151366744
+        },
+        {
+          "kind": "dist",
+          "a": "p_13",
+          "b": "p_14",
+          "length": 2.0000000000054663
+        },
+        {
+          "kind": "dist",
+          "a": "p_15",
+          "b": "p_12",
+          "length": 1.9999999997176516
+        },
+        {
+          "kind": "dist",
+          "a": "p_15",
+          "b": "p_13",
+          "length": 2.000000000286363
+        },
+        {
+          "kind": "coplanar",
+          "a": "p_12",
+          "b": "p_13",
+          "c": "p_14",
+          "p": "p_15"
+        }
+      ],
+      "locked": false,
+      "ground": false,
+      "flexible": false,
+      "stiffness": 0.5
+    },
+    "link_16": {
+      "id": "link_16",
+      "kind": "polygon",
+      "name": "Panel 4",
+      "pointIds": [
+        "p_17",
+        "p_18",
+        "p_19",
+        "p_20"
+      ],
+      "helperIds": [],
+      "params": {
+        "sides": 4
+      },
+      "rigidity": [
+        {
+          "kind": "dist",
+          "a": "p_17",
+          "b": "p_18",
+          "length": 1.9999999997176516
+        },
+        {
+          "kind": "dist",
+          "a": "p_17",
+          "b": "p_19",
+          "length": 2.0000000000028897
+        },
+        {
+          "kind": "dist",
+          "a": "p_18",
+          "b": "p_19",
+          "length": 1.999999999998796
+        },
+        {
+          "kind": "dist",
+          "a": "p_20",
+          "b": "p_17",
+          "length": 2
+        },
+        {
+          "kind": "dist",
+          "a": "p_20",
+          "b": "p_18",
+          "length": 3.464101615633209
+        },
+        {
+          "kind": "coplanar",
+          "a": "p_17",
+          "b": "p_18",
+          "c": "p_19",
+          "p": "p_20"
+        }
+      ],
+      "locked": false,
+      "ground": false,
+      "flexible": false,
+      "stiffness": 0.5
+    }
+  },
+  "joints": {
+    "joint_21": {
+      "id": "joint_21",
+      "type": "revolute",
+      "a": {
+        "linkId": "link_1",
+        "kind": "edge",
+        "pointIds": [
+          "p_2",
+          "p_5"
+        ]
+      },
+      "b": {
+        "linkId": "link_6",
+        "kind": "edge",
+        "pointIds": [
+          "p_7",
+          "p_8"
+        ]
+      },
+      "axis": [
+        0.5000000000000001,
+        0.8660254037844386,
+        0
+      ],
+      "pairs": [
+        [
+          "p_2",
+          "p_7"
+        ],
+        [
+          "p_5",
+          "p_8"
+        ]
+      ]
+    },
+    "joint_22": {
+      "id": "joint_22",
+      "type": "revolute",
+      "a": {
+        "linkId": "link_6",
+        "kind": "edge",
+        "pointIds": [
+          "p_7",
+          "p_10"
+        ]
+      },
+      "b": {
+        "linkId": "link_11",
+        "kind": "edge",
+        "pointIds": [
+          "p_12",
+          "p_13"
+        ]
+      },
+      "axis": [
+        -1,
+        1.2246467991473532e-16,
+        0
+      ],
+      "pairs": [
+        [
+          "p_7",
+          "p_12"
+        ],
+        [
+          "p_10",
+          "p_13"
+        ]
+      ]
+    },
+    "joint_23": {
+      "id": "joint_23",
+      "type": "revolute",
+      "a": {
+        "linkId": "link_11",
+        "kind": "edge",
+        "pointIds": [
+          "p_12",
+          "p_15"
+        ]
+      },
+      "b": {
+        "linkId": "link_16",
+        "kind": "edge",
+        "pointIds": [
+          "p_17",
+          "p_18"
+        ]
+      },
+      "axis": [
+        -0.5000000000000004,
+        -0.8660254037844384,
+        0
+      ],
+      "pairs": [
+        [
+          "p_12",
+          "p_17"
+        ],
+        [
+          "p_15",
+          "p_18"
+        ]
+      ]
+    },
+    "joint_24": {
+      "id": "joint_24",
+      "type": "revolute",
+      "a": {
+        "linkId": "link_16",
+        "kind": "edge",
+        "pointIds": [
+          "p_17",
+          "p_20"
+        ]
+      },
+      "b": {
+        "linkId": "link_1",
+        "kind": "edge",
+        "pointIds": [
+          "p_2",
+          "p_3"
+        ]
+      },
+      "axis": [
+        1,
+        0,
+        0
+      ],
+      "pairs": [
+        [
+          "p_17",
+          "p_2"
+        ],
+        [
+          "p_20",
+          "p_3"
+        ]
+      ]
+    }
+  },
+  "construction": {
+    "point_origin": {
+      "id": "point_origin",
+      "kind": "point",
+      "name": "ORIGIN",
+      "origin": [
+        0,
+        0,
+        0
+      ],
+      "builtin": true
+    },
+    "axis_x": {
+      "id": "axis_x",
+      "kind": "axis",
+      "name": "X",
+      "origin": [
+        0,
+        0,
+        0
+      ],
+      "dir": [
+        1,
+        0,
+        0
+      ],
+      "size": 20,
+      "builtin": true
+    },
+    "axis_y": {
+      "id": "axis_y",
+      "kind": "axis",
+      "name": "Y",
+      "origin": [
+        0,
+        0,
+        0
+      ],
+      "dir": [
+        0,
+        1,
+        0
+      ],
+      "size": 20,
+      "builtin": true
+    },
+    "axis_z": {
+      "id": "axis_z",
+      "kind": "axis",
+      "name": "Z",
+      "origin": [
+        0,
+        0,
+        0
+      ],
+      "dir": [
+        0,
+        0,
+        1
+      ],
+      "size": 20,
+      "builtin": true
+    },
+    "plane_top": {
+      "id": "plane_top",
+      "kind": "plane",
+      "name": "TOP",
+      "origin": [
+        0,
+        0,
+        0
+      ],
+      "dir": [
+        0,
+        0,
+        1
+      ],
+      "xDir": [
+        1,
+        0,
+        0
+      ],
+      "size": 6,
+      "builtin": true
+    },
+    "plane_front": {
+      "id": "plane_front",
+      "kind": "plane",
+      "name": "FRONT",
+      "origin": [
+        0,
+        0,
+        0
+      ],
+      "dir": [
+        0,
+        1,
+        0
+      ],
+      "xDir": [
+        1,
+        0,
+        0
+      ],
+      "size": 6,
+      "builtin": true
+    },
+    "plane_right": {
+      "id": "plane_right",
+      "kind": "plane",
+      "name": "RIGHT",
+      "origin": [
+        0,
+        0,
+        0
+      ],
+      "dir": [
+        1,
+        0,
+        0
+      ],
+      "xDir": [
+        0,
+        1,
+        0
+      ],
+      "size": 6,
+      "builtin": true
+    }
+  },
+  "drivers": [
+    {
+      "id": "drv_25",
+      "kind": "fold",
+      "jointId": "joint_21",
+      "value": 168.57592961104598
+    }
+  ],
+  "targets": [],
+  "settings": {
+    "poseCount": 16,
+    "softAssumptions": true,
+    "sketchPlaneId": "plane_top",
+    "displayPointIds": [
+      "p_14"
+    ],
+    "defaultJoint": "revolute",
+    "helperOffset": 1
+  },
+  "nextId": 26
+}
