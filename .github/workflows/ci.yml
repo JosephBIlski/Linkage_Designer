@@ -4,6 +4,7 @@ on:
   push:
     branches: ['**']
   pull_request:
+  workflow_dispatch:
 
 jobs:
   build-test:
@@ -23,9 +24,10 @@ jobs:
           name: dist
           path: dist
 
-  # Optional: publish the built app to GitHub Pages (enable Pages → "GitHub Actions" in the repository settings).
+  # Publish the built app to GitHub Pages: automatically on main, or on demand (workflow_dispatch) from any branch.
+  # configure-pages enables Pages with the "GitHub Actions" source if it is not enabled yet.
   deploy-pages:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     needs: build-test
     runs-on: ubuntu-latest
     permissions:
@@ -35,6 +37,10 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
       - uses: actions/download-artifact@v4
         with:
           name: dist
