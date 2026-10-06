@@ -30,8 +30,8 @@ import {
   sketchNormal,
 } from '../core/model';
 import type { ConstructionRef, Feature, ID, Target, Vec3 } from '../core/types';
-import { moveVertex } from '../core/edit';
-import { duplicateLink, linearArray, mirrorAcrossPlane, polarArray } from '../core/patterns';
+import { autoJoinCoincident, fitSketchPlane, moveVertex, projectToPlane } from '../core/edit';
+import { duplicateLink, hasCollinearTriple, linearArray, mirrorAcrossPlane, polarArray } from '../core/patterns';
 import { addPolygonFromPoints } from '../core/model';
 import { isConstructionRef } from '../core/types';
 import { FEATURES, STATUS, TOOLS, CONSTRUCTION_NAMES } from '../ui/strings';
@@ -59,6 +59,9 @@ export function parseTypedPoint(text: string): TypedPoint | null {
   if (m) return { kind: 'length', L: Number(m[1]) };
   return null;
 }
+
+/** Weight of soft drag targets relative to hard constraints: joints stay satisfied while the body follows the pointer. */
+const DRAG_WEIGHT = 0.05;
 
 interface PlacedPoint {
   pos: Vec3;
@@ -338,7 +341,7 @@ export class ToolManager {
 
   private sketchTool(ev: ViewportPointerEvent, forced?: PlacedPoint): void {
     const app = this.app;
-    const placed = forced ?? this.place(ev, false);
+    const placed = forced ?? this.place(ev, true);
     if (!placed) return;
     // clicking near the first vertex closes the polygon
     if (this.points.length >= 3 && !forced) {
@@ -348,14 +351,28 @@ export class ToolManager {
         return;
       }
     }
-    // project onto the sketch plane so the polygon is planar
+    // snapped vertices keep their exact (possibly 3-D) position: they define the polygon's plane when
+    // the sketch is closed; free vertices are placed on the sketch plane and projected onto that plane later
     const pl = this.sketchPlane();
-    const pos = sub(placed.pos, scale(pl.n, dot(sub(placed.pos, pl.o), pl.n)));
-    if (dist(pos, placed.pos) > 1e-6) app.setStatus(STATUS.sketchNotPlanar);
+    const snapped = !!(placed.snappedPointId || placed.snappedConstructionId);
+    const pos = snapped ? placed.pos : projectToPlane(placed.pos, pl.o, pl.n);
     const last = this.points[this.points.length - 1];
     if (last && dist(last.pos, pos) < 1e-9) return;
-    this.points.push({ pos });
+    this.points.push({ pos, snappedPointId: placed.snappedPointId, snappedConstructionId: placed.snappedConstructionId });
     app.setHint(TOOLS.sketch.hint);
+  }
+
+  /** True while the sketch tool has vertices that Backspace can remove. */
+  popSketchSupported(): boolean {
+    return this.app.tool === 'sketch' && this.points.length > 0;
+  }
+
+  /** Backspace while sketching removes the last vertex. Returns false when nothing was removed. */
+  popSketchPoint(): boolean {
+    if (this.app.tool !== 'sketch' || this.points.length === 0) return false;
+    this.points.pop();
+    if (this.points.length === 0) this.app.setOverlay({});
+    return true;
   }
 
   /** Close the sketched polygon (Enter / double-click / click on the first vertex). */
@@ -366,11 +383,27 @@ export class ToolManager {
       app.setStatus(STATUS.sketchNeedsThree);
       return;
     }
+    const pl = this.sketchPlane();
+    const fit = fitSketchPlane(this.points.map((p) => p.pos), this.points.map((p) => !!(p.snappedPointId || p.snappedConstructionId)), pl);
+    const pts = this.points.map((p) => (p.snappedPointId || p.snappedConstructionId ? p.pos : projectToPlane(p.pos, fit.origin, fit.normal)));
+    if (hasCollinearTriple(pts)) {
+      app.setStatus(STATUS.sketchDegenerate);
+      return;
+    }
+    if (!fit.onSketchPlane) app.setStatus(STATUS.sketchOffPlane);
     const m = app.model;
     app.beginChange();
-    const link = addPolygonFromPoints(m, this.points.map((p) => p.pos), { name: app.nextLinkName('polygon'), onPlaneId: m.settings.sketchPlaneId });
+    const link = addPolygonFromPoints(m, pts, { name: app.nextLinkName('polygon'), onPlaneId: fit.onSketchPlane ? m.settings.sketchPlaneId : null });
+    // vertices snapped onto existing geometry are joined: shared edges become creases, single vertices get pins
+    const snapped = link.pointIds.filter((_, i) => this.points[i].snappedPointId);
+    const joints = snapped.length ? autoJoinCoincident(m, link, snapped, { defaultJoint: m.settings.defaultJoint, axis: sketchNormal(m) }) : [];
+    for (let i = 0; i < this.points.length; i++) {
+      const cid = this.points[i].snappedConstructionId;
+      if (cid && m.construction[cid]?.kind === 'point') addJoint(m, 'spherical', { linkId: link.id, kind: 'vertex', pointIds: [link.pointIds[i]] }, { constructionId: cid });
+    }
     app.select({ type: 'link', id: link.id });
     app.endChange();
+    if (joints.length) app.setStatus(`${STATUS.jointCreated} (${joints.length})`);
     this.points = [];
     app.setOverlay({});
   }
@@ -399,9 +432,9 @@ export class ToolManager {
     if (!placed) return;
     const joinTo = placed.snappedPointId && placed.snappedPointId !== this.editSource.pointId && m.points[placed.snappedPointId]?.linkId !== this.editSource.linkId ? placed.snappedPointId : undefined;
     app.beginChange();
-    const res = moveVertex(m, this.editSource.pointId, placed.pos, joinTo);
-    app.endChange();
-    app.setStatus(res.ok ? STATUS.editDone + (res.joinedTo ? ` · ${STATUS.jointCreated}` : '') : STATUS.violated);
+    const res = moveVertex(m, this.editSource.pointId, placed.pos, { joinTo });
+    app.endChange({ skipUndo: !res.ok });
+    app.setStatus(res.ok ? STATUS.editDone + (res.joints.length ? ` · ${STATUS.jointCreated} (${res.joints.length})` : '') : res.reason === 'locked' ? STATUS.linkLocked : STATUS.editUnreachable);
     app.select({ type: 'vertex', id: this.editSource.linkId, pointId: this.editSource.pointId });
     this.editSource = null;
     app.setOverlay({});
@@ -816,8 +849,18 @@ export class ToolManager {
       this.drag = { kind: 'link', linkId: pick.linkId, grab: pick.point, start, plane: this.dragPlane(pick.linkId, pick.point), moved: false };
       return;
     }
+    if (pick.type === 'construction') app.setStatus(STATUS.dragNothing);
     this.drag = { kind: 'none' };
     void vp;
+  }
+
+  /** Pointer position in the drag plane; near edge-on views fall back to the view plane, keeping the body in its sketch plane. */
+  private dragPointer(ev: ViewportPointerEvent, plane: { o: Vec3; n: Vec3 }): { pos: Vec3; edgeOn: boolean } | null {
+    const vp = this.app.viewport;
+    const n = normalize(plane.n);
+    const edgeOn = Math.abs(dot(n, vp.viewDirection())) < 0.15;
+    const pos = edgeOn ? vp.projectToViewPlane(ev.clientX, ev.clientY, plane.o) : (vp.projectToPlane(ev.clientX, ev.clientY, plane.o, plane.n) ?? vp.projectToViewPlane(ev.clientX, ev.clientY, plane.o));
+    return pos ? { pos, edgeOn } : null;
   }
 
   /** Plane in which a link / point is dragged: the sketch plane for planar links, else the view plane. */
@@ -846,11 +889,17 @@ export class ToolManager {
     }
     const d = this.drag as DragState;
     if (d.kind === 'point') {
-      const pos = vp.projectToPlane(ev.clientX, ev.clientY, d.plane.o, d.plane.n) ?? vp.projectToViewPlane(ev.clientX, ev.clientY, d.plane.o);
-      if (!pos) return;
+      const dp = this.dragPointer(ev, d.plane);
+      if (!dp) return;
+      let pos = dp.pos;
+      if (dp.edgeOn) {
+        const n = normalize(d.plane.n);
+        const p0 = m.points[d.pointId].pos;
+        pos = sub(pos, scale(n, dot(sub(pos, p0), n)));
+      }
       const target = this.gridSnap(ev.pick?.type === 'vertex' && ev.pick.pointId !== d.pointId && ev.pick.pointId ? m.points[ev.pick.pointId].pos : pos);
       const link = m.links[d.linkId];
-      const res = solveSketch(m, { dragTargets: [{ pointId: d.pointId, pos: target, weight: 1 }], freePointIds: new Set([d.pointId]), allowGroundMove: link.ground, maxIter: 25 });
+      const res = solveSketch(m, { dragTargets: [{ pointId: d.pointId, pos: target, weight: DRAG_WEIGHT }], freePointIds: new Set([d.pointId]), allowGroundMove: link.ground, maxIter: 30 });
       for (const [id, p] of res.positions) m.points[id].pos = p;
       d.moved = true;
       app.setOverlay({ snapPoint: ev.pick?.type === 'vertex' && ev.pick.pointId !== d.pointId ? target : null });
@@ -858,12 +907,17 @@ export class ToolManager {
       return;
     }
     if (d.kind === 'link') {
-      const pos = vp.projectToPlane(ev.clientX, ev.clientY, d.plane.o, d.plane.n) ?? vp.projectToViewPlane(ev.clientX, ev.clientY, d.plane.o);
-      if (!pos) return;
-      const delta = this.gridSnap(sub(pos, d.grab));
+      const dp = this.dragPointer(ev, d.plane);
+      if (!dp) return;
+      let delta = sub(dp.pos, d.grab);
+      if (dp.edgeOn) {
+        const n = normalize(d.plane.n);
+        delta = sub(delta, scale(n, dot(delta, n)));
+      }
+      delta = this.gridSnap(delta);
       const link = m.links[d.linkId];
-      const targets = link.pointIds.map((id) => ({ pointId: id, pos: add(d.start.get(id)!, delta), weight: 1 }));
-      const res = solveSketch(m, { dragTargets: targets, allowGroundMove: link.ground, maxIter: 25 });
+      const targets = link.pointIds.map((id) => ({ pointId: id, pos: add(d.start.get(id)!, delta), weight: DRAG_WEIGHT }));
+      const res = solveSketch(m, { dragTargets: targets, allowGroundMove: link.ground, maxIter: 30 });
       for (const [id, p] of res.positions) m.points[id].pos = p;
       d.moved = true;
       app.requestRender();

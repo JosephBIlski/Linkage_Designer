@@ -245,14 +245,17 @@ export class App {
     }
   }
 
+  /** Lightweight listener for status / hint text (avoids rebuilding panels on every pointer move). */
+  onStatus: (() => void) | null = null;
+
   setStatus(text: string): void {
     this.status = text;
-    this.notify();
+    this.onStatus?.();
   }
 
   setHint(text: string): void {
     this.hint = text;
-    this.notify();
+    this.onStatus?.();
   }
 
   setOverlay(o: OverlayView): void {

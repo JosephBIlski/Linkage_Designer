@@ -195,23 +195,45 @@ export function sweepDriver(m: Model, driverIndex: number, opts: SweepOptions = 
   const base = positionsFromModel(m);
   const v0 = d.value;
 
-  const tryPose = (value: number, init: Positions): Pose | null => {
+  const tryPose = (value: number, init: Positions, ref: Positions): Pose | null => {
     const vals = [...held];
     vals[driverIndex] = value;
     const res = solveForward(m, vals, init, { maxIter: 40, maxStep: jumpTol });
     if (!res.converged) return null;
     let maxMove = 0;
     for (const [id, p] of res.positions) {
-      const q = init.get(id);
+      const q = ref.get(id);
       if (q) maxMove = Math.max(maxMove, dist(p, q));
     }
     if (maxMove > jumpTol) return null;
     return { value, positions: res.positions, converged: true };
   };
 
+  /**
+   * Secant extrapolation of the last two poses: warm-starting from the
+   * extrapolated configuration keeps the sweep on its current branch when the
+   * motion passes through a bifurcation (e.g. the flat state of an origami
+   * vertex), instead of hopping onto a degenerate branch.
+   */
+  const extrapolate = (prev: Positions, prevprev: Positions | null, s: number, sPrev: number): Positions => {
+    if (!prevprev || Math.abs(sPrev) < 1e-12) return prev;
+    const f = s / sPrev;
+    const out: Positions = new Map();
+    for (const [id, p] of prev) {
+      const q = prevprev.get(id);
+      if (!q) {
+        out.set(id, p);
+        continue;
+      }
+      out.set(id, [p[0] + (p[0] - q[0]) * f, p[1] + (p[1] - q[1]) * f, p[2] + (p[2] - q[2]) * f]);
+    }
+    return out;
+  };
+
   const sweepDir = (dir: 1 | -1): { poses: Pose[]; closed: boolean } => {
     const poses: Pose[] = [];
     let prev: Pose = { value: v0, positions: base, converged: true };
+    let prevprev: Pose | null = null;
     let v = v0;
     let closed = false;
     for (let i = 0; i < maxSteps; i++) {
@@ -219,12 +241,14 @@ export function sweepDriver(m: Model, driverIndex: number, opts: SweepOptions = 
       let next: Pose | null = null;
       // bisection toward the limit when a step fails
       for (let h = 0; h < 5; h++) {
-        next = tryPose(v + s, prev.positions);
+        const init = extrapolate(prev.positions, prevprev?.positions ?? null, s, prevprev ? prev.value - prevprev.value : 0);
+        next = tryPose(v + s, init, prev.positions);
         if (next) break;
         s /= 2;
       }
       if (!next) break;
       poses.push(next);
+      prevprev = prev;
       prev = next;
       v = next.value;
       if (Math.abs(s) < step * 0.9) {

@@ -174,6 +174,18 @@ export class ModelRenderer {
     return m;
   }
 
+  /**
+   * Visible cylinder plus an invisible, wider pick proxy so thin bars and
+   * polygon edges are always at least ~8 px wide for picking at any zoom.
+   */
+  private pickableCylinder(group: THREE.Group, a: Vec3, b: Vec3, radius: number, mat: THREE.Material, pick?: Partial<PickResult>): void {
+    group.add(this.cylinder(a, b, radius, mat));
+    if (!pick) return;
+    const minR = this.vp.worldPerPixel(a) * 4;
+    const proxyMat = this.track(new THREE.MeshBasicMaterial({ visible: false }));
+    group.add(this.cylinder(a, b, Math.max(radius, minR), proxyMat, pick));
+  }
+
   private label(text: string, at: Vec3, cls = 'label'): void {
     const div = document.createElement('div');
     div.className = cls;
@@ -269,7 +281,7 @@ export class ModelRenderer {
 
       if (link.kind === 'bar') {
         const [a, b] = link.pointIds;
-        group.add(this.cylinder(P(a), P(b), r * (link.flexible ? 0.7 : 1), bodyMat, pickBase('edge', [a, b])));
+        this.pickableCylinder(group, P(a), P(b), r * (link.flexible ? 0.7 : 1), bodyMat, pickBase('edge', [a, b]));
       } else if (link.kind === 'polygon' || link.kind === 'prism') {
         const faces = linkFaces(model, link);
         faces.forEach((face, fi) => {
@@ -282,7 +294,7 @@ export class ModelRenderer {
           }
           group.add(mesh);
         });
-        for (const [a, b] of linkEdges(model, link)) group.add(this.cylinder(P(a), P(b), r * 0.55, edgeMat, pickBase('edge', [a, b])));
+        for (const [a, b] of linkEdges(model, link)) this.pickableCylinder(group, P(a), P(b), r * 0.55, edgeMat, pickBase('edge', [a, b]));
       } else if (link.kind === 'cylinder') {
         const [a, b] = link.pointIds;
         const radius = link.params.radius ?? 0.5;
@@ -358,6 +370,7 @@ export class ModelRenderer {
     for (const j of Object.values(model.joints)) {
       if (j.type === 'planar' && j.a.kind === 'body') continue; // sketch-plane constraints are implicit
       if (model.links[j.a.linkId]?.hidden) continue;
+      if (!isConstructionRefLocal(j.b) && model.links[j.b.linkId]?.hidden) continue;
       const pl = this.jointPlacement(model, j, state.positions);
       if (!pl) continue;
       const selected = this.isSelected(state, 'joint', j.id);
@@ -566,6 +579,10 @@ export class ModelRenderer {
       g.add(this.sphere(o.marker, r * 1.1, this.material(col, { flat: true })));
     }
   }
+}
+
+function isConstructionRefLocal(x: Joint['b']): x is { constructionId: ID } {
+  return (x as { constructionId?: ID }).constructionId !== undefined;
 }
 
 /** Triangulated (fan) geometry of a convex planar polygon. */

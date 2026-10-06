@@ -125,9 +125,13 @@ user, as well as their properties (such as constraints) edited after
 creation."
 
 - Dragging a link body translates it; all other links follow through their
-  joints (a constraint re-solve with the dragged points as soft targets).
-  Dragging the ground link moves the whole mechanism. Planar links drag in
-  their sketch plane, others in the view plane.
+  joints (a constraint re-solve with the dragged points as weak soft targets,
+  so joints stay satisfied during the drag). Dragging the ground link moves
+  the whole mechanism. Planar links drag in their sketch plane (in the view
+  plane when the sketch plane is seen edge-on), others in the view plane.
+- Picking is tolerant: bars and edges can be grabbed within about 10 px, and
+  datum planes / axes never steal a pick from model geometry. Clicking on
+  empty space or a datum with the Select tool explains what can be dragged.
 - Dragging a link **end** rubber-bands it: the link's own design distances
   touching that vertex are released, so its length / shape changes while all
   joints stay satisfied. Releasing the end on another link's vertex joins them
@@ -360,7 +364,9 @@ assumptions."
 - **Export**: output paths as CSV (point, pose index, input value, x, y, z),
   geometry of the current pose as OBJ, the viewport as PNG.
 - **Examples** menu: four-bar crank-rocker, slider-crank, spherical pendulum,
-  rigid-origami Miura vertex (`examples/*.linkage.json` are the same files).
+  rigid-origami Miura vertex with sector angles (α, α, π−α, π−α), created in
+  an exactly folded configuration so it folds on the generic branch
+  (`examples/*.linkage.json` are the same files).
 
 ## 13. Sketching and editing geometry (added in v0.2)
 
@@ -369,11 +375,21 @@ assumptions."
 - Tool **Sketch polygon** (`S`): click any sequence of vertices on the active
   sketch plane (points are projected onto the plane, so the polygon is always
   planar); a dashed preview follows the pointer. Close the polygon by clicking
-  the first vertex again, double-clicking, or pressing `Enter`. At least three
-  vertices are required. Coordinates can also be typed in the status bar.
+  the first vertex again, double-clicking, or pressing `Enter`; `Backspace`
+  removes the last vertex. At least three non-collinear vertices are
+  required. Coordinates can also be typed in the status bar.
+- **Snapping and joining**: vertices snapped onto existing link vertices are
+  joined when the polygon is closed. Two consecutive snapped vertices that
+  coincide with an edge of one existing link become a single edge–edge
+  revolute joint (a crease); an isolated snapped vertex gets the default joint
+  when both links share the sketch plane, otherwise a spherical joint. A
+  vertex snapped onto a datum point is pinned to it. This is how the last
+  panel of an origami vertex is "filled in": sketch it by clicking the
+  existing vertices.
 - **Extrude to prism** (Properties of a polygon): enter a height and press
-  *Extrude*. The polygon becomes a prism of that height along its normal
-  (negative = other side). The bottom face keeps its point ids so joints
+  *Extrude*. The polygon becomes a prism of that height along the normal of
+  its sketch plane (so the direction does not depend on the vertex winding;
+  negative = other side). Non-planar polygons cannot be extruded. The bottom face keeps its point ids so joints
   attached to the polygon's vertices / edges / face stay valid; the
   sketch-plane constraint is removed because the body is now 3-D. The prism's
   rigidity is rebuilt from the new positions (joint helper attachments kept).
@@ -384,13 +400,16 @@ assumptions."
   its destination: another link's vertex (the two are joined with the default
   joint type shown in the tool options), a datum point, any position on the
   sketch plane, or typed coordinates.
-- The vertex is released from its own link's shape constraints (distances and
-  the coplanarity constraint it is the subject of), every other constraint is
-  re-solved, and the link's rest geometry is rebuilt from the result. If the
-  destination lies off the link's sketch plane, that planar constraint is
-  removed first, so a flat panel can be lifted into 3-D (e.g. to close the
-  fourth panel of a degree-4 origami vertex whose other panels are already
-  folded). Locked links cannot be edited.
+- The vertex is first made a dependent point of its link's rigidity (so the
+  rest of the link keeps its shape), then released from its own shape
+  constraints, every other constraint is re-solved, and the link's rest
+  geometry is rebuilt from the result. If the destination lies off the link's
+  sketch plane, that planar constraint is removed first, so a flat panel can
+  be lifted into 3-D. If the destination cannot be reached (the vertex is
+  pinned to a datum point, or its joints forbid it) nothing changes and the
+  status bar says so. Coincident vertices are joined with the same rules as
+  the Sketch tool (shared edges become creases, replacing earlier pins).
+  Locked links cannot be edited.
 
 **Deviation / note:** moving one vertex of a quad off its plane makes a bent
 (non-planar) panel; the rebuilt rigidity then treats it as a rigid tetrahedral

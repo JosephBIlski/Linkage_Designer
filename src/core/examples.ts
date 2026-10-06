@@ -4,6 +4,7 @@
  */
 import { addAngleDriver, addBar, addConstructionAxis, addFoldDriver, addJoint, addPolygon, addPolygonFromPoints, createModel, setGround } from './model';
 import type { Feature, Model, Vec3 } from './types';
+import { add, cross, dist, dot, normalize, rotateAbout, scale } from './geometry';
 import { syncDriverValues } from './kinematics';
 
 const vtx = (linkId: string, pid: string): Feature => ({ linkId, kind: 'vertex', pointIds: [pid] });
@@ -91,12 +92,21 @@ export function sphericalPendulum(): Model {
 
 /**
  * Rigid-origami degree-4 vertex (Miura-ori unit): four quad panels around a
- * central vertex with sector angles (α, π−α, α, π−α). One degree of freedom.
+ * central vertex with sector angles (α, α, π−α, π−α). Creases 0 and 2 form
+ * one straight line, creases 1 and 3 are the "bent" pair; the vertex is
+ * developable and flat-foldable (Kawasaki: α + (π−α) = π) with one degree of
+ * freedom. NOTE: (α, π−α, α, π−α) would make BOTH crease pairs collinear (an
+ * "X" vertex) whose folding degenerates into two straight hinges.
+ *
+ * The model is created in an exactly folded configuration (fold angle
+ * `prefoldRad` at crease 0) so that the solver starts on the generic
+ * all-four-creases branch and not on the degenerate straight-hinge branch
+ * that a flat start would fall onto (see docs/DESIGN_DECISIONS.md §8).
  */
-export function origamiMiuraVertex(alphaDeg = 60): Model {
+export function origamiMiuraVertex(alphaDeg = 60, prefoldRad = 0.6): Model {
   const m = createModel();
   const a = (alphaDeg * Math.PI) / 180;
-  const sectors = [a, Math.PI - a, a, Math.PI - a];
+  const sectors = [a, a, Math.PI - a, Math.PI - a];
   const R = 2;
   const dirs: Vec3[] = [];
   let ang = 0;
@@ -122,24 +132,42 @@ export function origamiMiuraVertex(alphaDeg = 60): Model {
     const pb = panels[(i + 1) % 4];
     joints.push(addJoint(m, 'revolute', edge(pa.id, pa.pointIds[0], pa.pointIds[3]), edge(pb.id, pb.pointIds[0], pb.pointIds[1]))!);
   }
-  // pre-fold slightly so the solver starts off the flat (singular) state
-  prefoldMiura(m, panels.map((p) => p.pointIds), 0.35);
+  // Start on the generic folding branch: place every vertex at an exact rigidly folded configuration.
+  const folded = foldedVertexPositions(dirs, sectors, R, prefoldRad);
+  panels.forEach((p, i) => p.pointIds.forEach((pid, k) => (m.points[pid].pos = folded[i][k])));
   addFoldDriver(m, joints[0].id);
   m.settings.displayPointIds = [panels[2].pointIds[2]];
   syncDriverValues(m);
   return m;
 }
 
-/** Give the Miura vertex a small initial fold (z offsets on the far corners) so it is not flat. */
-function prefoldMiura(m: Model, panelPts: string[][], amount: number): void {
-  // lift alternate far corners up/down; the solver will project onto the rigid-folding manifold
-  panelPts.forEach((ids, i) => {
-    const far = m.points[ids[2]];
-    far.pos = [far.pos[0], far.pos[1], (i % 2 === 0 ? 1 : -1) * amount];
-  });
-  // ground panel stays flat
-  const g = panelPts[0];
-  m.points[g[2]].pos[2] = 0;
+/**
+ * Exact rigidly folded degree-4 vertex. Panel 0 (ground, between dirs[0] and
+ * dirs[1]) stays in z = 0; panel 1 is rotated about crease 0 (dirs[1]) by
+ * `rho`; crease 2 is the unit vector at sector angle sectors[2] from crease 1
+ * and sectors[3] from crease 3 (dirs[0]). Of the two cone intersections the
+ * one farthest from crease 2's flat direction dirs[3] is the generic branch;
+ * the other is the degenerate straight-hinge branch.
+ * Returns [panel0, panel1, panel2, panel3] vertex lists in the order [O, p0, far, p1].
+ */
+export function foldedVertexPositions(dirs: Vec3[], sectors: number[], R: number, rho: number): Vec3[][] {
+  const c0 = dirs[1];
+  const c3 = dirs[0];
+  const c1 = rotateAbout(dirs[2], c0, rho);
+  const uv = dot(c1, c3);
+  const cosA = Math.cos(sectors[2]);
+  const cosB = Math.cos(sectors[3]);
+  const det = 1 - uv * uv;
+  const ka = (cosA - uv * cosB) / det;
+  const kb = (cosB - uv * cosA) / det;
+  const inPlane = add(scale(c1, ka), scale(c3, kb));
+  const w = normalize(cross(c1, c3));
+  const h = Math.sqrt(Math.max(0, 1 - dot(inPlane, inPlane)));
+  const cand = [add(inPlane, scale(w, h)), add(inPlane, scale(w, -h))];
+  const c2 = dist(cand[0], dirs[3]) > dist(cand[1], dirs[3]) ? cand[0] : cand[1];
+  const O: Vec3 = [0, 0, 0];
+  const quad = (u: Vec3, v: Vec3): Vec3[] => [O, scale(u, R), scale(add(u, v), R), scale(v, R)];
+  return [quad(dirs[0], c0), quad(c0, c1), quad(c1, c2), quad(c2, c3)];
 }
 
 export const EXAMPLE_BUILDERS: Record<string, () => Model> = {

@@ -64,3 +64,35 @@ describe('patterning', () => {
     expect(computeMobility(m).dof).toBe(1);
   });
 });
+
+describe('extrusion orientation and planarity', () => {
+  it('extrudes clockwise and mirrored polygons toward the sketch-plane normal', () => {
+    const m = createModel();
+    const cw = addPolygonFromPoints(m, [[0, 0, 0], [0, 1, 0], [1, 1, 0], [1, 0, 0]], { onPlaneId: 'plane_top' }); // clockwise seen from +Z
+    expect(extrudePolygon(m, cw, 0.5)).toBe(true);
+    for (const id of cw.pointIds.slice(4)) expect(m.points[id].pos[2]).toBeCloseTo(0.5);
+    const ccw = addPolygonFromPoints(m, [[3, 0, 0], [4, 0, 0], [4, 1, 0], [3, 1, 0]], { onPlaneId: 'plane_top' });
+    const mirrored = duplicateLink(m, ccw, mirrorAcrossPlane([5, 0, 0], [1, 0, 0]), 'mirrored')!;
+    expect(extrudePolygon(m, mirrored, 0.5)).toBe(true);
+    for (const id of mirrored.pointIds.slice(4)) expect(m.points[id].pos[2]).toBeCloseTo(0.5);
+    expect(extrudePolygon(m, ccw, -0.5)).toBe(true);
+    for (const id of ccw.pointIds.slice(4)) expect(m.points[id].pos[2]).toBeCloseTo(-0.5);
+  });
+
+  it('refuses to extrude a non-planar polygon', () => {
+    const m = createModel();
+    const quad = addPolygonFromPoints(m, [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]]);
+    m.points[quad.pointIds[0]].pos = [0, 0, 0.4];
+    expect(extrudePolygon(m, quad, 0.5)).toBe(false);
+    expect(quad.kind).toBe('polygon');
+  });
+
+  it('keeps the FRONT sketch-plane constraint for in-plane copies only', () => {
+    const m = createModel();
+    const bar = addBar(m, [0, 0, 0], [1, 0, 1], { onPlaneId: 'plane_front' });
+    const inPlane = duplicateLink(m, bar, translation([1, 0, 0.5]), 'in')!;
+    const outOfPlane = duplicateLink(m, bar, translation([0, 1, 0]), 'out')!;
+    expect(bodyPlaneJoint(m, inPlane.id)).not.toBeNull();
+    expect(bodyPlaneJoint(m, outOfPlane.id)).toBeNull();
+  });
+});

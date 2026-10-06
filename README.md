@@ -21,7 +21,8 @@ npm install
 npm run dev        # http://localhost:5173
 npm test           # solver / kinematics / synthesis unit tests (vitest)
 npm run build      # type-check + production build into dist/
-node scripts/smoke.mjs   # headless-browser smoke test of the built app (needs Playwright's Chromium)
+node scripts/smoke.mjs            # headless-browser smoke test of the built app (needs Playwright's Chromium)
+node scripts/smoke-features.mjs   # same for the sketch / edit / pattern tools, model tree and the origami example
 ```
 
 Node 22 is assumed (`.nvmrc`). The built app is static and can be served from
@@ -31,8 +32,12 @@ any path (GitHub Pages workflow included in `.github/workflows/ci.yml`).
 
 1. **Construction mode.** Pick *Link* (`2`), click two points. Click an
    existing link end to join the new link to it with a pin (revolute). Or type
-   `3<45` in the coordinate box for a 3-unit link at 45°. Pick *Ground* (`G`)
-   and click a link to fix it. The DOF chip updates after every edit.
+   `3<45` in the coordinate box for a 3-unit link at 45°. *Sketch polygon*
+   (`S`) draws free polygons (snap onto existing vertices to join them;
+   shared edges become creases) and *Extrude* in Properties makes prisms.
+   *Edit points* (`E`) snaps vertices onto other geometry. `Ctrl+C`/`Ctrl+V`,
+   *Mirror* and *Pattern* duplicate links. Pick *Ground* (`G`) and click a
+   link to fix it. The DOF chip and the model tree update after every edit.
 2. Select a vertex and tick **Show output path & design space** in the
    Properties panel (the examples already do this).
 3. **Simulation mode.** The output path appears with green editing points and

@@ -177,8 +177,59 @@ damping dynamics.
   in `localStorage`. Defaults live in `src/ui/settings.ts`.
 - All strings live in `src/ui/strings.ts`.
 
-## 7. Known limitations (prototype)
+## 8. Lessons from testing (v0.2)
 
+**Degree-4 vertex example (Miura).** The first version used sector angles
+(α, π−α, α, π−α), which makes *both* crease pairs collinear: an "X" vertex,
+developable but not flat-foldable, whose rigid folding degenerates into two
+independent straight hinges. In addition the start configuration was only a
+z-nudge of the far corners projected back onto the constraint manifold, and
+the nearest configuration on that manifold is the degenerate straight-hinge
+branch (two creases stay flat while the other two act as one hinge), which
+is exactly the "one joint rotates in a circle" behaviour that was reported.
+Both were fixed: the sectors are now (α, α, π−α, π−α) (one straight pair,
+one bent pair, Kawasaki satisfied) and the example is created in an *exact*
+folded configuration computed in closed form (`foldedVertexPositions`), on
+the generic all-four-creases branch. A regression test checks that all four
+creases move, that opposite creases fold equally and that the Miura
+relation tan(ρ_bent/2) = tan(ρ_straight/2)/cos α holds.
+
+**Branch following in sweeps.** Any degree-4 vertex passes through the flat
+state, which is a bifurcation between the generic branch and the hinge
+branch. Warm-starting the next pose from the previous pose let the solver hop
+onto the hinge branch there. The sweep now warm-starts from the *secant
+extrapolation* of the last two poses (a standard predictor step in numerical
+continuation), which keeps it on the current branch; the branch-jump guard
+still compares the result against the previous pose.
+
+**Picking thin geometry.** Bars are drawn with a radius of about 1 % of the
+model size, which is one or two pixels at the default zoom, so an exact ray
+cast missed them and fell through to the datum planes; this made
+"unconstrained bodies cannot be dragged" look like a solver bug although the
+sketch solve was correct. Picking now (a) never lets datum geometry occlude
+model geometry, (b) samples a ring of rays around the pointer when the exact
+ray hits nothing, and (c) gives bars and polygon edges an invisible pick proxy
+at least ~8 px wide.
+
+**Drag weights.** Soft drag targets had the same weight as hard constraints,
+so jointed links visibly stretched while being dragged (the least-squares
+compromise violated joints until release). Drag targets now use a weight of
+0.05: joints stay satisfied to ≈1e-3 while a free body still follows the
+pointer exactly.
+
+**Editing vertices.** Moving a vertex that is part of its polygon's frame
+triangle used to tilt the plane of the other vertices; the Edit tool now
+re-builds the rigidity with the edited vertex as a dependent point first.
+Edits whose destination cannot be reached (e.g. a vertex pinned to a datum
+point) are rolled back instead of committing a violated pose. Coincident
+vertices are joined automatically, and two consecutive coincident vertices on
+a shared edge become one crease rather than two parallel pins (which would
+lock the panels, DOF 0).
+
+## 9. Known limitations (prototype)
+
+- Patterning copies one link at a time; joints between copies are not
+  replicated.
 - Dense linear algebra: systems beyond ~1000 variables (large origami
   patterns × many poses) will be slow; reduce `poseCount` or lock panels.
 - Design space is first-order (tangent) rather than the true reachable set.

@@ -3,8 +3,8 @@
  * polygon extrusion. All operate on a single link; joints are never copied
  * (see docs/SPEC.md §14 for the rationale).
  */
-import { add, cross, dot, len, normalize, rotateAbout, scale, sub } from './geometry';
-import { addCylinder, addJoint, addLinkFromPoints, bodyPlaneJoint, buildRigidity, linkShapePointIds, P, addPoint, removeJoint, rigidityTouches } from './model';
+import { add, cross, dot, len, neg, normalize, rotateAbout, scale, sub, triple } from './geometry';
+import { addCylinder, addJoint, addLinkFromPoints, bodyPlaneJoint, buildRigidity, linkShapePointIds, P, addPoint, removeJoint, rigidityTouches, sketchNormal } from './model';
 import type { ID, Link, Model, Vec3 } from './types';
 import { isConstructionRef } from './types';
 
@@ -89,14 +89,41 @@ export function polygonNormal(m: Model, link: Link): Vec3 | null {
 }
 
 /**
- * Extrude a planar polygon into a prism of the given height along its normal
- * (negative height extrudes the other way). The bottom face keeps its point
- * ids, so joints attached to the polygon stay valid; the sketch-plane
- * constraint is removed because the body is now three-dimensional.
+ * Polygon normal oriented like the polygon's sketch plane (or the active
+ * sketch plane) so that a positive extrusion always goes to the same side
+ * regardless of the vertex winding (mirrored or clockwise sketches).
+ */
+export function orientedPolygonNormal(m: Model, link: Link, prefer?: Vec3): Vec3 | null {
+  const n = polygonNormal(m, link);
+  if (!n) return null;
+  const bp = bodyPlaneJoint(m, link.id);
+  const planeDir = bp && isConstructionRef(bp.b) ? m.construction[bp.b.constructionId]?.dir : undefined;
+  const ref = prefer ?? planeDir ?? sketchNormal(m);
+  return dot(n, ref) < 0 ? neg(n) : n;
+}
+
+/** True when all vertices of the link lie in one plane (relative tolerance). */
+export function isPlanarPolygon(m: Model, link: Link, relTol = 1e-6): boolean {
+  const pts = link.pointIds.map((id) => P(m, id));
+  if (pts.length < 4) return true;
+  const n = polygonNormal(m, link);
+  if (!n) return false;
+  let scaleLen = 0;
+  for (const q of pts) scaleLen = Math.max(scaleLen, len(sub(q, pts[0])));
+  return pts.every((q) => Math.abs(dot(sub(q, pts[0]), n)) <= relTol * Math.max(scaleLen, 1e-9));
+}
+
+/**
+ * Extrude a planar polygon into a prism of the given height along its
+ * (sketch-plane oriented) normal; negative height extrudes the other way.
+ * The bottom face keeps its point ids, so joints attached to the polygon stay
+ * valid; the sketch-plane constraint is removed because the body is now
+ * three-dimensional. Returns false for non-planar polygons.
  */
 export function extrudePolygon(m: Model, link: Link, height: number): boolean {
   if (link.kind !== 'polygon' || link.pointIds.length < 3 || Math.abs(height) < 1e-9) return false;
-  const n = polygonNormal(m, link);
+  if (!isPlanarPolygon(m, link)) return false;
+  const n = orientedPolygonNormal(m, link);
   if (!n) return false;
   const bottom = [...link.pointIds];
   const top: ID[] = bottom.map((id, i) => addPoint(m, link.id, add(P(m, id), scale(n, height)), 'vertex', `V${i + bottom.length}`).id);
@@ -112,7 +139,17 @@ export function extrudePolygon(m: Model, link: Link, height: number): boolean {
   return true;
 }
 
-/** Signed area test used by the sketch tool: true when three points are (nearly) collinear. */
-export function collinear(a: Vec3, b: Vec3, c: Vec3, tol = 1e-9): boolean {
-  return len(cross(sub(b, a), sub(c, a))) < tol * Math.max(1, len(sub(b, a)) * len(sub(c, a)));
+/** True when three points are (nearly) collinear (used to reject degenerate sketches). */
+export function collinear(a: Vec3, b: Vec3, c: Vec3, tol = 1e-6): boolean {
+  return len(cross(sub(b, a), sub(c, a))) < tol * Math.max(1e-12, len(sub(b, a)) * len(sub(c, a)));
 }
+
+/** True when the closed polygon has a collinear consecutive triple (degenerate vertex). */
+export function hasCollinearTriple(pts: Vec3[]): boolean {
+  const n = pts.length;
+  if (n < 3) return true;
+  for (let i = 0; i < n; i++) if (collinear(pts[i], pts[(i + 1) % n], pts[(i + 2) % n])) return true;
+  return false;
+}
+
+export { triple };

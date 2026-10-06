@@ -50,7 +50,7 @@ export const EXAMPLES: Record<string, { label: string; description: string }> = 
   fourBar: { label: 'Four-bar crank-rocker', description: 'Grashof four-bar with a triangular coupler; coupler point C traces a coupler curve.' },
   sliderCrank: { label: 'Slider-crank', description: 'Crank, connecting rod and a slider on a prismatic joint to a construction axis.' },
   sphericalPendulum: { label: 'Spherical pendulum', description: 'A bar on a spherical joint: output path is a sphere, design space is a ball.' },
-  miuraVertex: { label: 'Rigid origami vertex (Miura)', description: 'Four rigid panels around a degree-4 vertex; one folding degree of freedom driven by a crease angle.' },
+  miuraVertex: { label: 'Rigid origami vertex (Miura)', description: 'Four rigid panels around a degree-4 Miura vertex (sector angles α, α, π−α, π−α); one folding degree of freedom driven by a crease angle.' },
 };
 
 export const TOOLS = {
@@ -244,8 +244,12 @@ export const STATUS = {
   pickSecondFeature: 'Now pick a compatible feature on another link or construction geometry.',
   linkLocked: 'This link is locked.',
   nothingToUndo: 'Nothing to undo.',
+  dragNothing: 'Nothing to drag here — grab a link body (bar, edge or face); zoom in (F) if the link is too thin to hit.',
   sketchNeedsThree: 'A polygon needs at least three vertices.',
   sketchNotPlanar: 'Vertices must lie on one plane; the point was projected onto the sketch plane.',
+  sketchOffPlane: 'The snapped vertices define a plane off the sketch plane; the polygon was placed on that plane (no 2-D constraint).',
+  sketchDegenerate: 'Three consecutive vertices are collinear; move or remove one (Backspace removes the last vertex).',
+  editUnreachable: 'The vertex cannot reach that position with its current joints. Remove a joint or pick a destination it can reach.',
   editPickTarget: 'Now click the destination (a vertex, a datum point) or type coordinates.',
   editDone: 'Vertex moved',
   mirrorPickPlane: 'Now click a datum plane to mirror across.',

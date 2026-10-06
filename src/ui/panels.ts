@@ -13,7 +13,7 @@ import {
   setGround,
 } from '../core/model';
 import { commitSketch, solveSketch } from '../core/kinematics';
-import type { Construction, ID, Joint, JointType, Link, Target } from '../core/types';
+import type { Construction, ID, Joint, JointType, Link, Target, Vec3 } from '../core/types';
 import { isConstructionRef } from '../core/types';
 import { createColorPicker } from './colorPicker';
 import { icon } from './icons';
@@ -21,6 +21,8 @@ import { DEFAULT_SETTINGS, type AppSettings } from './settings';
 import { APP, EXAMPLES, HELP, JOINTS, MENU, MODES, PANEL, POPUP, PREVIEW, SETTINGS, SIM, STATUS, TOOLS, TOOL_OPTIONS, TREE } from './strings';
 import { duplicateLink, extrudePolygon, translation } from '../core/patterns';
 import { modelSize } from '../core/kinematics';
+import { bodyPlaneJoint } from '../core/model';
+import { add, cross, scale } from '../core/geometry';
 import { ToolManager, parseTypedPoint } from '../viewport/tools';
 
 const JOINT_TYPES: JointType[] = ['spherical', 'revolute', 'planar', 'prismatic', 'cylindrical', 'screw'];
@@ -125,6 +127,10 @@ export class UI {
     this.root = container;
     this.build();
     app.subscribe(() => this.refresh());
+    app.onStatus = () => {
+      this.statusText.textContent = app.status || app.hint;
+      this.statusText.title = app.hint;
+    };
     tools.onPopup = (pid) => this.showPopup(pid);
     this.refresh();
     document.addEventListener('keydown', (e) => this.onKey(e));
@@ -268,7 +274,7 @@ export class UI {
     } else this.dofChip.textContent = '';
     // avoid rebuilding panels while the user is typing in them
     const active = document.activeElement;
-    const typing = active && (active.tagName === 'INPUT' || active.tagName === 'SELECT') && (this.props.contains(active) || this.modePanel.contains(active) || this.toolOptions.contains(active));
+    const typing = active && (active.tagName === 'INPUT' || active.tagName === 'SELECT') && (this.props.contains(active) || this.modePanel.contains(active) || this.toolOptions.contains(active) || this.tree.contains(active));
     if (typing && active !== this.sliderValue) {
       this.updateLiveReadouts();
       return;
@@ -283,13 +289,28 @@ export class UI {
   // Feature tree
   // ---------------------------------------------------------------------------
 
+  private treeSignature = '';
+
   private renderTree(): void {
     const app = this.app;
     const m = app.model;
+    const sel = app.selection;
+    const sig = [
+      Object.values(m.links).map((l) => `${l.id}:${l.name}:${+l.ground}${+l.locked}${+l.flexible}${+!!l.hidden}`).join(','),
+      Object.values(m.joints).map((j) => `${j.id}:${j.type}`).join(','),
+      Object.values(m.construction).map((c) => `${c.id}:${c.name}`).join(','),
+      m.settings.sketchPlaneId,
+      m.drivers.map((d) => d.id).join(','),
+      m.targets.map((t) => `${t.id}:${t.kind}:${+t.locked}`).join(','),
+      app.mode,
+      app.sim.activeDriver,
+      sel ? `${sel.type}:${sel.id}:${sel.pointId ?? ''}:${sel.pose ?? ''}` : '',
+    ].join('|');
+    if (sig === this.treeSignature && this.tree.childElementCount > 0) return;
+    this.treeSignature = sig;
     const box = this.tree;
     box.replaceChildren();
     box.appendChild(el('h3', 'panel__title', TREE.title));
-    const sel = app.selection;
     const group = (key: string, title: string, count: number, fill: (list: HTMLElement) => void) => {
       const details = el('details', 'tree-group');
       details.open = this.treeOpen[key] ?? true;
@@ -709,8 +730,14 @@ export class UI {
       return;
     }
     const offset = Math.max(0.5, modelSize(app.model) * 0.15);
+    // offset within the link's sketch plane (or the active one) so the copy keeps its 2-D constraint
+    const bp = bodyPlaneJoint(app.model, src.id);
+    const planeId = bp && isConstructionRef(bp.b) ? bp.b.constructionId : app.model.settings.sketchPlaneId;
+    const plane = app.model.construction[planeId];
+    const xd: Vec3 = plane?.xDir ?? [1, 0, 0];
+    const yd: Vec3 = plane?.dir ? cross(plane.dir, xd) : [0, 1, 0];
     app.beginChange();
-    const copy = duplicateLink(app.model, src, translation([offset, offset, 0]), `${src.name} copy`);
+    const copy = duplicateLink(app.model, src, translation(add(scale(xd, offset), scale(yd, offset))), `${src.name} copy`);
     app.endChange();
     if (copy) {
       app.select({ type: 'link', id: copy.id });
@@ -1052,6 +1079,9 @@ export class UI {
     if (e.key === 'Escape') {
       this.tools.cancel();
       this.showPopup(null);
+    } else if (e.key === 'Backspace' && this.tools.popSketchSupported()) {
+      e.preventDefault();
+      this.tools.popSketchPoint();
     } else if (e.key === 'Delete' || e.key === 'Backspace') {
       if (app.selection) this.tools.deletePick({ type: app.selection.type, id: app.selection.id, pointId: app.selection.pointId, pose: app.selection.pose });
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {

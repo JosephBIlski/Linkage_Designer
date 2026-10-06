@@ -274,21 +274,44 @@ export class Viewport {
     return new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
   }
 
+  /**
+   * Pick under the pointer with a screen-space tolerance: bars and polygon
+   * edges can be only 1–2 px wide at the default zoom, so when the exact ray
+   * misses model geometry a ring of rays around the pointer is sampled and the
+   * best model feature found is returned. Datum geometry never wins over model
+   * geometry.
+   */
   pick(clientX: number, clientY: number): PickResult | null {
     if (this.pickables.length === 0) return null;
+    const exact = this.castPick(clientX, clientY);
+    if (exact && exact.type !== 'construction') return exact;
+    for (const rad of [this.pickRadiusPx * 0.5, this.pickRadiusPx]) {
+      let best: PickResult | null = null;
+      for (let k = 0; k < 8; k++) {
+        const a = (k / 8) * Math.PI * 2;
+        const r = this.castPick(clientX + rad * Math.cos(a), clientY + rad * Math.sin(a));
+        if (!r || r.type === 'construction') continue;
+        if (!best || PICK_PRIORITY[r.type] < PICK_PRIORITY[best.type]) best = r;
+      }
+      if (best) return best;
+    }
+    return exact;
+  }
+
+  private castPick(clientX: number, clientY: number): PickResult | null {
     this.raycaster.setFromCamera(this.ndc(clientX, clientY), this.camera);
     const hits = this.raycaster.intersectObjects(this.pickables, false);
     if (hits.length === 0) return null;
     const results: PickResult[] = [];
     for (const h of hits) {
-      const ud = h.object.userData as Partial<PickResult> & { pick?: boolean };
+      const ud = h.object.userData as Partial<PickResult>;
       if (!ud.type) continue;
       results.push({ ...(ud as PickResult), point: [h.point.x, h.point.y, h.point.z], distance: h.distance });
     }
     if (results.length === 0) return null;
-    // translucent datum planes are only picked when nothing else is under the pointer
-    const nonPlane = results.filter((r) => !(r.type === 'construction' && (r as PickResult & { plane?: boolean }).plane));
-    const candidates = nonPlane.length ? nonPlane : results;
+    // datum planes and the invisible pick cylinders of datum axes never occlude model geometry
+    const model = results.filter((r) => r.type !== 'construction');
+    const candidates = model.length ? model : results;
     candidates.sort((a, b) => a.distance - b.distance);
     const closest = candidates[0];
     const tol = this.worldPerPixel(closest.point) * this.pickRadiusPx * 2;

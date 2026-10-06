@@ -3,6 +3,7 @@ import { fourBarCrankRocker, sliderCrank, sphericalPendulum, origamiMiuraVertex 
 import { commitSketch, computeMobility, currentViolation, samplePoseValues, solveForward, solvePosesAt, solveSketch, sweepDriver } from '../src/core/kinematics';
 import { addBar, addJoint, createModel, setGround } from '../src/core/model';
 import { barLength } from '../src/core/model';
+import { measureJointDriver } from '../src/core/jointMeasure';
 import { dist } from '../src/core/geometry';
 
 describe('four-bar crank-rocker', () => {
@@ -75,15 +76,41 @@ describe('spherical pendulum', () => {
   });
 });
 
-describe('rigid origami degree-4 vertex', () => {
-  it('has a single folding degree of freedom after pre-folding', () => {
+describe('rigid origami degree-4 vertex (Miura)', () => {
+  it('starts exactly assembled with a single folding degree of freedom', () => {
     const m = origamiMiuraVertex(60);
-    // project the pre-folded guess onto the rigid-folding manifold
-    const res = solveForward(m, [m.drivers[0].value]);
-    expect(res.converged).toBe(true);
-    for (const [id, p] of res.positions) m.points[id].pos = p;
-    const mob = computeMobility(m);
-    expect(mob.dof).toBe(1);
+    expect(currentViolation(m)).toBeLessThan(1e-9);
+    expect(computeMobility(m).dof).toBe(1);
+  });
+  it('folds as a Miura vertex: all four creases move, opposite creases are equal', () => {
+    const m = origamiMiuraVertex(60);
+    const sweep = sweepDriver(m, 0, { step: 5 });
+    const creases = Object.values(m.joints).filter((j) => j.type === 'revolute');
+    expect(creases.length).toBe(4);
+    const angles = creases.map((j) => sweep.poses.map((p) => measureJointDriver(m, { id: 'x', kind: 'fold', jointId: j.id, value: 0 }, p.positions)!));
+    // every crease folds through a substantial range (the degenerate straight-hinge branch keeps two creases flat)
+    for (const a of angles) {
+      const span = Math.max(...a.map((v) => 180 - Math.abs(v))) - Math.min(...a.map((v) => 180 - Math.abs(v)));
+      expect(span).toBeGreaterThan(60);
+    }
+    // creases 0 and 2 are collinear (straight pair) and fold by the same angle; creases 1 and 3 (bent pair) too
+    for (let k = 0; k < sweep.poses.length; k++) {
+      expect(Math.abs(Math.abs(angles[0][k]) - Math.abs(angles[2][k]))).toBeLessThan(1e-3);
+      expect(Math.abs(Math.abs(angles[1][k]) - Math.abs(angles[3][k]))).toBeLessThan(1e-3);
+    }
+    // Miura relation between the bent pair and the straight pair: tan(ρ_bent/2) = tan(ρ_straight/2) / cos α
+    const k = Math.floor(sweep.poses.length / 4);
+    const rhoS = (Math.PI - Math.abs((angles[0][k] * Math.PI) / 180));
+    const rhoB = (Math.PI - Math.abs((angles[1][k] * Math.PI) / 180));
+    if (rhoS > 0.2 && rhoS < Math.PI - 0.2) {
+      expect(Math.tan(rhoB / 2) / Math.tan(rhoS / 2)).toBeCloseTo(1 / Math.cos(Math.PI / 3), 2);
+    }
+    // the sweep never visits the straight-hinge branch (bent creases flat while the straight pair is folded)
+    for (let p = 0; p < sweep.poses.length; p++) {
+      const straightFolded = 180 - Math.abs(angles[0][p]) > 20;
+      const bentFlat = 180 - Math.abs(angles[1][p]) < 1e-3;
+      expect(straightFolded && bentFlat).toBe(false);
+    }
   });
 });
 

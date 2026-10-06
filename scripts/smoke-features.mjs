@@ -85,6 +85,52 @@ await page.keyboard.press('Control+v');
 await page.waitForTimeout(200);
 console.log('after paste', JSON.stringify((await state()).links.length));
 await page.screenshot({ path: `${OUT}/08-features.png` });
+
+// 9. Thin lone bar in the DEFAULT view: a drag started 4 px off the centreline must still grab the bar
+await page.evaluate(() => { const { app } = window.linkageDesigner; app.newModel(); });
+await page.waitForTimeout(300);
+await page.click('button[title^="Link —"]');
+await clickWorld([0, 0, 0]); await clickWorld([2, 0, 0]);
+await page.click('button[title^="Select —"]');
+const mid = await W([1, 0, 0]);
+const before9 = await page.evaluate(() => Object.values(window.linkageDesigner.app.model.points).map((p) => [...p.pos]));
+await page.mouse.move(mid.x, mid.y + 4);
+await page.mouse.down();
+for (let i = 1; i <= 8; i++) { await page.mouse.move(mid.x + i * 8, mid.y + 4 - i * 4); await page.waitForTimeout(40); }
+await page.mouse.up();
+await page.waitForTimeout(300);
+const after9 = await page.evaluate(() => Object.values(window.linkageDesigner.app.model.points).map((p) => [...p.pos]));
+const moved9 = Math.hypot(...[0, 1, 2].map((i) => after9[0][i] - before9[0][i]));
+console.log('thin bar drag moved', moved9.toFixed(3), moved9 > 0.3 ? 'OK' : 'FAIL');
+
+// 10. Origami: load the Miura example, delete panel 4, re-sketch it by snapping onto the existing vertices → 2 creases, DOF 1
+await page.evaluate(() => { const { app } = window.linkageDesigner; app.loadExample('miuraVertex'); });
+await page.waitForTimeout(800);
+const panel4 = await page.evaluate(() => { const { app } = window.linkageDesigner; const l = Object.values(app.model.links).find((x) => x.name === 'Panel 4'); return { id: l.id, pts: l.pointIds.map((id) => [...app.model.points[id].pos]) }; });
+await page.evaluate((id) => { const { tools } = window.linkageDesigner; tools.deletePick({ type: 'link', id }); }, panel4.id);
+await page.waitForTimeout(300);
+const dofWithout = await page.evaluate(() => window.linkageDesigner.app.sim.mobility?.dof);
+await page.evaluate(() => { const { app } = window.linkageDesigner; app.viewport.setView('iso'); app.viewport.fit([[-3, -3, -2], [4, 4, 2]]); });
+await page.waitForTimeout(300);
+await page.click('button[title^="Sketch polygon"]');
+for (const p of panel4.pts) await clickWorld(p);
+await page.keyboard.press('Enter');
+await page.waitForTimeout(500);
+const after10 = await page.evaluate(() => { const { app } = window.linkageDesigner; const m = app.model; return { links: Object.keys(m.links).length, creases: Object.values(m.joints).filter((j) => j.type === 'revolute' && j.a.kind === 'edge').length, pins: Object.values(m.joints).filter((j) => j.a.kind === 'vertex').length, dof: app.sim.mobility?.dof, violation: app.sim.violation, status: app.status }; });
+console.log('fourth panel sketched', JSON.stringify({ dofWithout, ...after10 }), after10.creases === 4 && after10.dof === 1 ? 'OK' : 'FAIL');
+
+// 11. Miura example folds as a vertex: all four creases move over the sweep
+await page.evaluate(() => { const { app } = window.linkageDesigner; app.loadExample('miuraVertex'); app.setMode('simulation'); });
+await page.waitForTimeout(2000);
+const miura = await page.evaluate(() => { const { app } = window.linkageDesigner; const m = app.model; const sw = app.sim.sweep; const pts = Object.values(m.links).filter((l) => !l.ground).map((l) => l.pointIds[2]); const moved = pts.map((id) => { const a = sw.poses.map((p) => p.positions.get(id)); let mx = 0; for (const q of a) mx = Math.max(mx, Math.hypot(q[0] - a[0][0], q[1] - a[0][1], q[2] - a[0][2])); return +mx.toFixed(2); }); return { range: sw.range.map((v) => +v.toFixed(1)), crank: sw.isCrank, farCornerTravel: moved, dof: app.sim.mobility?.dof }; });
+console.log('miura', JSON.stringify(miura), miura.farCornerTravel.every((d) => d > 1) ? 'OK' : 'FAIL');
+await page.screenshot({ path: `${OUT}/09-miura.png` });
+
+// 12. The model tree is not rebuilt on pointer moves (same DOM nodes before/after)
+await page.evaluate(() => window.linkageDesigner.app.setMode('construction'));
+await page.waitForTimeout(300);
+const same = await page.evaluate(async () => { const first = document.querySelector('.tree-item'); const canvas = document.querySelector('.viewport-canvas'); const r = canvas.getBoundingClientRect(); for (let i = 0; i < 5; i++) canvas.dispatchEvent(new PointerEvent('pointermove', { clientX: r.left + 300 + i * 20, clientY: r.top + 300, bubbles: true })); await new Promise((res) => setTimeout(res, 100)); return first === document.querySelector('.tree-item'); });
+console.log('tree stable across pointer moves', same ? 'OK' : 'FAIL');
 console.log('errors:', errors.length ? errors.join('\n') : 'none');
 await browser.close();
 server.kill();
