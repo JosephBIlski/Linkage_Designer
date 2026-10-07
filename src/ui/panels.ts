@@ -296,7 +296,7 @@ export class UI {
     const m = app.model;
     const sel = app.selection;
     const sig = [
-      Object.values(m.links).map((l) => `${l.id}:${l.name}:${+l.ground}${+l.locked}${+l.flexible}${+!!l.hidden}`).join(','),
+      Object.values(m.links).map((l) => `${l.id}:${l.name}:${l.kind}:${+l.ground}${+l.locked}${+l.flexible}${+!!l.hidden}`).join(','),
       Object.values(m.joints).map((j) => `${j.id}:${j.type}`).join(','),
       Object.values(m.construction).map((c) => `${c.id}:${c.name}`).join(','),
       m.settings.sketchPlaneId,
@@ -348,16 +348,21 @@ export class UI {
           name.replaceWith(input);
           input.focus();
           input.select();
-          const commit = () => {
-            if (input.value.trim() && input.value !== label) opts.rename!(input.value.trim());
+          let done = false;
+          const finish = (apply: boolean) => {
+            if (done) return;
+            done = true;
+            const v = input.value.trim();
+            input.replaceWith(name); // restore the label first so refresh() is not blocked by the typing guard
+            if (apply && v && v !== label) opts.rename!(v);
             else this.refresh();
           };
           input.addEventListener('keydown', (ev) => {
-            if (ev.key === 'Enter') commit();
-            if (ev.key === 'Escape') this.refresh();
+            if (ev.key === 'Enter') finish(true);
+            else if (ev.key === 'Escape') finish(false);
             ev.stopPropagation();
           });
-          input.addEventListener('blur', commit);
+          input.addEventListener('blur', () => finish(true));
         });
       }
       return row;

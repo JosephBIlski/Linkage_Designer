@@ -117,7 +117,8 @@ for (const p of panel4.pts) await clickWorld(p);
 await page.keyboard.press('Enter');
 await page.waitForTimeout(500);
 const after10 = await page.evaluate(() => { const { app } = window.linkageDesigner; const m = app.model; return { links: Object.keys(m.links).length, creases: Object.values(m.joints).filter((j) => j.type === 'revolute' && j.a.kind === 'edge').length, pins: Object.values(m.joints).filter((j) => j.a.kind === 'vertex').length, dof: app.sim.mobility?.dof, violation: app.sim.violation, status: app.status }; });
-console.log('fourth panel sketched', JSON.stringify({ dofWithout, ...after10 }), after10.creases === 4 && after10.dof === 1 ? 'OK' : 'FAIL');
+const corner = await page.evaluate((orig) => { const { app } = window.linkageDesigner; const m = app.model; const l = Object.values(m.links).find((x) => x.kind === 'polygon' && !x.name.startsWith('Panel')); if (!l) return null; const far = m.points[l.pointIds[2]].pos; return Math.hypot(far[0] - orig[2][0], far[1] - orig[2][1], far[2] - orig[2][2]); }, panel4.pts);
+console.log('fourth panel sketched', JSON.stringify({ dofWithout, ...after10, farCornerError: corner }), after10.creases === 4 && after10.dof === 1 && corner !== null && corner < 1e-3 ? 'OK' : 'FAIL');
 
 // 11. Miura example folds as a vertex: all four creases move over the sweep
 await page.evaluate(() => { const { app } = window.linkageDesigner; app.loadExample('miuraVertex'); app.setMode('simulation'); });
@@ -131,6 +132,65 @@ await page.evaluate(() => window.linkageDesigner.app.setMode('construction'));
 await page.waitForTimeout(300);
 const same = await page.evaluate(async () => { const first = document.querySelector('.tree-item'); const canvas = document.querySelector('.viewport-canvas'); const r = canvas.getBoundingClientRect(); for (let i = 0; i < 5; i++) canvas.dispatchEvent(new PointerEvent('pointermove', { clientX: r.left + 300 + i * 20, clientY: r.top + 300, bubbles: true })); await new Promise((res) => setTimeout(res, 100)); return first === document.querySelector('.tree-item'); });
 console.log('tree stable across pointer moves', same ? 'OK' : 'FAIL');
+
+// 13. Escape during a drag restores the pre-drag model and leaves the undo history alone
+await page.evaluate(() => { const { app } = window.linkageDesigner; app.newModel(); app.viewport.setView('top'); app.viewport.fit([[-1, -1, 0], [5, 3, 0]]); });
+await page.waitForTimeout(300);
+await page.click('button[title^="Link —"]');
+await clickWorld([0, 0, 0]); await clickWorld([2, 0, 0]);
+await clickWorld([3, 1, 0]); await clickWorld([4, 1, 0]);
+await page.click('button[title^="Select —"]');
+const pre13 = await page.evaluate(() => ({ undo: window.linkageDesigner.app.undoStack.length, json: JSON.stringify(window.linkageDesigner.app.model) }));
+const grab = await W([1, 0, 0]);
+await page.mouse.move(grab.x, grab.y);
+await page.mouse.down();
+for (let i = 1; i <= 6; i++) { await page.mouse.move(grab.x + i * 10, grab.y - i * 6); await page.waitForTimeout(40); }
+await page.keyboard.press('Escape');
+await page.mouse.up();
+await page.waitForTimeout(300);
+const post13 = await page.evaluate(() => ({ undo: window.linkageDesigner.app.undoStack.length, json: JSON.stringify(window.linkageDesigner.app.model), links: Object.keys(window.linkageDesigner.app.model.links).length }));
+console.log('escape mid-drag', JSON.stringify({ undoBefore: pre13.undo, undoAfter: post13.undo, links: post13.links, restored: pre13.json === post13.json }), pre13.undo === post13.undo && pre13.json === post13.json ? 'OK' : 'FAIL');
+
+// 14. Double-click closes a sketch without adding a sliver vertex
+await page.click('button[title^="Sketch polygon"]');
+for (const p of [[0, 2, 0], [2, 2, 0], [2, 3.5, 0]]) await clickWorld(p);
+const last = await W([0.5, 3.5, 0]);
+await page.mouse.move(last.x, last.y);
+await page.mouse.dblclick(last.x + 1, last.y + 1);
+await page.waitForTimeout(300);
+const sketched = await page.evaluate(() => { const l = Object.values(window.linkageDesigner.app.model.links).find((x) => x.kind === 'polygon'); return l ? l.pointIds.length : 0; });
+console.log('double-click close vertices', sketched, sketched === 4 ? 'OK' : 'FAIL');
+
+// 15. Tree rename: Enter commits and closes the editor, Escape cancels
+await page.click('button[title^="Select —"]');
+await page.dblclick('.tree-list .tree-item__label');
+await page.keyboard.type('Rocker');
+await page.keyboard.press('Enter');
+await page.waitForTimeout(200);
+const rename1 = await page.evaluate(() => ({ inputs: document.querySelectorAll('.tree-item__rename').length, name: Object.values(window.linkageDesigner.app.model.links)[0].name }));
+await page.dblclick('.tree-list .tree-item__label');
+await page.keyboard.type('Zed');
+await page.keyboard.press('Escape');
+await page.waitForTimeout(200);
+const rename2 = await page.evaluate(() => ({ inputs: document.querySelectorAll('.tree-item__rename').length, name: Object.values(window.linkageDesigner.app.model.links)[0].name }));
+console.log('tree rename', JSON.stringify({ rename1, rename2 }), rename1.inputs === 0 && rename1.name === 'Rocker' && rename2.inputs === 0 && rename2.name === 'Rocker' ? 'OK' : 'FAIL');
+
+// 16. ORIGIN datum is pickable in the top view (end-on Z axis must not win) — on an empty model
+const originPick = await page.evaluate(async () => { const { app } = window.linkageDesigner; const saved = app.saveToJson(); app.newModel(); app.viewport.setView('top'); await new Promise((r) => setTimeout(r, 150)); const s = app.viewport.worldToScreen([0, 0, 0]); const p = app.viewport.pick(s.x, s.y); app.loadFromJson(saved, 'restore'); await new Promise((r) => setTimeout(r, 150)); return p && p.id; });
+console.log('origin pick in top view', originPick, originPick === 'point_origin' ? 'OK' : 'FAIL');
+
+// 17. Mirror acts on the tree selection
+await page.evaluate(() => { const { app } = window.linkageDesigner; app.viewport.setView('top'); app.select({ type: 'link', id: Object.values(app.model.links)[0].id }); });
+await page.waitForTimeout(300);
+const linksBefore17 = await page.evaluate(() => Object.keys(window.linkageDesigner.app.model.links).length);
+await page.click('button[title^="Mirror"]');
+await page.evaluate(() => { const { app } = window.linkageDesigner; app.viewport.setView('iso'); app.viewport.fit([[-4, -4, -1], [6, 6, 1]]); });
+await page.waitForTimeout(300);
+const frontHit = await W([2, 0, 0.5]);
+await page.mouse.click(frontHit.x, frontHit.y);
+await page.waitForTimeout(300);
+const linksAfter17 = await page.evaluate(() => Object.keys(window.linkageDesigner.app.model.links).length);
+console.log('mirror from tree selection', linksBefore17, '->', linksAfter17, linksAfter17 === linksBefore17 + 1 ? 'OK' : 'FAIL');
 console.log('errors:', errors.length ? errors.join('\n') : 'none');
 await browser.close();
 server.kill();

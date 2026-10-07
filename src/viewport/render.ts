@@ -174,6 +174,14 @@ export class ModelRenderer {
     return m;
   }
 
+  /** Visible sphere plus an invisible pick proxy of at least ~10 px radius (vertices must beat edge proxies). */
+  private pickableSphere(group: THREE.Group, p: Vec3, radius: number, mat: THREE.Material, pick: Partial<PickResult>): void {
+    group.add(this.sphere(p, radius, mat));
+    const minR = this.vp.worldPerPixel(p) * 5;
+    const proxyMat = this.track(new THREE.MeshBasicMaterial({ visible: false }));
+    group.add(this.sphere(p, Math.max(radius, minR), proxyMat, pick));
+  }
+
   /**
    * Visible cylinder plus an invisible, wider pick proxy so thin bars and
    * polygon edges are always at least ~8 px wide for picking at any zoom.
@@ -228,7 +236,7 @@ export class ModelRenderer {
         g.add(line);
         // invisible pick cylinder
         const pickMat = this.track(new THREE.MeshBasicMaterial({ visible: false }));
-        g.add(this.cylinder(a, b, r * 1.2, pickMat, { type: 'construction', id: c.id }));
+        g.add(this.cylinder(a, b, r * 1.2, pickMat, { type: 'construction', id: c.id, sub: 1 } as Partial<PickResult> & { sub: number }));
         if (settings.showLabels) this.label(c.name, add(b, [0, 0, r * 2]), 'label label--construction');
       } else if (c.kind === 'plane' && c.dir) {
         const s = c.size ?? 6;
@@ -237,7 +245,7 @@ export class ModelRenderer {
         const mesh = new THREE.Mesh(geo, mat);
         mesh.position.copy(v(c.origin));
         mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), v(c.dir));
-        mesh.userData = { type: 'construction', id: c.id, plane: true } as Partial<PickResult> & { plane: boolean };
+        mesh.userData = { type: 'construction', id: c.id, plane: true, sub: 2 } as Partial<PickResult> & { plane: boolean; sub: number };
         mesh.renderOrder = -5;
         this.pickables.push(mesh);
         g.add(mesh);
@@ -313,7 +321,7 @@ export class ModelRenderer {
           const vHov = this.isHovered(state, 'vertex', link.id, pid);
           const shown = state.displayPointIds.includes(pid);
           const mat = this.material(vSel ? settings.colors.selection : shown ? settings.colors.outputPath : darkenHex(baseColor, 0.45), { emissive: vHov ? settings.colors.selection : undefined });
-          group.add(this.sphere(P(pid), r * (shown ? 1.9 : 1.5), mat, { type: 'vertex', id: link.id, linkId: link.id, pointId: pid, pointIds: [pid] }));
+          this.pickableSphere(group, P(pid), r * (shown ? 1.9 : 1.5), mat, { type: 'vertex', id: link.id, linkId: link.id, pointId: pid, pointIds: [pid] });
           if (settings.showLabels && (link.kind === 'bar' || shown)) this.label(pt.name, add(P(pid), [0, 0, r * 3]), 'label label--vertex');
         }
         if (settings.showHelpers) {

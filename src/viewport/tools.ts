@@ -30,7 +30,7 @@ import {
   sketchNormal,
 } from '../core/model';
 import type { ConstructionRef, Feature, ID, Target, Vec3 } from '../core/types';
-import { autoJoinCoincident, fitSketchPlane, moveVertex, projectToPlane } from '../core/edit';
+import { autoJoinCoincident, fitSketchPlane, moveVertex, projectToPlane, rayPlane } from '../core/edit';
 import { duplicateLink, hasCollinearTriple, linearArray, mirrorAcrossPlane, polarArray } from '../core/patterns';
 import { addPolygonFromPoints } from '../core/model';
 import { isConstructionRef } from '../core/types';
@@ -67,6 +67,8 @@ interface PlacedPoint {
   pos: Vec3;
   snappedPointId?: ID;
   snappedConstructionId?: ID;
+  /** Pointer ray at placement (free sketch vertices are re-placed on the fitted plane along it). */
+  ray?: { o: Vec3; d: Vec3 };
 }
 
 type DragState =
@@ -105,12 +107,21 @@ export class ToolManager {
   setTool(tool: ToolName): void {
     this.app.setTool(tool);
     this.reset();
+    // Mirror / Pattern act on the current selection (e.g. picked in the model tree) when there is one
+    if (tool === 'mirror' || tool === 'pattern') {
+      const sel = this.app.selection;
+      const id = sel && (sel.type === 'link' || sel.type === 'vertex' || sel.type === 'edge' || sel.type === 'face' || sel.type === 'axis') ? sel.id : null;
+      if (id && this.app.model.links[id]) {
+        this.patternLinkId = id;
+        this.app.setStatus(tool === 'mirror' ? STATUS.mirrorPickPlane : STATUS.patternPickFirst);
+      }
+    }
   }
 
   cancel(): void {
     if (this.drag.kind !== 'none' && this.drag.kind !== 'pending') {
-      // abort drag: restore from undo snapshot
-      this.app.undo();
+      // abort the drag: restore the pre-drag model without touching the undo history
+      this.app.abortChange();
     }
     if (this.points.length === 0 && !this.featureA && !this.editSource && !this.patternLinkId && this.drag.kind === 'none') this.app.setTool('select');
     this.reset();
@@ -157,7 +168,25 @@ export class ToolManager {
       const L = len(d);
       if (L > 1e-9) pos = add(last, scale(d, this.pendingLength / L));
     }
-    return { pos };
+    return { pos, ray: vp.pointerRay(ev.clientX, ev.clientY) };
+  }
+
+  /**
+   * Final positions of the sketched vertices: snapped vertices stay exact; free
+   * vertices lie on the fitted plane, placed along their pointer ray when the
+   * plane is not the sketch plane (so they end up under the cursor).
+   */
+  private sketchPositions(points: PlacedPoint[]): { pts: Vec3[]; onSketchPlane: boolean } {
+    const pl = this.sketchPlane();
+    const snapped = points.map((p) => !!(p.snappedPointId || p.snappedConstructionId));
+    const fit = fitSketchPlane(points.map((p) => p.pos), snapped, pl);
+    const pts = points.map((p, i) => {
+      if (snapped[i]) return p.pos;
+      if (fit.onSketchPlane) return projectToPlane(p.pos, fit.origin, fit.normal);
+      const hit = p.ray ? rayPlane(p.ray.o, p.ray.d, fit.origin, fit.normal) : null;
+      return hit ?? projectToPlane(p.pos, fit.origin, fit.normal);
+    });
+    return { pts, onSketchPlane: fit.onSketchPlane };
   }
 
   private featureFromPick(pick: PickResult): Feature | ConstructionRef | null {
@@ -327,8 +356,11 @@ export class ToolManager {
     }
     if (tool === 'cplane' && this.points.length > 0) overlay.polyline = [...this.points.map((p) => p.pos), placed.pos];
     if (tool === 'sketch' && this.points.length > 0) {
-      overlay.polyline = [...this.points.map((p) => p.pos), placed.pos];
-      overlay.rubberBand = { a: this.points[this.points.length - 1].pos, b: placed.pos };
+      const cursor: PlacedPoint = { pos: placed.pos, snappedPointId: placed.snappedPointId, snappedConstructionId: placed.snappedConstructionId, ray: placed.ray };
+      const { pts } = this.sketchPositions([...this.points, cursor]);
+      overlay.polyline = pts;
+      overlay.rubberBand = { a: pts[pts.length - 2], b: pts[pts.length - 1] };
+      overlay.marker = pts[pts.length - 1];
     }
     if (tool === 'pattern' && this.patternLinkId && this.points.length === 1 && app.toolOptions.patternKind === 'linear') overlay.rubberBand = { a: this.points[0].pos, b: placed.pos };
     if (tool === 'edit' && this.editSource) overlay.rubberBand = { a: app.model.points[this.editSource.pointId]?.pos ?? placed.pos, b: placed.pos };
@@ -357,8 +389,15 @@ export class ToolManager {
     const snapped = !!(placed.snappedPointId || placed.snappedConstructionId);
     const pos = snapped ? placed.pos : projectToPlane(placed.pos, pl.o, pl.n);
     const last = this.points[this.points.length - 1];
-    if (last && dist(last.pos, pos) < 1e-9) return;
-    this.points.push({ pos, snappedPointId: placed.snappedPointId, snappedConstructionId: placed.snappedConstructionId });
+    if (last) {
+      if (dist(last.pos, pos) < 1e-9) return;
+      // the second click of a double-click lands within a few pixels of the last vertex: not a new vertex
+      if (!forced) {
+        const sl = app.viewport.worldToScreen(last.pos);
+        if (Math.hypot(sl.x - ev.clientX, sl.y - ev.clientY) < 12) return;
+      }
+    }
+    this.points.push({ pos, snappedPointId: placed.snappedPointId, snappedConstructionId: placed.snappedConstructionId, ray: placed.ray });
     app.setHint(TOOLS.sketch.hint);
   }
 
@@ -383,17 +422,14 @@ export class ToolManager {
       app.setStatus(STATUS.sketchNeedsThree);
       return;
     }
-    const pl = this.sketchPlane();
-    const fit = fitSketchPlane(this.points.map((p) => p.pos), this.points.map((p) => !!(p.snappedPointId || p.snappedConstructionId)), pl);
-    const pts = this.points.map((p) => (p.snappedPointId || p.snappedConstructionId ? p.pos : projectToPlane(p.pos, fit.origin, fit.normal)));
+    const { pts, onSketchPlane } = this.sketchPositions(this.points);
     if (hasCollinearTriple(pts)) {
       app.setStatus(STATUS.sketchDegenerate);
       return;
     }
-    if (!fit.onSketchPlane) app.setStatus(STATUS.sketchOffPlane);
     const m = app.model;
     app.beginChange();
-    const link = addPolygonFromPoints(m, pts, { name: app.nextLinkName('polygon'), onPlaneId: fit.onSketchPlane ? m.settings.sketchPlaneId : null });
+    const link = addPolygonFromPoints(m, pts, { name: app.nextLinkName('polygon'), onPlaneId: onSketchPlane ? m.settings.sketchPlaneId : null });
     // vertices snapped onto existing geometry are joined: shared edges become creases, single vertices get pins
     const snapped = link.pointIds.filter((_, i) => this.points[i].snappedPointId);
     const joints = snapped.length ? autoJoinCoincident(m, link, snapped, { defaultJoint: m.settings.defaultJoint, axis: sketchNormal(m) }) : [];
@@ -403,7 +439,10 @@ export class ToolManager {
     }
     app.select({ type: 'link', id: link.id });
     app.endChange();
-    if (joints.length) app.setStatus(`${STATUS.jointCreated} (${joints.length})`);
+    const notes: string[] = [];
+    if (joints.length) notes.push(`${STATUS.jointCreated} (${joints.length})`);
+    if (!onSketchPlane) notes.push(STATUS.sketchOffPlane);
+    if (notes.length) app.setStatus(notes.join(' · '));
     this.points = [];
     app.setOverlay({});
   }
@@ -433,8 +472,17 @@ export class ToolManager {
     const joinTo = placed.snappedPointId && placed.snappedPointId !== this.editSource.pointId && m.points[placed.snappedPointId]?.linkId !== this.editSource.linkId ? placed.snappedPointId : undefined;
     app.beginChange();
     const res = moveVertex(m, this.editSource.pointId, placed.pos, { joinTo });
+    let joints = res.joints.length;
+    if (res.ok && placed.snappedConstructionId && m.construction[placed.snappedConstructionId]?.kind === 'point') {
+      // snapped onto a datum point: pin the vertex there (like the Link and Sketch tools do)
+      const alreadyPinned = jointsAtPoint(m, this.editSource.pointId).some((j) => isConstructionRef(j.b) && j.b.constructionId === placed.snappedConstructionId);
+      if (!alreadyPinned) {
+        const j = addJoint(m, m.settings.defaultJoint === 'spherical' ? 'spherical' : 'revolute', { linkId: this.editSource.linkId, kind: 'vertex', pointIds: [this.editSource.pointId] }, { constructionId: placed.snappedConstructionId }, { axis: sketchNormal(m) });
+        if (j) joints++;
+      }
+    }
     app.endChange({ skipUndo: !res.ok });
-    app.setStatus(res.ok ? STATUS.editDone + (res.joints.length ? ` · ${STATUS.jointCreated} (${res.joints.length})` : '') : res.reason === 'locked' ? STATUS.linkLocked : STATUS.editUnreachable);
+    app.setStatus(res.ok ? STATUS.editDone + (joints ? ` · ${STATUS.jointCreated} (${joints})` : '') : res.reason === 'locked' ? STATUS.linkLocked : STATUS.editUnreachable);
     app.select({ type: 'vertex', id: this.editSource.linkId, pointId: this.editSource.pointId });
     this.editSource = null;
     app.setOverlay({});

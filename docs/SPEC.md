@@ -28,7 +28,8 @@ editing window along with tools …"
 - Navigation: right-drag orbit, middle-drag pan, wheel zoom-to-cursor;
   View menu: Top / Front / Right / Isometric, zoom to fit (`F`),
   orthographic / perspective.
-- Undo / redo (`Ctrl+Z`, `Ctrl+Y` / `Ctrl+Shift+Z`) by whole-model snapshots.
+- Undo / redo (`Ctrl+Z`, `Ctrl+Y` / `Ctrl+Shift+Z`) by whole-model snapshots;
+  `Esc` during a drag restores the pre-drag model without touching history.
 - Keyboard: `Esc` cancel tool, `Del` delete selection, `1` select, `2` link,
   `3` polygon, `4` prism, `5` cylinder, `G` ground, `J` joint, `D` driver,
   `Space` play/pause in Preview.
@@ -382,8 +383,12 @@ assumptions."
   joined when the polygon is closed. Two consecutive snapped vertices that
   coincide with an edge of one existing link become a single edge–edge
   revolute joint (a crease); an isolated snapped vertex gets the default joint
-  when both links share the sketch plane, otherwise a spherical joint. A
-  vertex snapped onto a datum point is pinned to it. This is how the last
+  (hinge axis = the normal of the sketch plane both links share) when both
+  links share a sketch plane, otherwise a spherical joint; a link that is
+  already attached to a crease vertex through one of the crease partners is
+  not pinned again. A vertex snapped onto a datum point is pinned to it. Free
+  vertices of a polygon whose snapped vertices define a plane off the sketch
+  plane are placed where the click ray meets that plane. This is how the last
   panel of an origami vertex is "filled in": sketch it by clicking the
   existing vertices.
 - **Extrude to prism** (Properties of a polygon): enter a height and press
@@ -407,9 +412,11 @@ assumptions."
   sketch plane, that planar constraint is removed first, so a flat panel can
   be lifted into 3-D. If the destination cannot be reached (the vertex is
   pinned to a datum point, or its joints forbid it) nothing changes and the
-  status bar says so. Coincident vertices are joined with the same rules as
-  the Sketch tool (shared edges become creases, replacing earlier pins).
-  Locked links cannot be edited.
+  status bar says so. Joint helper attachments that depend on the moved vertex
+  are released and rebuilt, so a hinged bar or panel can be lifted out of its
+  plane. Coincident vertices are joined with the same rules as the Sketch tool
+  (shared edges become creases, replacing earlier pins); a vertex dropped on a
+  datum point is pinned to it. Locked links cannot be edited.
 
 **Deviation / note:** moving one vertex of a quad off its plane makes a bent
 (non-planar) panel; the rebuilt rigidity then treats it as a rigid tetrahedral
@@ -424,9 +431,10 @@ sketch-plane constraint is copied only when the copy still lies on that plane.
 - **Copy / paste**: `Ctrl+C` remembers the selected link, `Ctrl+V` pastes a
   copy offset diagonally by about 15 % of the model size; Properties →
   *Duplicate* does both at once.
-- **Mirror** (`M`): click a link, then a datum plane; a mirror image is
-  created (edge lengths preserved; the polygon's vertex order is kept).
-- **Pattern** (`P`): click a link, then
+- **Mirror** (`M`): click a link (or select it in the model tree first), then
+  a datum plane; a mirror image is created (edge lengths preserved; the
+  polygon's vertex order is kept).
+- **Pattern** (`P`): click a link (or select it in the model tree first), then
   - *Linear array*: click two points defining the spacing vector; *Copies*
     sets how many copies are added;
   - *Polar array*: click a datum axis (rotation about it) or a datum point /

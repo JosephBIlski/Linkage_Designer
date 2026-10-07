@@ -169,6 +169,16 @@ export class App {
     this.markDirty();
   }
 
+  /** Discard an in-progress change (e.g. an aborted drag): restore the pending snapshot without touching undo/redo. */
+  abortChange(): void {
+    if (this.pendingSnapshot === null) return;
+    this.model = parseModel(this.pendingSnapshot);
+    this.pendingSnapshot = null;
+    this.selection = null;
+    this.ghost = null;
+    this.markDirty();
+  }
+
   /** Model changed: recompute kinematics on the next frame. */
   markDirty(): void {
     this.kinematicsDirty = true;
@@ -280,6 +290,7 @@ export class App {
     this.fileName = fileName;
     this.undoStack = [];
     this.redoStack = [];
+    this.pendingSnapshot = null;
     this.selection = null;
     this.sim.sweep = null;
     this.sim.design = null;

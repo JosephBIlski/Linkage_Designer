@@ -124,10 +124,10 @@ export function findFrame(m: Model, ids: ID[]): ID[] {
  *    2 distances + a coplanarity constraint, which avoids the first-order flexibility
  *    of distance-only constraints on flat point sets.
  */
-export function buildRigidity(m: Model, ids: ID[]): RigidityConstraint[] {
+export function buildRigidity(m: Model, ids: ID[], frameOverride?: ID[]): RigidityConstraint[] {
   const out: RigidityConstraint[] = [];
   if (ids.length < 2) return out;
-  const frame = findFrame(m, ids);
+  const frame = frameOverride && frameOverride.length === 3 && frameOverride.every((id) => ids.includes(id)) ? frameOverride : findFrame(m, ids);
   const d = (a: ID, b: ID): RigidityConstraint => ({ kind: 'dist', a, b, length: dist(P(m, a), P(m, b)) });
   if (frame.length === 2) {
     out.push(d(frame[0], frame[1]));

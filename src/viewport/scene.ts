@@ -284,7 +284,9 @@ export class Viewport {
   pick(clientX: number, clientY: number): PickResult | null {
     if (this.pickables.length === 0) return null;
     const exact = this.castPick(clientX, clientY);
-    if (exact && exact.type !== 'construction') return exact;
+    // an exact hit on a point-like feature (editing point / vertex / joint) wins outright;
+    // an exact hit on a body is still compared with nearby point-like features in the ring
+    if (exact && exact.type !== 'construction' && PICK_PRIORITY[exact.type] <= PICK_PRIORITY.joint) return exact;
     for (const rad of [this.pickRadiusPx * 0.5, this.pickRadiusPx]) {
       let best: PickResult | null = null;
       for (let k = 0; k < 8; k++) {
@@ -293,7 +295,8 @@ export class Viewport {
         if (!r || r.type === 'construction') continue;
         if (!best || PICK_PRIORITY[r.type] < PICK_PRIORITY[best.type]) best = r;
       }
-      if (best) return best;
+      if (best && (!exact || exact.type === 'construction' || PICK_PRIORITY[best.type] < PICK_PRIORITY[exact.type])) return best;
+      if (exact && exact.type !== 'construction') return exact;
     }
     return exact;
   }
@@ -311,7 +314,12 @@ export class Viewport {
     if (results.length === 0) return null;
     // datum planes and the invisible pick cylinders of datum axes never occlude model geometry
     const model = results.filter((r) => r.type !== 'construction');
-    const candidates = model.length ? model : results;
+    if (model.length === 0) {
+      // only datum geometry under the pointer: points beat axes beat planes (datums have no occlusion semantics)
+      results.sort((a, b) => ((a as PickResult & { sub?: number }).sub ?? 9) - ((b as PickResult & { sub?: number }).sub ?? 9) || a.distance - b.distance);
+      return results[0];
+    }
+    const candidates = model;
     candidates.sort((a, b) => a.distance - b.distance);
     const closest = candidates[0];
     const tol = this.worldPerPixel(closest.point) * this.pickRadiusPx * 2;
@@ -329,6 +337,14 @@ export class Viewport {
     if (this.camera === this.orthographic) return (this.orthographic.top - this.orthographic.bottom) / h;
     const d = this.camera.position.distanceTo(new THREE.Vector3(at[0], at[1], at[2]));
     return (2 * d * Math.tan(THREE.MathUtils.degToRad(this.perspective.fov / 2))) / h;
+  }
+
+  /** World-space ray through the pointer position. */
+  pointerRay(clientX: number, clientY: number): { o: Vec3; d: Vec3 } {
+    this.raycaster.setFromCamera(this.ndc(clientX, clientY), this.camera);
+    const o = this.raycaster.ray.origin;
+    const d = this.raycaster.ray.direction;
+    return { o: [o.x, o.y, o.z], d: [d.x, d.y, d.z] };
   }
 
   /** Intersect the pointer ray with a world plane. */
