@@ -221,7 +221,7 @@ export class ModelRenderer {
         const m = new THREE.Mesh(unitOcta, this.material(color, { emissive }));
         m.position.copy(v(c.origin));
         m.scale.setScalar(r * 1.6);
-        m.userData = { type: 'construction', id: c.id } as Partial<PickResult>;
+        m.userData = { type: 'construction', id: c.id, sub: 0 } as Partial<PickResult> & { sub: number };
         this.pickables.push(m);
         g.add(m);
         if (settings.showLabels) this.label(c.name, add(c.origin, [0, 0, r * 4]), 'label label--construction');
