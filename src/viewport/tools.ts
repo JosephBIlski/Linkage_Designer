@@ -30,7 +30,7 @@ import {
   sketchNormal,
 } from '../core/model';
 import type { ConstructionRef, Feature, ID, Target, Vec3 } from '../core/types';
-import { autoJoinCoincident, fitSketchPlane, moveVertex, projectToPlane, rayPlane } from '../core/edit';
+import { autoJoinCoincident, fitSketchPlane, moveVertex, placeOnFittedPlane, projectToPlane } from '../core/edit';
 import { duplicateLink, hasCollinearTriple, linearArray, mirrorAcrossPlane, polarArray } from '../core/patterns';
 import { addPolygonFromPoints } from '../core/model';
 import { isConstructionRef } from '../core/types';
@@ -183,8 +183,7 @@ export class ToolManager {
     const pts = points.map((p, i) => {
       if (snapped[i]) return p.pos;
       if (fit.onSketchPlane) return projectToPlane(p.pos, fit.origin, fit.normal);
-      const hit = p.ray ? rayPlane(p.ray.o, p.ray.d, fit.origin, fit.normal) : null;
-      return hit ?? projectToPlane(p.pos, fit.origin, fit.normal);
+      return placeOnFittedPlane(p.pos, p.ray, fit.origin, fit.normal);
     });
     return { pts, onSketchPlane: fit.onSketchPlane };
   }

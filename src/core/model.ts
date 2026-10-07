@@ -22,7 +22,7 @@ import type {
 } from './types';
 import { DEFAULT_SETTINGS, isConstructionRef } from './types';
 import { add, cross, dist, dot, len, normalize, perpendicular, planeBasis, scale, sub, triple } from './geometry';
-import { cosValue, twistValue } from './constraints';
+import { axisRotation, constRef, cosValue, twistValue, worldAxisRef } from './constraints';
 
 // ---------------------------------------------------------------------------
 // Model creation
@@ -616,7 +616,23 @@ export function addJoint(m: Model, type: JointType, a: Feature, b: Feature | Con
         const n0 = normalize(cross(c.dir!, w));
         joint.offsets = { ...(joint.offsets ?? {}), planeNormal: len(n0) > 0.5 ? n0 : perpendicular(c.dir!) };
       }
-      if (type === 'screw') joint.pitch = opts.pitch ?? 1;
+      if (type === 'screw') {
+        joint.pitch = opts.pitch ?? 1;
+        // capture the rotation offset so the screw coupling is measured from the creation pose (like the slide offset)
+        const none = new Float64Array(0);
+        let angle: number;
+        if (linkB && axB) {
+          angle = axisRotation(constRef(P(m, axA[0])), constRef(P(m, axA[1])), constRef(P(m, refA)), constRef(P(m, refB)), none);
+          const dir = normalize(sub(P(m, axA[1]), P(m, axA[0])));
+          joint.offsets = { ...(joint.offsets ?? {}), slide: dot(sub(P(m, axB[0]), P(m, axA[0])), dir), angle };
+        } else {
+          const c = m.construction[(b as ConstructionRef).constructionId];
+          const o = c.origin;
+          const d = c.dir!;
+          angle = axisRotation(constRef(o), constRef([o[0] + d[0], o[1] + d[1], o[2] + d[2]]), constRef(worldAxisRef(o, d)), constRef(P(m, refA)), none);
+          joint.offsets = { ...(joint.offsets ?? {}), angle };
+        }
+      }
     }
   }
   m.joints[joint.id] = joint;

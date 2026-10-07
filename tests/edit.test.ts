@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { addBar, addJoint, addPolygon, addPolygonFromPoints, bodyPlaneJoint, createModel, serializeModel, setGround } from '../src/core/model';
-import { autoJoinCoincident, fitSketchPlane, moveVertex, projectToPlane } from '../src/core/edit';
+import { autoJoinCoincident, fitSketchPlane, moveVertex, placeOnFittedPlane, projectToPlane, rayPlane } from '../src/core/edit';
+import { addConstructionAxis } from '../src/core/model';
+import { commitSketch, solveSketch } from '../src/core/kinematics';
 import { computeMobility, currentViolation } from '../src/core/kinematics';
 import { foldedVertexPositions } from '../src/core/examples';
 import { dist } from '../src/core/geometry';
@@ -209,5 +211,74 @@ describe('edit tool: joint helpers, hinge axes and re-framing (verification find
     const f = fitSketchPlane([[0, 0, 0], [1, 0, 0], [0, 1, 0]], [true, true, false], { o: [0, 0, 0], n: [1, 0, 0] });
     expect(Math.hypot(...f.normal)).toBeCloseTo(1);
     expect(Math.abs(f.normal[0])).toBeLessThan(1e-9); // perpendicular to the snapped edge along X
+  });
+});
+
+describe('re-verification follow-ups', () => {
+  it('moving the hinge end of a crank keeps the joint axis upright (dyad with a floating bar)', () => {
+    const m = createModel();
+    const g = addBar(m, [-2, 0, 0], [0, 0, 0], { onPlaneId: 'plane_top' });
+    setGround(m, g.id);
+    const crank = addBar(m, [0, 0, 0], [1, 1, 0], { onPlaneId: 'plane_top' });
+    const floating = addBar(m, [1, 1, 0], [3, 1, 0], { onPlaneId: 'plane_top' });
+    addJoint(m, 'revolute', { linkId: g.id, kind: 'vertex', pointIds: [g.pointIds[1]] }, { linkId: crank.id, kind: 'vertex', pointIds: [crank.pointIds[0]] });
+    const hinge = addJoint(m, 'revolute', { linkId: crank.id, kind: 'vertex', pointIds: [crank.pointIds[1]] }, { linkId: floating.id, kind: 'vertex', pointIds: [floating.pointIds[0]] })!;
+    expect(computeMobility(m).dof).toBe(2);
+    const res = moveVertex(m, crank.pointIds[1], [1.2, 1.7, 0]);
+    expect(res.ok).toBe(true);
+    for (const h of hinge.helpers ?? []) {
+      if (!h) continue;
+      const base = m.points[h].linkId === crank.id ? crank.pointIds[1] : floating.pointIds[0];
+      const off = [0, 1, 2].map((i) => m.points[h].pos[i] - m.points[base].pos[i]);
+      expect(Math.abs(off[0])).toBeLessThan(1e-6);
+      expect(Math.abs(off[1])).toBeLessThan(1e-6);
+      expect(off[2]).toBeCloseTo(1, 6);
+    }
+    expect(computeMobility(m).dof).toBe(2);
+    expect(currentViolation(m)).toBeLessThan(1e-8);
+  });
+
+  it('screw joints keep their creation rotation offset so sketch drags stay consistent', () => {
+    const m = createModel();
+    const bar = addBar(m, [0, 0, 0], [2, 0, 0]);
+    const j = addJoint(m, 'screw', { linkId: bar.id, kind: 'vertex', pointIds: [bar.pointIds[0]] }, { constructionId: 'axis_z' }, { pitch: 0.5 })!;
+    expect(j.offsets?.angle).toBeDefined();
+    expect(currentViolation(m)).toBeLessThan(1e-9);
+    // drag the free end ~30° about Z (as the Select tool does: a weak target, then an exact projection on release)
+    const a = Math.PI / 6;
+    const drag = solveSketch(m, { dragTargets: [{ pointId: bar.pointIds[1], pos: [2 * Math.cos(a), 2 * Math.sin(a), 0], weight: 0.05 }] });
+    commitSketch(m, drag);
+    const release = solveSketch(m, {});
+    commitSketch(m, release);
+    expect(currentViolation(m)).toBeLessThan(1e-8);
+    const A = m.points[bar.pointIds[0]].pos;
+    const B = m.points[bar.pointIds[1]].pos;
+    const phi = Math.atan2(B[1] - A[1], B[0] - A[0]);
+    expect(phi).toBeGreaterThan(0.3); // the bar did rotate
+    // the screw slid the bar along Z by pitch·Δφ/2π
+    expect(A[2]).toBeCloseTo((0.5 * phi) / (2 * Math.PI), 6);
+    // link–link screw also stores the offset
+    const m2 = createModel();
+    const base = addBar(m2, [0, 0, 0], [0, 0, 3]);
+    setGround(m2, base.id);
+    const nut = addBar(m2, [0, 0, 1], [1, 0, 1]);
+    const j2 = addJoint(m2, 'screw', { linkId: base.id, kind: 'edge', pointIds: [base.pointIds[0], base.pointIds[1]] }, { linkId: nut.id, kind: 'vertex', pointIds: [nut.pointIds[0]] }, { pitch: 1 })!;
+    expect(j2.offsets?.angle).toBeDefined();
+    expect(j2.offsets?.slide).toBeCloseTo(1, 9);
+  });
+
+  it('free sketch vertices are projected, not flung away, when the pointer ray grazes the fitted plane', () => {
+    const origin: Vec3 = [0, 0, 0];
+    const normal: Vec3 = [0, 0, 1];
+    // ray nearly parallel to the plane, 1 unit above it
+    const grazing = { o: [0, 0, 1] as Vec3, d: [1, 0, -0.01] as Vec3 };
+    const placed = placeOnFittedPlane([0.3, 0.2, 1], grazing, origin, normal);
+    expect(dist(placed, [0.3, 0.2, 0])).toBeLessThan(1e-9);
+    // a well-posed ray hits where it should
+    const good = { o: [0, 0, 1] as Vec3, d: [1, 0, -1] as Vec3 };
+    expect(dist(placeOnFittedPlane([9, 9, 9], good, origin, normal), [1, 0, 0])).toBeLessThan(1e-9);
+    // hits behind the ray origin are rejected
+    expect(rayPlane([0, 0, 1], [0, 0, 1], origin, normal)).toBeNull();
+    expect(rayPlane([0, 0, 1], [0, 0, -1], origin, normal)).toEqual([0, 0, 0]);
   });
 });

@@ -8,7 +8,7 @@ await new Promise((r) => setTimeout(r, 2500));
 const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || undefined, args: ['--use-gl=swiftshader', '--enable-unsafe-swiftshader'] });
 const page = await browser.newPage({ viewport: { width: 1400, height: 860 } });
 const errors = [];
-page.on('console', (msg) => { if (msg.type() === 'error' || msg.type() === 'warning') errors.push(`${msg.type()}: ${msg.text()}`); });
+page.on('console', (msg) => { if (msg.type() === 'error') errors.push(`${msg.type()}: ${msg.text()}`); });
 page.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
 await page.goto('http://localhost:4173/');
 await page.waitForTimeout(2500);

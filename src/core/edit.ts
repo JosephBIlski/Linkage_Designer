@@ -64,7 +64,14 @@ export function moveVertex(m: Model, pointId: ID, dest: Vec3, opts: MoveVertexOp
   const affected = releaseHelperAttachments(link, pointId);
   reframeRigidityAway(m, link, pointId);
   const free = new Set([pointId]);
-  const res = solveSketch(m, { dragTargets: [{ pointId, pos: dest, weight: 1 }], freePointIds: free, allowGroundMove: link.ground, maxIter: 80 });
+  // Weak targets keep each released helper at its current offset from its base, so a joint axis whose
+  // partner helper is only roll-constrained cannot drift (tilt) while the angle relations are released.
+  const helperTargets = affected.map(({ helper, base }) => ({
+    pointId: helper,
+    pos: add(base === pointId ? dest : m.points[base].pos, sub(m.points[helper].pos, m.points[base].pos)),
+    weight: 0.02,
+  }));
+  const res = solveSketch(m, { dragTargets: [{ pointId, pos: dest, weight: 1 }, ...helperTargets], freePointIds: free, allowGroundMove: link.ground, maxIter: 80 });
   const reached = dist(res.positions.get(pointId)!, dest) <= Math.max(tol, 1e-6);
   if (!res.converged || !reached) {
     Object.assign(m, parseModel(snapshot));
@@ -279,13 +286,28 @@ export function projectToPlane(p: Vec3, origin: Vec3, normal: Vec3): Vec3 {
   return sub(p, scale(n, dot(sub(p, origin), n)));
 }
 
-/** Intersection of a ray with a plane, or null when (nearly) parallel. */
+/** Intersection of a ray with a plane, or null when (nearly) parallel or when the hit lies behind the ray origin. */
 export function rayPlane(o: Vec3, d: Vec3, origin: Vec3, normal: Vec3): Vec3 | null {
   const n = normalize(normal);
-  const denom = dot(d, n);
+  const dd = normalize(d);
+  const denom = dot(dd, n);
   if (Math.abs(denom) < 1e-6) return null;
   const t = dot(sub(origin, o), n) / denom;
-  return add(o, scale(d, t));
+  if (t < 0) return null;
+  return add(o, scale(dd, t));
+}
+
+/**
+ * Place a free sketch vertex on a fitted plane: along its pointer ray when the
+ * ray meets the plane at a reasonable angle in front of the camera, otherwise
+ * by orthogonal projection (grazing rays would fling the vertex far away).
+ */
+export function placeOnFittedPlane(p: Vec3, ray: { o: Vec3; d: Vec3 } | undefined, origin: Vec3, normal: Vec3, minCos = 0.15): Vec3 {
+  const proj = projectToPlane(p, origin, normal);
+  if (!ray) return proj;
+  const grazing = Math.abs(dot(normalize(ray.d), normalize(normal))) < minCos;
+  if (grazing) return proj;
+  return rayPlane(ray.o, ray.d, origin, normal) ?? proj;
 }
 
 export { cross };
