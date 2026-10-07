@@ -4,7 +4,7 @@
  * the Edit and Sketch tools).
  */
 import { add, cross, dist, dot, len, normalize, perpendicular, scale, sub } from './geometry';
-import { commitSketch, modelSize, solveSketch } from './kinematics';
+import { applyPositions, commitSketch, modelSize, solveSketch } from './kinematics';
 import {
   addJoint,
   attachHelper,
@@ -71,7 +71,13 @@ export function moveVertex(m: Model, pointId: ID, dest: Vec3, opts: MoveVertexOp
     pos: add(base === pointId ? dest : m.points[base].pos, sub(m.points[helper].pos, m.points[base].pos)),
     weight: 0.02,
   }));
-  const res = solveSketch(m, { dragTargets: [{ pointId, pos: dest, weight: 1 }, ...helperTargets], freePointIds: free, allowGroundMove: link.ground, maxIter: 80 });
+  let res = solveSketch(m, { dragTargets: [{ pointId, pos: dest, weight: 1 }, ...helperTargets], freePointIds: free, allowGroundMove: link.ground, maxIter: 80 });
+  if (!res.converged && helperTargets.length) {
+    // the hinge axis legitimately has to rotate (the weak helper targets conflict with hard constraints):
+    // keep the held-helper result only as a warm start that fixes the roll, then solve exactly without it
+    applyPositions(m, res.positions);
+    res = solveSketch(m, { dragTargets: [{ pointId, pos: dest, weight: 1 }], freePointIds: free, allowGroundMove: link.ground, maxIter: 80 });
+  }
   const reached = dist(res.positions.get(pointId)!, dest) <= Math.max(tol, 1e-6);
   if (!res.converged || !reached) {
     Object.assign(m, parseModel(snapshot));

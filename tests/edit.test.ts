@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { addBar, addJoint, addPolygon, addPolygonFromPoints, bodyPlaneJoint, createModel, serializeModel, setGround } from '../src/core/model';
 import { autoJoinCoincident, fitSketchPlane, moveVertex, placeOnFittedPlane, projectToPlane, rayPlane } from '../src/core/edit';
-import { addConstructionAxis } from '../src/core/model';
+import { addConstructionAxis, addConstructionPoint } from '../src/core/model';
 import { commitSketch, solveSketch } from '../src/core/kinematics';
 import { computeMobility, currentViolation } from '../src/core/kinematics';
 import { foldedVertexPositions } from '../src/core/examples';
@@ -280,5 +280,34 @@ describe('re-verification follow-ups', () => {
     // hits behind the ray origin are rejected
     expect(rayPlane([0, 0, 1], [0, 0, 1], origin, normal)).toBeNull();
     expect(rayPlane([0, 0, 1], [0, 0, -1], origin, normal)).toEqual([0, 0, 0]);
+  });
+});
+
+describe('edits that require the hinge axis to tilt', () => {
+  it('succeeds when the joint axis must rotate with a spatially constrained partner link', () => {
+    const m = createModel();
+    const g = addBar(m, [-2, 0, 0], [-1, 0, 0]);
+    setGround(m, g.id);
+    const bar1 = addBar(m, [-1, 0, 0], [1, 0, 0]);
+    const bar2 = addBar(m, [1, 0, 0], [3, 0, 0]);
+    addJoint(m, 'revolute', { linkId: g.id, kind: 'vertex', pointIds: [g.pointIds[1]] }, { linkId: bar1.id, kind: 'vertex', pointIds: [bar1.pointIds[0]] }, { axis: [0, 0, 1] });
+    const hinge = addJoint(m, 'revolute', { linkId: bar1.id, kind: 'vertex', pointIds: [bar1.pointIds[1]] }, { linkId: bar2.id, kind: 'vertex', pointIds: [bar2.pointIds[0]] }, { axis: [0, 0, 1] })!;
+    const anchor = addConstructionPoint(m, [3, 0, 0], 'P');
+    addJoint(m, 'spherical', { linkId: bar2.id, kind: 'vertex', pointIds: [bar2.pointIds[1]] }, { constructionId: anchor.id });
+    expect(currentViolation(m)).toBeLessThan(1e-9);
+    const th = 0.3;
+    const dest: Vec3 = [3 - 2 * Math.cos(th), 0, 2 * Math.sin(th)]; // on bar2's sphere about the anchor: bar2 must tilt
+    const res = moveVertex(m, bar1.pointIds[1], dest);
+    expect(res.ok).toBe(true);
+    expect(dist(m.points[bar1.pointIds[1]].pos, dest)).toBeLessThan(1e-6);
+    expect(currentViolation(m)).toBeLessThan(1e-8);
+    // the hinge helpers followed the tilted partner (they stay perpendicular to bar2)
+    const b2 = [0, 1, 2].map((i) => m.points[bar2.pointIds[1]].pos[i] - m.points[bar2.pointIds[0]].pos[i]);
+    for (const h of hinge.helpers ?? []) {
+      if (!h) continue;
+      const base = m.points[h].linkId === bar1.id ? bar1.pointIds[1] : bar2.pointIds[0];
+      const off = [0, 1, 2].map((i) => m.points[h].pos[i] - m.points[base].pos[i]);
+      expect(Math.abs(off[0] * b2[0] + off[1] * b2[1] + off[2] * b2[2])).toBeLessThan(1e-6);
+    }
   });
 });
