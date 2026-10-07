@@ -87,12 +87,13 @@ console.log('after paste', JSON.stringify((await state()).links.length));
 await page.screenshot({ path: `${OUT}/08-features.png` });
 
 // 9. Thin lone bar in the DEFAULT view: a drag started 4 px off the centreline must still grab the bar
+// (the bar is placed away from the ORIGIN datum, which would otherwise snap and pin its first end)
 await page.evaluate(() => { const { app } = window.linkageDesigner; app.newModel(); });
 await page.waitForTimeout(300);
 await page.click('button[title^="Link —"]');
-await clickWorld([0, 0, 0]); await clickWorld([2, 0, 0]);
+await clickWorld([0.4, 0.7, 0]); await clickWorld([2.4, 0.7, 0]);
 await page.click('button[title^="Select —"]');
-const mid = await W([1, 0, 0]);
+const mid = await W([1.4, 0.7, 0]);
 const before9 = await page.evaluate(() => Object.values(window.linkageDesigner.app.model.points).map((p) => [...p.pos]));
 await page.mouse.move(mid.x, mid.y + 4);
 await page.mouse.down();
