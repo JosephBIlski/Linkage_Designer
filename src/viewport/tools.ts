@@ -5,7 +5,9 @@
  */
 import type { App, ToolName } from '../app';
 import { add, dist, dot, len, normalize, scale, sub, cross } from '../core/geometry';
-import { commitSketch, solveSketch, syncDriverValues } from '../core/kinematics';
+import { solveSketch, syncDriverValues } from '../core/kinematics';
+import { tryAddJoint, trySolveCommit } from '../core/feasibility';
+import { findCreaseLoops, isCrease, prefoldVertex } from '../core/fold';
 import {
   addAngleDriver,
   addBar,
@@ -34,7 +36,7 @@ import { autoJoinCoincident, fitSketchPlane, moveVertex, placeOnFittedPlane, pro
 import { duplicateLink, hasCollinearTriple, linearArray, mirrorAcrossPlane, polarArray } from '../core/patterns';
 import { addPolygonFromPoints } from '../core/model';
 import { isConstructionRef } from '../core/types';
-import { FEATURES, STATUS, TOOLS, CONSTRUCTION_NAMES } from '../ui/strings';
+import { FEATURES, STATUS, TOOLS, CONSTRUCTION_NAMES, jointRefusedMessage } from '../ui/strings';
 import type { PickResult, ViewportPointerEvent } from './scene';
 
 export function toolHint(tool: ToolName): string {
@@ -729,17 +731,29 @@ export class ToolManager {
       app.setStatus(STATUS.jointIncompatible);
       return;
     }
+    // pre-flight: add the joint, re-solve so it is satisfied (a crease between edges of slightly different length
+    // lets one link's edge adapt) and keep it only when the solve is accepted; otherwise the model is restored,
+    // no undo entry is recorded and the status bar explains why (docs/CONSTRUCTION_PLAN.md, 0b)
     app.beginChange();
-    const j = addJoint(m, type, this.featureA, f, { axis: sketchNormal(m), pitch: app.toolOptions.pitch });
-    if (j) {
-      // snap geometry so the new joint is satisfied
-      const res = solveSketch(m, {});
-      commitSketch(m, res);
-      app.select({ type: 'joint', id: j.id });
-      app.setStatus(STATUS.jointCreated);
+    const r = tryAddJoint(m, type, this.featureA, f, { axis: sketchNormal(m), pitch: app.toolOptions.pitch });
+    if (!r.ok || !r.joint) {
+      app.abortChange();
+      app.setStatus(jointRefusedMessage(r.diagnosis ?? { kind: 'infeasible', residual: r.residual }));
+    } else {
+      app.select({ type: 'joint', id: r.joint.id });
+      // a crease that closes a flat loop of panels leaves the vertex in its singular flat state: point at Fold
+      const flat = this.inFlatLoop(r.joint.id);
+      app.setStatus(flat ? `${STATUS.jointCreated} · ${STATUS.vertexFlatHint}` : STATUS.jointCreated);
+      app.endChange();
     }
-    app.endChange();
     this.featureA = null;
+  }
+
+  /** Is the joint a crease of a flat crease loop (a vertex whose creases are all unfolded)? */
+  private inFlatLoop(jointId: ID): boolean {
+    const m = this.app.model;
+    const j = m.joints[jointId];
+    return !!j && isCrease(m, j) && findCreaseLoops(m).some((l) => l.flat && l.creaseIds.includes(jointId));
   }
 
   private groundTool(ev: ViewportPointerEvent): void {
@@ -759,10 +773,21 @@ export class ToolManager {
     const pick = ev.pick;
     if (!pick) return;
     app.beginChange();
+    let note = '';
     if (pick.type === 'joint') {
       const j = m.joints[pick.id];
-      if (j?.type === 'revolute') addFoldDriver(m, j.id);
-      else if (j && (j.type === 'prismatic' || j.type === 'cylindrical' || j.type === 'screw')) addSlideDriver(m, j.id);
+      if (j?.type === 'revolute') {
+        if (this.inFlatLoop(j.id)) {
+          // a fold driver on a flat vertex would sweep the degenerate straight-hinge branch: pre-fold first, in the
+          // same change (one undo entry). The driver the pre-fold may keep for a driverless model is replaced by the
+          // one the user asked for, on the picked crease.
+          const hadDrivers = m.drivers.length > 0;
+          const r = prefoldVertex(m, { preferCreaseId: j.id });
+          if (r.ok && !hadDrivers) m.drivers = [];
+          note = r.ok ? STATUS.prefolded : STATUS.flatVertexWarning;
+        }
+        addFoldDriver(m, j.id);
+      } else if (j && (j.type === 'prismatic' || j.type === 'cylindrical' || j.type === 'screw')) addSlideDriver(m, j.id);
     } else if (pick.linkId) {
       const cands = candidateAngleDrivers(m).filter((c) => c.linkId === pick.linkId);
       const c = cands.find((x) => x.pivotId === pick.pointId) ?? cands[0];
@@ -772,7 +797,7 @@ export class ToolManager {
     syncDriverValues(m);
     app.sim.activeDriver = Math.max(0, m.drivers.length - 1);
     app.endChange();
-    app.setStatus(STATUS.driverSet);
+    app.setStatus(note ? `${STATUS.driverSet} · ${note}` : STATUS.driverSet);
   }
 
   private deleteTool(ev: ViewportPointerEvent): void {
@@ -1012,15 +1037,25 @@ export class ToolManager {
           addJoint(m, m.settings.defaultJoint, { linkId: d.linkId, kind: 'vertex', pointIds: [d.pointId] }, { linkId: other.linkId, kind: 'vertex', pointIds: [other.id] }, { axis: sketchNormal(m) });
         }
       }
-      const res = solveSketch(m, { freePointIds: new Set([d.pointId]), allowGroundMove: m.links[d.linkId].ground, maxIter: 40 });
-      commitSketch(m, res, new Set([d.pointId]));
+      // exact solve on release (the drag preview used soft targets); a pose that cannot satisfy the constraints is
+      // never committed: the pre-drag model comes back and the status bar says so
+      const r = trySolveCommit(m, { freePointIds: new Set([d.pointId]), allowGroundMove: m.links[d.linkId].ground, maxIter: 40 });
+      if (!r.ok) {
+        app.abortChange();
+        app.setStatus(STATUS.editRefused);
+        return;
+      }
       app.select({ type: 'vertex', id: d.linkId, pointId: d.pointId });
       app.endChange();
       return;
     }
     if (d.kind === 'link') {
-      const res = solveSketch(m, { allowGroundMove: m.links[d.linkId].ground, maxIter: 40 });
-      commitSketch(m, res);
+      const r = trySolveCommit(m, { allowGroundMove: m.links[d.linkId].ground, maxIter: 40 });
+      if (!r.ok) {
+        app.abortChange();
+        app.setStatus(STATUS.editRefused);
+        return;
+      }
       app.select({ type: 'link', id: d.linkId });
       app.endChange();
       return;

@@ -7,21 +7,21 @@
 import type { App, Mode, ToolName } from '../app';
 import {
   barLength,
-  changeJointType,
   jointsAtPoint,
   removeJoint,
   setGround,
 } from '../core/model';
-import { commitSketch, solveSketch } from '../core/kinematics';
+import { consistencyTolerance, poseIsConsistent, tryChangeJointType, trySolveCommit } from '../core/feasibility';
+import { prefoldVertex } from '../core/fold';
 import type { Construction, ID, Joint, JointType, Link, Target, Vec3 } from '../core/types';
 import { isConstructionRef } from '../core/types';
 import { createColorPicker } from './colorPicker';
 import { icon } from './icons';
 import { DEFAULT_SETTINGS, type AppSettings } from './settings';
-import { APP, EXAMPLES, HELP, JOINTS, MENU, MODES, PANEL, POPUP, PREVIEW, SETTINGS, SIM, STATUS, TOOLS, TOOL_OPTIONS, TREE } from './strings';
+import { APP, EXAMPLES, HELP, JOINTS, MENU, MODES, PANEL, POPUP, PREVIEW, SETTINGS, SIM, STATUS, TOOLS, TOOL_OPTIONS, TREE, jointRefusedMessage } from './strings';
 import { duplicateLink, extrudePolygon, translation } from '../core/patterns';
-import { modelSize } from '../core/kinematics';
-import { bodyPlaneJoint } from '../core/model';
+import { currentViolation, modelSize } from '../core/kinematics';
+import { bodyPlaneJoint, setBodyPlane } from '../core/model';
 import { add, cross, scale } from '../core/geometry';
 import { ToolManager, parseTypedPoint } from '../viewport/tools';
 
@@ -269,9 +269,16 @@ export class UI {
     const mob = app.sim.mobility;
     if (mob) {
       const extra = mob.grounded ? '' : ` (${SIM.rigidBodyModes}: ${mob.rigidBodyModes})`;
-      this.dofChip.textContent = `${STATUS.dof}: ${mob.dof}${extra}` + (app.sim.violation > 1e-5 ? ` · ${STATUS.violated}` : '');
-      this.dofChip.classList.toggle('chip--warn', app.sim.violation > 1e-5);
-    } else this.dofChip.textContent = '';
+      // the same tolerance that refuses Solidify / baking on Save, so the chip warns exactly when they would refuse
+      const violated = app.sim.violation > consistencyTolerance(app.model);
+      this.dofChip.textContent = `${STATUS.dof}: ${mob.dof}${extra}` + (violated ? ` · ${STATUS.violated}` : '');
+      this.dofChip.classList.toggle('chip--warn', violated);
+      const locked = app.sim.lockedCreaseIds.length;
+      this.dofChip.title = locked ? SIM.creasesLocked(locked) : '';
+    } else {
+      this.dofChip.textContent = '';
+      this.dofChip.title = '';
+    }
     // avoid rebuilding panels while the user is typing in them
     const active = document.activeElement;
     const typing = active && (active.tagName === 'INPUT' || active.tagName === 'SELECT') && (this.props.contains(active) || this.modePanel.contains(active) || this.toolOptions.contains(active) || this.tree.contains(active));
@@ -375,6 +382,7 @@ export class UI {
         if (link.locked) badges.push(TREE.locked);
         if (link.flexible) badges.push(TREE.flexible);
         if (link.hidden) badges.push(TREE.hidden);
+        if (bodyPlaneJoint(m, link.id)) badges.push(TREE.planar2d);
         const eye = el('button', `tree-eye ${link.hidden ? 'off' : ''}`);
         eye.innerHTML = icon('eye');
         eye.title = link.hidden ? TREE.show : TREE.hide;
@@ -403,10 +411,8 @@ export class UI {
     const joints = Object.values(m.joints).filter((j) => j.a.kind !== 'body');
     group('joints', TREE.joints, joints.length, (list) => {
       for (const j of joints) {
-        const a = m.links[j.a.linkId]?.name ?? '';
-        const b = isConstructionRef(j.b) ? m.construction[j.b.constructionId]?.name ?? '' : m.links[j.b.linkId]?.name ?? '';
         list.appendChild(
-          item(`${JOINTS[j.type].short} · ${a} ↔ ${b}`, sel?.type === 'joint' && sel.id === j.id, () => app.select({ type: 'joint', id: j.id }), {
+          item(`${JOINTS[j.type].short} · ${this.jointEnds(j)}`, sel?.type === 'joint' && sel.id === j.id, () => app.select({ type: 'joint', id: j.id }), {
             iconName: j.type,
             hover: () => app.setHover({ type: 'joint', id: j.id, point: [0, 0, 0], distance: 0 }),
           }),
@@ -513,6 +519,14 @@ export class UI {
     if (sim.mobility) {
       summary.appendChild(el('p', 'readout', `${SIM.motionDOF}: ${sim.mobility.dof}${sim.mobility.grounded ? '' : ` — ${SIM.notGrounded}`}`));
     }
+    if (sim.lockedCreaseIds.length) summary.appendChild(el('p', 'hint warn', SIM.creasesLocked(sim.lockedCreaseIds.length)));
+    const flatLoops = sim.creaseLoops.filter((l) => l.flat).length;
+    if (flatLoops > 0) {
+      summary.appendChild(el('p', 'hint warn', SIM.flatVertices(flatLoops)));
+      const actions = el('div', 'actions');
+      actions.appendChild(button(SIM.fold, () => this.foldFlatVertex(), { title: SIM.foldHelp }));
+      summary.appendChild(actions);
+    }
     box.appendChild(summary);
     if (app.mode === 'construction') return;
 
@@ -588,6 +602,34 @@ export class UI {
     return s;
   }
 
+  /** "<link A> ↔ <link B or datum>" for a joint, used by the tree and the status bar. */
+  private jointEnds(j: Joint): string {
+    const m = this.app.model;
+    const a = m.links[j.a.linkId]?.name ?? '';
+    const b = isConstructionRef(j.b) ? m.construction[j.b.constructionId]?.name ?? '' : m.links[j.b.linkId]?.name ?? '';
+    return `${a} ↔ ${b}`;
+  }
+
+  /**
+   * Fold command (Mechanism panel): pre-fold the first flat crease loop so that every crease leaves the singular flat
+   * state; one undo entry on success, nothing recorded and the model untouched on failure.
+   */
+  private foldFlatVertex(): void {
+    const app = this.app;
+    const m = app.model;
+    app.beginChange();
+    const r = prefoldVertex(m);
+    if (!r.ok || !r.creaseId) {
+      app.abortChange();
+      app.setStatus(STATUS.foldFailed(r.reason ?? 'noBranch'));
+      return;
+    }
+    const crease = m.joints[r.creaseId];
+    app.select({ type: 'joint', id: r.creaseId });
+    app.setStatus(STATUS.folded(crease ? this.jointEnds(crease) : '', r.dof ?? 0));
+    app.endChange();
+  }
+
   private driverLabel(d: import('../core/types').Driver): string {
     const m = this.app.model;
     if (d.kind === 'angle') return `${m.links[d.linkId ?? '']?.name ?? ''} · angle`;
@@ -645,12 +687,13 @@ export class UI {
       box.appendChild(
         row(
           PANEL.length,
-          numberInput(barLength(m, link), (v) => change(() => {
+          numberInput(barLength(m, link), (v) => {
+            // the new rest length is kept only when the mechanism can be re-assembled with it
+            app.beginChange();
             const r = link.rigidity.find((c) => c.kind === 'dist' && !c.fixed);
             if (r && r.kind === 'dist') r.length = Math.max(1e-3, v);
-            const res = solveSketch(m, {});
-            commitSketch(m, res);
-          }), { step: 0.1, min: 0.001 }),
+            this.resolveOrRevert(trySolveCommit(m, {}).ok);
+          }, { step: 0.1, min: 0.001 }),
         ),
       );
     }
@@ -660,6 +703,23 @@ export class UI {
     box.appendChild(row(PANEL.locked, checkbox(link.locked, (v) => change(() => (link.locked = v)))));
     box.appendChild(row(PANEL.hidden, checkbox(!!link.hidden, (v) => change(() => (link.hidden = v)))));
     box.appendChild(row(PANEL.ground, checkbox(link.ground, (v) => change(() => setGround(m, v ? link.id : null)))));
+    if (link.kind === 'bar' || link.kind === 'polygon') {
+      // the sketch-plane (2-D body) constraint is a hidden planar joint; it is presented as a property of the link
+      const bp = bodyPlaneJoint(m, link.id);
+      const planeName = bp && isConstructionRef(bp.b) ? m.construction[bp.b.constructionId]?.name : undefined;
+      const planeRow = row(
+        PANEL.keepOnSketchPlane,
+        checkbox(!!bp, (v) => {
+          // adding or removing the constraint re-solves the mechanism; a pose that cannot satisfy it is refused
+          app.beginChange();
+          setBodyPlane(m, link.id, v ? m.settings.sketchPlaneId : null);
+          this.resolveOrRevert(trySolveCommit(m, { allowGroundMove: link.ground }).ok);
+        }),
+      );
+      planeRow.title = PANEL.keepOnSketchPlaneHelp;
+      if (planeName) planeRow.appendChild(el('span', 'value', PANEL.onPlane(planeName)));
+      box.appendChild(planeRow);
+    }
     box.appendChild(row(PANEL.flexible, checkbox(link.flexible, (v) => change(() => (link.flexible = v)))));
     if (link.flexible) {
       const s = el('input');
@@ -697,6 +757,11 @@ export class UI {
       const r = row(TOOL_OPTIONS.extrudeHeight, h);
       const b = button(PANEL.extrude, () => {
         this.extrudeHeight = height;
+        // extruding rebuilds the polygon's rest geometry from its current shape, which must not be a violated one
+        if (!poseIsConsistent(m)) {
+          app.setStatus(PANEL.extrudeRefused(currentViolation(m)));
+          return;
+        }
         change(() => {
           if (extrudePolygon(m, link, height)) app.setStatus(STATUS.extruded);
         });
@@ -756,6 +821,19 @@ export class UI {
     if (this.clipboardLinkId) this.pasteCopied();
   }
 
+  /** Finish a re-solved Properties edit: record it when the solve was accepted, otherwise restore the pre-edit model and say so. */
+  private resolveOrRevert(ok: boolean): void {
+    const app = this.app;
+    if (ok) {
+      app.endChange();
+      return;
+    }
+    const sel = app.selection;
+    app.abortChange();
+    app.select(sel);
+    app.setStatus(STATUS.editRefused);
+  }
+
   private pointProps(box: HTMLElement, pointId: ID): void {
     const app = this.app;
     const m = app.model;
@@ -770,9 +848,7 @@ export class UI {
           const target: [number, number, number] = [...pt.pos] as [number, number, number];
           target[i] = v;
           const link = m.links[pt.linkId];
-          const res = solveSketch(m, { dragTargets: [{ pointId, pos: target, weight: 1 }], freePointIds: new Set([pointId]), allowGroundMove: link.ground });
-          commitSketch(m, res, new Set([pointId]));
-          app.endChange();
+          this.resolveOrRevert(trySolveCommit(m, { dragTargets: [{ pointId, pos: target, weight: 1 }], freePointIds: new Set([pointId]), allowGroundMove: link.ground }).ok);
         }, { step: 0.1, digits: 4 }),
       );
       pos.lastElementChild!.setAttribute('title', axis);
@@ -813,14 +889,18 @@ export class UI {
         row(
           PANEL.changeType,
           select(JOINT_TYPES.map((t) => ({ value: t, label: JOINTS[t].label })), j.type, (t) => {
+            // same pre-flight as the Joint tool: an incompatible or unsatisfiable type leaves the joint as it was
+            const sel = app.selection;
             app.beginChange();
-            const nj = changeJointType(m, j.id, t);
-            if (nj) {
-              const res = solveSketch(m, {});
-              commitSketch(m, res);
-              app.select({ type: 'joint', id: nj.id });
-            } else app.setStatus(STATUS.jointIncompatible);
-            app.endChange();
+            const r = tryChangeJointType(m, j.id, t);
+            if (r.ok && r.joint) {
+              app.select({ type: 'joint', id: r.joint.id });
+              app.endChange();
+            } else {
+              app.abortChange();
+              app.select(sel);
+              app.setStatus(r.diagnosis?.kind === 'incompatible' ? STATUS.jointIncompatible : jointRefusedMessage(r.diagnosis ?? { kind: 'infeasible', residual: r.residual }));
+            }
           }),
         ),
       );
@@ -920,27 +1000,36 @@ export class UI {
     const typeBtn = el('button', 'popup__btn');
     typeBtn.innerHTML = icon(j ? j.type : 'none');
     typeBtn.title = j ? `${JOINTS[j.type].label} — ${POPUP.changeConstraint}` : POPUP.noConstraint;
+    // the sketch-plane constraint is not a joint at this point, but it is why the point cannot leave the plane
+    const bp = link ? bodyPlaneJoint(m, link.id) : null;
+    const planeName = bp && isConstructionRef(bp.b) ? m.construction[bp.b.constructionId]?.name : undefined;
+    if (planeName) typeBtn.title += ` · ${POPUP.onSketchPlane(planeName)}`;
     typeBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       if (!j) {
         app.setStatus(TOOLS.joint.hint);
         return;
       }
-      // cycle through compatible joint types
+      // cycle to the next compatible joint type; a type the mechanism cannot be re-assembled with stops the cycle
+      // with an explanation and the joint stays as it was (incompatible types are skipped, nothing is removed)
       const idx = JOINT_TYPES.indexOf(j.type);
       for (let k = 1; k <= JOINT_TYPES.length; k++) {
         const t = JOINT_TYPES[(idx + k) % JOINT_TYPES.length];
+        const sel = app.selection;
         app.beginChange();
-        const nj = changeJointType(m, j.id, t);
-        if (nj) {
-          const res = solveSketch(m, {});
-          commitSketch(m, res);
+        const r = tryChangeJointType(app.model, j.id, t);
+        if (r.ok) {
           app.endChange();
           app.setStatus(`${JOINTS[t].label}`);
           this.showPopup(pointId);
           return;
         }
-        app.endChange({ skipUndo: true });
+        app.abortChange();
+        app.select(sel);
+        if (r.diagnosis?.kind !== 'incompatible') {
+          app.setStatus(jointRefusedMessage(r.diagnosis ?? { kind: 'infeasible', residual: r.residual }));
+          return;
+        }
       }
     });
     const removeBtn = el('button', 'popup__btn popup__btn--remove');

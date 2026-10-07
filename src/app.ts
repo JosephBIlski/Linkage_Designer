@@ -22,7 +22,9 @@ import {
   type SweepResult,
 } from './core/kinematics';
 import { EXAMPLE_BUILDERS } from './core/examples';
-import { addAngleDriver, candidateAngleDrivers, cloneModel, createModel, parseModel, refreshRigidity, serializeModel, groundLink } from './core/model';
+import { addAngleDriver, candidateAngleDrivers, cloneModel, createModel, creasesLockedByPlane, parseModel, serializeModel, groundLink } from './core/model';
+import { solidifyRestGeometry } from './core/feasibility';
+import { findCreaseLoops, type CreaseLoop } from './core/fold';
 import { analyseDesign, applyDesign, solveDesign, symmetricEigen3, type DesignAnalysis, type DesignResult, type PointDesignSpace } from './core/synthesis';
 import { normalize, sub } from './core/geometry';
 import type { ID, JointType, Model, Target, Vec3 } from './core/types';
@@ -59,6 +61,10 @@ export interface SimState {
   analysis: DesignAnalysis | null;
   mobility: MobilityResult | null;
   violation: number;
+  /** Creases that cannot fold because both of their panels are kept on the same sketch plane (creasesLockedByPlane). */
+  lockedCreaseIds: ID[];
+  /** Crease loops around shared vertices (findCreaseLoops); a flat one offers the Fold command in the Mechanism panel. */
+  creaseLoops: CreaseLoop[];
   assembled: boolean;
   showDesignSpace: boolean;
   showEditPoints: boolean;
@@ -89,7 +95,7 @@ export class App {
   hint = '';
   viewport: Viewport;
   renderer: ModelRenderer;
-  sim: SimState = { activeDriver: 0, sweep: null, surface: null, poseValues: [], poses: [], design: null, analysis: null, mobility: null, violation: 0, assembled: true, showDesignSpace: true, showEditPoints: true, showPaths: true, message: '' };
+  sim: SimState = { activeDriver: 0, sweep: null, surface: null, poseValues: [], poses: [], design: null, analysis: null, mobility: null, violation: 0, lockedCreaseIds: [], creaseLoops: [], assembled: true, showDesignSpace: true, showEditPoints: true, showPaths: true, message: '' };
   preview: PreviewState = { value: 0, playing: false, speed: 60, direction: 1, positions: null, trace: true };
   fileName = '';
 
@@ -348,11 +354,15 @@ export class App {
     const m = this.model;
     const sim = this.sim;
     sim.message = '';
+    // cached here so the panels and the DOF chip only read it
+    sim.lockedCreaseIds = creasesLockedByPlane(m);
     try {
+      sim.creaseLoops = findCreaseLoops(m);
       sim.mobility = Object.keys(m.links).length ? computeMobility(m) : null;
       sim.violation = Object.keys(m.links).length ? currentViolation(m) : 0;
     } catch (e) {
       console.error(e);
+      sim.creaseLoops = [];
       sim.mobility = null;
     }
     const needMotion = this.mode !== 'construction' || m.settings.displayPointIds.length > 0;
@@ -526,11 +536,18 @@ export class App {
     this.markDirty();
   }
 
-  /** Commit the current geometry as the design (rest lengths from current positions). */
-  solidifyAssumptions(): void {
+  /**
+   * Commit the current geometry as the design (rest lengths from current
+   * positions). Refused, with the links untouched and a status message, when
+   * the pose violates the constraints: baking it would make the violation the
+   * design. Returns whether the design was solidified.
+   */
+  solidifyAssumptions(): boolean {
     this.beginChange();
-    for (const l of Object.values(this.model.links)) refreshRigidity(this.model, l);
-    this.endChange();
+    const ok = solidifyRestGeometry(this.model);
+    this.endChange(); // records nothing when the links were left alone
+    this.setStatus(ok ? SIM.solidified : SIM.solidifyRefused(currentViolation(this.model)));
+    return ok;
   }
 
   // ---------------------------------------------------------------------------
@@ -659,9 +676,14 @@ export class App {
   // File IO
   // ---------------------------------------------------------------------------
 
-  /** Serialise the model, solidifying the current design first. */
+  /**
+   * Serialise the model, solidifying the current design first. A pose that
+   * violates the constraints is saved as it is (rest geometry untouched, so
+   * the file holds the previous design and the violated positions) and the
+   * status bar says so; CSV / OBJ exports never solidify.
+   */
   saveToJson(): string {
-    for (const l of Object.values(this.model.links)) refreshRigidity(this.model, l);
+    if (!solidifyRestGeometry(this.model)) this.setStatus(SIM.savedUnsolidified(currentViolation(this.model)));
     return serializeModel(this.model);
   }
 

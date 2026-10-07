@@ -4,12 +4,14 @@
  * the Edit and Sketch tools).
  */
 import { add, cross, dist, dot, len, normalize, perpendicular, scale, sub } from './geometry';
-import { applyPositions, commitSketch, modelSize, solveSketch } from './kinematics';
+import { feasibilityTolerance, isAccepted, restore } from './feasibility';
+import { applyPositions, commitSketch, modelSize, solveSketch, solveSketchWithRelease } from './kinematics';
 import {
   addJoint,
   attachHelper,
   bodyPlaneJoint,
   buildRigidity,
+  creaseReleasePoints,
   findFrame,
   helperBase,
   jointsAtPoint,
@@ -154,10 +156,13 @@ export interface AutoJoinOptions {
  *    on a common sketch plane, a spherical joint. A link that is already
  *    attached to a crease vertex through one of the crease partners is not
  *    pinned again.
- * Returns the created joints.
+ * Returns the created joints. When the re-solve for the new joints is not
+ * accepted (never expected for vertices that already coincide, but a violated
+ * pose is never committed) the model is restored as it was and [] is returned.
  */
 export function autoJoinCoincident(m: Model, link: Link, vertexIds: ID[], opts: AutoJoinOptions): Joint[] {
   const tol = opts.tol ?? 1e-6 * Math.max(1, modelSize(m));
+  const snapshot = serializeModel(m);
   const wanted = new Set(vertexIds);
   // vertex of link -> coincident vertices of other links
   const matches = new Map<ID, ID[]>();
@@ -229,8 +234,14 @@ export function autoJoinCoincident(m: Model, link: Link, vertexIds: ID[], opts: 
     }
   }
   if (created.length) {
-    const res = solveSketch(m, { maxIter: 60 });
-    commitSketch(m, res);
+    // creases between edges that coincide only within the snap tolerance: the edited link's edge adapts
+    const free = new Set(created.flatMap((j) => creaseReleasePoints(m, j, link.id)));
+    const res = solveSketchWithRelease(m, free, { maxIter: 60 });
+    if (!isAccepted(res, feasibilityTolerance(m))) {
+      restore(m, snapshot);
+      return [];
+    }
+    commitSketch(m, res, free);
   }
   return created;
 }

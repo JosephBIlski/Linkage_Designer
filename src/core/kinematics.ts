@@ -45,6 +45,36 @@ export interface ForwardResult {
   sys: CompiledSystem;
 }
 
+// ---------------------------------------------------------------------------
+// Acceptance of a solve
+// ---------------------------------------------------------------------------
+
+/**
+ * Residual tolerance for accepting a sketch solve: 1e-7 of the model size,
+ * never below 1e-9. The solver's own criterion is absolute (hard residual
+ * below 1e-7 length units), which is unreachable in floating point for large
+ * models and needlessly strict for them; the scaled tolerance expresses what
+ * "satisfied" means at the scale the user is working at. Meant to be used
+ * together with the solver's converged flag (isAccepted); a static pose with
+ * no flag is judged with consistencyTolerance (feasibility.ts) instead.
+ */
+export function feasibilityTolerance(m: Model): number {
+  return Math.max(1e-9, 1e-7 * modelSize(m));
+}
+
+/**
+ * A sketch solve is accepted when the solver reports convergence OR its hard
+ * residual is within the model-size tolerance. Both are needed: the solver's
+ * flag covers small models, where the absolute criterion is the tighter one
+ * and also certifies that the least-squares gradient of any soft terms (drag
+ * targets, compliant links) has vanished; the scaled residual covers large
+ * models, where the absolute flag can stay false although every constraint is
+ * met to the precision the geometry has.
+ */
+export function isAccepted(result: ForwardResult, tol: number): boolean {
+  return result.converged || result.residual <= tol;
+}
+
 /** Solve the assembly for the given driver values (degrees / units) starting from `init`. */
 export function solveForward(m: Model, driverValues: number[], init?: Positions, opts: { maxIter?: number; maxStep?: number } = {}): ForwardResult {
   const sys = compile(m, { mode: 'forward', poses: 1, driverValues: [driverValues], posePositions: init ? [init] : undefined });
@@ -92,6 +122,8 @@ export interface SketchOptions {
   freePointIds?: Set<ID>;
   allowGroundMove?: boolean;
   maxIter?: number;
+  /** Warm start for the solve (default: the model's construction positions). */
+  init?: Positions;
 }
 
 /**
@@ -105,21 +137,58 @@ export function solveSketch(m: Model, opts: SketchOptions = {}): ForwardResult {
     dragTargets: opts.dragTargets,
     freePointIds: opts.freePointIds,
     allowGroundMove: opts.allowGroundMove,
+    posePositions: opts.init ? [opts.init] : undefined,
   });
   const res = solve(sys, sys.x0, { maxIter: opts.maxIter ?? 40, tol: 1e-8 });
   return { positions: sys.extract(res.x, 0), converged: res.converged, residual: res.hardResidual, iterations: res.iterations, sys };
 }
 
-/** Apply a sketch solve to the model and refresh the rest geometry of links whose points were released. */
-export function commitSketch(m: Model, result: ForwardResult, freePointIds?: Set<ID>): void {
+/**
+ * Sketch solve for a change that one link's rest shape must absorb: a rigid
+ * projection first, so every link is carried to its joint partners as a whole,
+ * then a second projection warm-started from that pose with the design
+ * distances of `freePointIds` released, so only those points take up what the
+ * rigid pose could not satisfy. After a crease merged two edges of slightly
+ * different length (see creaseReleasePoints) this moves the adapting link onto
+ * the other edge rigidly and then lets its edge take the partner's length
+ * (commitSketch bakes the new rest geometry); a single released solve would
+ * leave the link's other vertices behind when the link was not already in
+ * place, because releasing both end points of a triangle releases all of its
+ * distances. With no release points this is a plain solveSketch. An `init`
+ * warm start applies to the rigid step (the released step always starts from
+ * the rigid result).
+ */
+export function solveSketchWithRelease(m: Model, freePointIds: Set<ID>, opts: Omit<SketchOptions, 'freePointIds'> = {}): ForwardResult {
+  if (freePointIds.size === 0) return solveSketch(m, opts);
+  const rigid = solveSketch(m, opts);
+  return solveSketch(m, { ...opts, freePointIds, init: rigid.positions });
+}
+
+/**
+ * Apply a sketch solve to the model and refresh the rest geometry of links
+ * whose points were released. The rest geometry is refreshed only from an
+ * accepted result (isAccepted with the model-size tolerance): baking a violated
+ * pose would turn the violation into the design ("never bake a violated
+ * pose"). The positions are applied either way, because live dragging relies on
+ * showing intermediate soft-target solves and the violation of a refused result
+ * must stay visible to the caller and the DOF chip; the return value tells the
+ * caller whether the result was accepted (and the rest geometry refreshed), so
+ * a release path can roll the model back instead of keeping a violated pose.
+ * Every committing caller (trySolveCommit, tryAddJoint, autoJoinCoincident,
+ * moveVertex) verifies acceptance before calling this; the check here is the
+ * last line of defence.
+ */
+export function commitSketch(m: Model, result: ForwardResult, freePointIds?: Set<ID>): boolean {
+  const accepted = isAccepted(result, feasibilityTolerance(m));
   applyPositions(m, result.positions);
-  if (freePointIds) {
+  if (freePointIds && accepted) {
     const links = new Set<ID>();
     for (const pid of freePointIds) if (m.points[pid]) links.add(m.points[pid].linkId);
     for (const lid of links) refreshRigidity(m, m.links[lid]);
   }
   // keep driver values in sync with the construction pose
   syncDriverValues(m);
+  return accepted;
 }
 
 /** Update each driver's stored value from the current construction pose. */

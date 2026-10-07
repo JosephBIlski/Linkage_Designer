@@ -2,6 +2,11 @@
  * ALL user-visible text lives in this file so wording can be edited in one place.
  * Keys are grouped by UI area. Keep values short; tooltips may be longer.
  */
+import type { Diagnosis } from '../core/feasibility';
+import type { FoldReason } from '../core/fold';
+
+/** Compact number for status messages: up to four significant digits, no trailing zeros ("2", "2.1", "0.6878"). */
+const num = (x: number): string => String(Number(x.toPrecision(4)));
 
 export const APP = {
   title: 'Linkage Designer',
@@ -127,12 +132,18 @@ export const PANEL = {
   resetColor: 'Use default colour',
   locked: 'Locked (no edits in any mode)',
   ground: 'Ground link (fixed)',
+  // Sketch-plane (2-D body) constraint, presented as a link property (docs/CONSTRUCTION_PLAN.md, item 0d)
+  keepOnSketchPlane: 'Keep on sketch plane (2-D)',
+  keepOnSketchPlaneHelp: 'Holds every vertex of this link on the active sketch plane, the constraint geometry drawn in 2-D mode gets. Untick it to let the link fold or lift out of the plane. The mechanism is re-solved; a pose that cannot satisfy the change is refused.',
+  onPlane: (planeName: string): string => `on ${planeName}`,
   flexible: 'Flexible (compliant) link',
   stiffness: 'Relative stiffness',
   showPath: 'Show output path & design space for',
   deleteItem: 'Delete',
   extrude: 'Extrude to prism',
   extrudeHelp: 'Turns this polygon into a prism of the given height along its normal (negative = other side).',
+  extrudeRefused: (gap: number): string =>
+    `Not extruded: the current pose violates the constraints (gap ${num(gap)} units), so the polygon's shape cannot be taken as its design. Undo the last edit or release a joint first.`,
   copyLink: 'Duplicate',
   hidden: 'Hidden (not drawn, still simulated)',
   position: 'Position',
@@ -179,7 +190,13 @@ export const SIM = {
   softAssumptions: 'Soft assumptions (preview under-specified designs)',
   softAssumptionsHelp: 'When on, remaining design freedom is resolved by staying as close as possible to the current design, so a motion preview is always shown. When off, the preview is only shown once the design is fully specified.',
   solidify: 'Solidify assumptions',
-  solidifyHelp: 'Commit the current link geometry as the design. Saving or exporting does this automatically.',
+  solidifyHelp: 'Commit the current link geometry as the design. Saving does this automatically. Refused while the pose violates the constraints.',
+  // Rest-geometry baking guard: a violated pose is never made the design (docs/CONSTRUCTION_PLAN.md, item 0c)
+  solidified: 'Assumptions solidified: the current geometry is now the design.',
+  solidifyRefused: (gap: number): string =>
+    `Assumptions not solidified: the current pose violates the constraints (gap ${num(gap)} units). Undo the last edit or release a joint, then solidify again.`,
+  savedUnsolidified: (gap: number): string =>
+    `Saved without solidifying: the current pose violates the constraints (gap ${num(gap)} units), so the file keeps the previous design geometry together with the violated positions.`,
   motionDOF: 'Mechanism DOF',
   designDOF: 'Design DOF left',
   editPointsConstrained: 'Editing points constrained',
@@ -196,6 +213,16 @@ export const SIM = {
   rigidBodyModes: 'includes rigid-body modes of the floating assembly',
   solveFailed: 'The mechanism cannot be assembled at this input value.',
   timing: 'Timing: prescribed (each editing point keeps its input value)',
+  // Shown in the Mechanism panel and as the DOF chip tooltip when creasesLockedByPlane is non-empty
+  creasesLocked: (n: number): string =>
+    `${n} crease${n === 1 ? '' : 's'} cannot fold: both panels are kept on the sketch plane. Untick 'Keep on sketch plane' in Properties, or use Fold.`,
+  // Fold (pre-fold) command for flat origami vertices (docs/CONSTRUCTION_PLAN.md, item 1a)
+  flatVertices: (n: number): string =>
+    n === 1
+      ? 'A vertex is flat: all of its creases are unfolded, a singular state in which a simulation would fold only two of them.'
+      : `${n} vertices are flat: all of their creases are unfolded, a singular state in which a simulation would fold only two creases of each.`,
+  fold: 'Fold (pre-fold flat vertex)',
+  foldHelp: 'Drives one crease of a flat vertex to 160° and re-solves the panels so that every crease leaves the flat state (the generic folding branch). The sketch-plane constraints of the panels involved are removed; a model without a driver keeps the fold driver. Undo restores the flat vertex.',
 };
 
 export const PREVIEW = {
@@ -220,6 +247,7 @@ export const TREE = {
   locked: 'locked',
   flexible: 'flexible',
   hidden: 'hidden',
+  planar2d: '2-D',
   show: 'Show',
   hide: 'Hide',
   rename: 'Double-click to rename',
@@ -240,6 +268,37 @@ export const STATUS = {
   driverSet: 'Driver added',
   jointCreated: 'Joint created',
   jointIncompatible: 'These features cannot be connected with this joint type.',
+  // Joint pre-flight refusals (the model is restored; nothing moves)
+  jointRefusedIncompatible: 'These features cannot be connected with this joint type. Nothing was changed.',
+  jointRefusedEdgeLengths: (la: number, lb: number): string =>
+    `The two edges have different lengths (${num(la)} and ${num(lb)} units), so they cannot fold as one crease. Edit one panel so the edges match, or pick two edges of equal length. Nothing was moved.`,
+  jointRefusedSector: (vertexName: string, sumDeg: number, constrained2d: boolean): string =>
+    `The panels around vertex ${vertexName} have corner angles that add up to ${sumDeg.toFixed(1)}°, not 360°, so they cannot lie flat around it. ` +
+    (constrained2d
+      ? 'They can only meet by folding out of the sketch plane: remove the 2-D constraint from these panels, or change their shapes. '
+      : 'Change the panel shapes so the angles add up to 360°, or build the vertex in its folded shape. ') +
+    'Nothing was moved.',
+  jointRefusedNeeds3d: 'This joint can only be satisfied out of the sketch plane. Remove the 2-D constraint from the links involved (or sketch them in 3-D mode) and add the joint again. Nothing was moved.',
+  jointRefusedInfeasible: (residual: number): string =>
+    `This joint cannot be satisfied together with the existing constraints (a gap of ${num(residual)} units remains). Remove a conflicting joint or move the links into place before joining. Nothing was moved.`,
+  editRefused: 'The constraints cannot all be satisfied with this change, so it was not applied.',
+  // Fold (pre-fold) command and the flat-vertex hints around it
+  folded: (creaseName: string, dof: number): string => `Vertex pre-folded about crease ${creaseName}. Mechanism DOF: ${dof}.`,
+  foldFailed: (reason: FoldReason): string => {
+    switch (reason) {
+      case 'noLoop':
+        return 'Nothing to fold: creases must close a loop of at least three panels around one vertex.';
+      case 'notFlat':
+        return 'The vertex is already folded; there is nothing to pre-fold.';
+      case 'locked':
+        return 'A panel of this vertex is locked. Unlock it before folding.';
+      case 'noBranch':
+        return 'No folded state was found for this vertex: every crease is collinear with another one (an "X" vertex folds only as a straight hinge), or the panels cannot all leave the plane. Nothing was changed.';
+    }
+  },
+  prefolded: 'The flat vertex was pre-folded first so that every crease moves.',
+  flatVertexWarning: 'This crease belongs to a flat vertex that could not be pre-folded: the simulation may fold only two of its creases.',
+  vertexFlatHint: 'The vertex is flat: use Fold to pre-fold it before simulating.',
   jointSameLink: 'Pick a feature on a different link.',
   pickSecondFeature: 'Now pick a compatible feature on another link or construction geometry.',
   linkLocked: 'This link is locked.',
@@ -262,12 +321,29 @@ export const STATUS = {
   extruded: 'Polygon extruded to a prism',
 };
 
+/** Status-bar message for a refused joint (tryAddJoint / tryChangeJointType diagnosis). */
+export function jointRefusedMessage(d: Diagnosis): string {
+  switch (d.kind) {
+    case 'incompatible':
+      return STATUS.jointRefusedIncompatible;
+    case 'edgeLengths':
+      return STATUS.jointRefusedEdgeLengths(d.la, d.lb);
+    case 'sectorSum':
+      return STATUS.jointRefusedSector(d.vertexName, d.sumDeg, d.constrained2d);
+    case 'needs3d':
+      return STATUS.jointRefusedNeeds3d;
+    case 'infeasible':
+      return STATUS.jointRefusedInfeasible(d.residual);
+  }
+}
+
 export const POPUP = {
   constraintTitle: 'Constraint at this link end',
   removeConstraint: 'Remove constraint',
   addConstraint: 'Add constraint',
   changeConstraint: 'Change constraint type',
   noConstraint: 'No constraint',
+  onSketchPlane: (planeName: string): string => `on sketch plane ${planeName}`,
   lockLink: 'Lock link',
   unlockLink: 'Unlock link',
 };
