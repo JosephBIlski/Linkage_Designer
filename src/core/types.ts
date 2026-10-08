@@ -147,6 +147,15 @@ export interface Joint {
   offsets?: { slide?: number; angle?: number; planeNormal?: Vec3 };
   /** Point pairs that coincide (merged into one solver variable). */
   pairs?: [ID, ID][];
+  /**
+   * Origami crease data (edge–edge revolute with two merged pairs; see fold.ts isCrease). Optional, so files
+   * written before it existed load unchanged.
+   *  target: fold angle the user wants (degrees, the dihedral magnitude: 180 = flat, 0 = fully closed);
+   *  mv: mountain / valley assignment in the convention of fold.ts creaseMV (valley = the second panel is bent
+   *      toward the side of the first panel's face normal), used as the sign of the target and as the preferred
+   *      side when a flat vertex is pre-folded. Neither field moves geometry by itself.
+   */
+  fold?: { target?: number; mv?: 'M' | 'V' };
 }
 
 // ---------------------------------------------------------------------------

@@ -8,10 +8,11 @@ import { CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import type { Positions } from '../core/kinematics';
 import { modelSize } from '../core/kinematics';
 import { linkEdges, linkFaces } from '../core/model';
+import { creaseDihedralDeg, creaseMV, isCrease } from '../core/fold';
 import type { ID, Joint, Link, Model, Vec3 } from '../core/types';
 import { add, centroid, cross, dist, len, normalize, scale, sub } from '../core/geometry';
 import type { AppSettings } from '../ui/settings';
-import { JOINTS } from '../ui/strings';
+import { JOINTS, creaseLabel } from '../ui/strings';
 import type { PickResult, PickType, Viewport } from './scene';
 
 export interface EditPointView {
@@ -75,6 +76,10 @@ const unitBox = new THREE.BoxGeometry(1, 1, 1);
 const unitOcta = new THREE.OctahedronGeometry(1, 0);
 const unitCone = new THREE.ConeGeometry(1, 1, 16);
 const Y = new THREE.Vector3(0, 1, 0);
+/** Colour of a crease whose panels are coplanar (no mountain / valley class yet). */
+const CREASE_FLAT_COLOR = '#8d949c';
+/** Crease lines are drawn this much thicker than the panel edges they lie on (edge radius = 0.55 · r). */
+const CREASE_RADIUS_FACTOR = 1.6;
 
 function v(p: Vec3): THREE.Vector3 {
   return new THREE.Vector3(p[0], p[1], p[2]);
@@ -379,10 +384,14 @@ export class ModelRenderer {
       if (j.type === 'planar' && j.a.kind === 'body') continue; // sketch-plane constraints are implicit
       if (model.links[j.a.linkId]?.hidden) continue;
       if (!isConstructionRefLocal(j.b) && model.links[j.b.linkId]?.hidden) continue;
-      const pl = this.jointPlacement(model, j, state.positions);
-      if (!pl) continue;
       const selected = this.isSelected(state, 'joint', j.id);
       const hovered = this.isHovered(state, 'joint', j.id);
+      if (isCrease(model, j)) {
+        this.buildCrease(state, j, selected, hovered);
+        continue;
+      }
+      const pl = this.jointPlacement(model, j, state.positions);
+      if (!pl) continue;
       const color = selected ? settings.colors.selection : '#2b2f33';
       const mat = this.material(color, { emissive: hovered ? settings.colors.selection : undefined });
       const pick: Partial<PickResult> = { type: 'joint', id: j.id };
@@ -424,6 +433,27 @@ export class ModelRenderer {
       g.add(mesh);
       if (settings.showLabels && (selected || hovered)) this.label(JOINTS[j.type]?.label ?? j.type, add(pl.at, [0, 0, r * 4]), 'label label--joint');
     }
+  }
+
+  /**
+   * A crease (edge–edge revolute with merged end points) is drawn as a line
+   * along the shared edge, slightly thicker than the panel edges it covers, in
+   * the mountain / valley colour of its current dihedral (creaseMV; grey while
+   * the panels are coplanar) instead of the torus glyph. The dihedral is
+   * measured in the rendered pose, so Preview and Simulation poses are coloured
+   * as they fold. It remains pickable as the joint (selection colour when
+   * selected, emissive highlight when hovered) and shows "Crease M 160°" as its
+   * label when labels are on and it is selected or hovered.
+   */
+  private buildCrease(state: RenderState, j: Joint, selected: boolean, hovered: boolean): void {
+    const { model, settings } = state;
+    const P = (id: ID): Vec3 => state.positions.get(id) ?? model.points[id].pos;
+    const [a0, a1] = j.a.pointIds.map(P);
+    const mv = creaseMV(model, j, state.positions);
+    const color = selected ? settings.colors.selection : mv === 'M' ? settings.colors.mountain : mv === 'V' ? settings.colors.valley : CREASE_FLAT_COLOR;
+    const mat = this.material(color, { emissive: hovered ? settings.colors.selection : undefined });
+    this.pickableCylinder(this.vp.groups.joints, a0, a1, this.r * 0.55 * CREASE_RADIUS_FACTOR, mat, { type: 'joint', id: j.id });
+    if (settings.showLabels && (selected || hovered)) this.label(creaseLabel(mv, creaseDihedralDeg(model, j, state.positions)), add(centroid([a0, a1]), [0, 0, this.r * 4]), 'label label--joint');
   }
 
   // ---------------------------------------------------------------------------

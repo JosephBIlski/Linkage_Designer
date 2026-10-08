@@ -107,7 +107,19 @@ export const JOINTS: Record<string, { label: string; short: string; dof: string;
   prismatic: { label: 'Prismatic joint', short: 'P', dof: '1 DOF', description: 'Slider: translation along an axis without rotation.' },
   cylindrical: { label: 'Cylindrical joint', short: 'C', dof: '2 DOF', description: 'Rotation about and translation along a common axis.' },
   screw: { label: 'Screw joint', short: 'H', dof: '1 DOF', description: 'Helical: translation coupled to rotation by the pitch.' },
+  // not a joint type: the presentation of an edge–edge revolute whose end points are merged (fold.ts isCrease)
+  crease: { label: 'Crease', short: 'Cr', dof: '1 DOF', description: 'Origami crease: two panels share an edge and fold about it. Drawn along the edge in the mountain (M) / valley (V) colour of its current fold angle, grey while flat.' },
 };
+
+/**
+ * "Crease M 160°": a crease's label from its mountain / valley class and its fold angle (the dihedral magnitude,
+ * rounded to whole degrees; 180° = flat). The class is omitted while the crease is flat, the angle when it cannot be
+ * measured.
+ */
+export function creaseLabel(mv: 'M' | 'V' | null, deg: number | null): string {
+  if (deg === null) return JOINTS.crease.label;
+  return `${JOINTS.crease.label} ${mv ? `${mv} ` : ''}${Math.round(Math.abs(deg))}°`;
+}
 
 export const FEATURES = {
   vertex: 'vertex',
@@ -151,6 +163,21 @@ export const PANEL = {
   none: 'none',
   jointAxis: 'Axis',
   jointPitch: 'Pitch',
+  // Crease (edge–edge revolute with merged end points) properties; angles are dihedral magnitudes, 180° = flat
+  creaseAngle: 'Fold angle (current)',
+  creaseAngleValue: (deg: number, mv: 'M' | 'V' | null): string => `${deg.toFixed(1)}° · ${mv === 'M' ? PANEL.creaseMountain : mv === 'V' ? PANEL.creaseValley : PANEL.creaseFlat}`,
+  creaseMountain: 'Mountain (M)',
+  creaseValley: 'Valley (V)',
+  creaseFlat: 'flat',
+  creaseMV: 'Mountain / valley',
+  creaseMVUnset: '— not assigned —',
+  creaseMVHelp: 'Marks the crease as a mountain or a valley fold, seen from the face side of its first panel (the sketch-plane side for panels drawn on it). Moves nothing by itself: it sets the direction of "Fold to target" and the side a flat vertex is pre-folded to.',
+  creaseTarget: 'Target fold angle (°)',
+  creaseTargetHelp: 'Fold angle the crease should take: 180° = flat, 0° = fully closed. Stored with the crease and applied by "Fold to target".',
+  creaseFoldTo: 'Fold to target',
+  creaseFoldToHelp: 'Re-solves the mechanism so this crease reaches the target angle in the chosen mountain / valley direction. A flat vertex is pre-folded first and the sketch-plane constraints of its panels are removed. Refused, with nothing changed, when the other constraints and drivers do not allow it.',
+  creaseDrive: 'Drive this crease',
+  creaseDriveHelp: 'Adds a fold driver on this crease and makes it the active input of the simulation and preview. A flat vertex is pre-folded first so that every crease moves.',
   jointHinge: 'Compliant hinge (torsional spring)',
   hingeRest: 'Rest angle (°)',
   hingeStiffness: 'Hinge stiffness',
@@ -248,6 +275,7 @@ export const TREE = {
   flexible: 'flexible',
   hidden: 'hidden',
   planar2d: '2-D',
+  crease: 'Crease',
   show: 'Show',
   hide: 'Hide',
   rename: 'Double-click to rename',
@@ -294,8 +322,11 @@ export const STATUS = {
         return 'A panel of this vertex is locked. Unlock it before folding.';
       case 'noBranch':
         return 'No folded state was found for this vertex: every crease is collinear with another one (an "X" vertex folds only as a straight hinge), or the panels cannot all leave the plane. Nothing was changed.';
+      case 'unreachable':
+        return 'The crease cannot be folded to that angle together with the other constraints and drivers (a driver on another crease of the vertex, or a target on the other side of flat, may hold it). Nothing was changed.';
     }
   },
+  creaseFolded: (creaseName: string, dof: number): string => `Folded to target: ${creaseName}. Mechanism DOF: ${dof}.`,
   prefolded: 'The flat vertex was pre-folded first so that every crease moves.',
   flatVertexWarning: 'This crease belongs to a flat vertex that could not be pre-folded: the simulation may fold only two of its creases.',
   vertexFlatHint: 'The vertex is flat: use Fold to pre-fold it before simulating.',
@@ -363,6 +394,8 @@ export const SETTINGS = {
   gridMajor: 'Grid lines (major)',
   gridMinor: 'Grid lines (minor)',
   selection: 'Selection highlight',
+  mountain: 'Mountain crease',
+  valley: 'Valley crease',
   display: 'Display',
   showLabels: 'Show labels',
   showConstruction: 'Show construction geometry',

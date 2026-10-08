@@ -78,6 +78,21 @@ export function centroid(pts: Vec3[]): Vec3 {
   return scale(s, 1 / pts.length);
 }
 
+/**
+ * Newell normal of a polygon given by its vertices in order: the area-weighted
+ * normal, oriented by the winding (counter-clockwise seen from the side the
+ * normal points to). Not normalised; zero for degenerate input.
+ */
+export function newellNormal(pts: Vec3[]): Vec3 {
+  let n: Vec3 = [0, 0, 0];
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i];
+    const b = pts[(i + 1) % pts.length];
+    n = add(n, [(a[1] - b[1]) * (a[2] + b[2]), (a[2] - b[2]) * (a[0] + b[0]), (a[0] - b[0]) * (a[1] + b[1])]);
+  }
+  return n;
+}
+
 /** Dihedral (fold) angle about edge a->b between faces containing p and q.
  *  Positive when q is rotated from p by the right-hand rule about (b - a). */
 export function dihedralAngle(a: Vec3, b: Vec3, p: Vec3, q: Vec3): number {

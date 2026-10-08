@@ -192,6 +192,102 @@ await page.mouse.click(frontHit.x, frontHit.y);
 await page.waitForTimeout(300);
 const linksAfter17 = await page.evaluate(() => Object.keys(window.linkageDesigner.app.model.links).length);
 console.log('mirror from tree selection', linksBefore17, '->', linksAfter17, linksAfter17 === linksBefore17 + 1 ? 'OK' : 'FAIL');
+
+// ---------------------------------------------------------------------------------------------------------------
+// Construction workflow (docs/CONSTRUCTION_PLAN.md §5, Phase 0 and Phase 1)
+// ---------------------------------------------------------------------------------------------------------------
+// shared helpers: the status bar is the contract of every tool, so each step waits for the text it expects
+const waitStatus = async (re, ms = 8000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { const s = await page.evaluate(() => window.linkageDesigner.app.status); if (re.test(s)) return s; await page.waitForTimeout(50); } return 'TIMEOUT: ' + (await page.evaluate(() => window.linkageDesigner.app.status)); };
+const typeCoord = async (text) => { await page.fill('.coord__input', text); await page.press('.coord__input', 'Enter'); await page.waitForTimeout(150); };
+// newModel re-frames the camera on the next animation frame (loadModel → zoomToFit), so the view is set after a wait
+const freshTopView = async (box) => { await page.evaluate(() => window.linkageDesigner.app.newModel()); await page.waitForTimeout(400); await page.evaluate((box) => { const { app } = window.linkageDesigner; app.viewport.setView('top'); app.viewport.fit(box); }, box); await page.waitForTimeout(300); };
+/** midpoint of the edge of link #i whose end points are nearest to p and q (world coordinates) */
+const edgeMid = (i, p, q) => page.evaluate(({ i, p, q }) => { const { app } = window.linkageDesigner; const m = app.model; const l = Object.values(m.links)[i]; const near = (x) => l.pointIds.reduce((b, id) => (Math.hypot(...m.points[id].pos.map((v, k) => v - x[k])) < Math.hypot(...m.points[b].pos.map((v, k) => v - x[k])) ? id : b), l.pointIds[0]); const a = m.points[near(p)].pos, b = m.points[near(q)].pos; return [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2]; }, { i, p, q });
+const workflowState = () => page.evaluate(() => { const { app } = window.linkageDesigner; const m = app.model; return { creases: Object.values(m.joints).filter((j) => j.type === 'revolute' && j.a.kind === 'edge' && j.pairs?.length === 2).length, joints: Object.values(m.joints).filter((j) => j.a.kind !== 'body').length, bodyJoints: Object.values(m.joints).filter((j) => j.a.kind === 'body').length, drivers: m.drivers.length, dof: app.sim.mobility?.dof, violation: app.sim.violation, undo: app.undoStack.length, status: app.status, chip: document.querySelector('.chip')?.textContent ?? '', hints: [...document.querySelectorAll('.mode-panel .hint.warn')].map((e) => e.textContent), foldBtn: !!document.querySelector('button[title^="Drives one crease"]'), creaseLabels: [...document.querySelectorAll('.tree-item__label')].map((e) => e.textContent).filter((t) => /^Crease [MV]? ?\d+°/.test(t)), json: JSON.stringify(m) }; });
+
+// 18. The reported workflow: four regular triangles (Polygon tool, 3 sides, typed coordinates, each placed 1.2 units
+//     outside its final place) joined edge to edge with the Joint tool. Joints 1–3 are exact creases that pull the
+//     triangles into a fan; the fourth would close a vertex whose sector angles sum to 240° and must be refused with
+//     the sector-angle message, moving nothing and recording no undo entry.
+await freshTopView([[-4, -4, 0], [4, 4, 0]]);
+const SIDE = Math.sqrt(3);
+const O18 = [0, 0, 0];
+const P18 = (k) => [SIDE * Math.cos((Math.PI / 3) * k), SIDE * Math.sin((Math.PI / 3) * k), 0];
+const centroid18 = (k) => [(P18(k)[0] + P18(k + 1)[0]) / 3, (P18(k)[1] + P18(k + 1)[1]) / 3, 0];
+const offset18 = (k) => { if (k === 0) return [0, 0, 0]; const c = centroid18(k); const l = Math.hypot(c[0], c[1]); return [(1.2 * c[0]) / l, (1.2 * c[1]) / l, 0]; };
+const plus = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+await page.click('button[title^="Polygon —"]');
+await page.fill('.tool-options input[type="number"]', '3');
+await page.press('.tool-options input[type="number"]', 'Tab');
+for (let k = 0; k < 4; k++) {
+  const c = plus(centroid18(k), offset18(k)), v = plus(P18(k + 1), offset18(k));
+  await typeCoord(`${c[0]},${c[1]}`);
+  await typeCoord(`${v[0]},${v[1]}`);
+}
+await page.click('button[title^="Ground —"]');
+await clickWorld(centroid18(0));
+await waitStatus(/Ground/);
+await page.click('button[title^="Joint —"]');
+const joined18 = [];
+for (let k = 0; k < 3; k++) {
+  await clickWorld(await edgeMid(k, O18, P18(k + 1)));
+  await waitStatus(/Now pick/);
+  await clickWorld(await edgeMid(k + 1, plus(O18, offset18(k + 1)), plus(P18(k + 1), offset18(k + 1))));
+  joined18.push((await waitStatus(/Joint created|Nothing was moved|different link/)).slice(0, 30));
+}
+const pre18 = await workflowState();
+await clickWorld(await edgeMid(3, O18, P18(4)));
+await waitStatus(/Now pick/);
+await clickWorld(await edgeMid(0, O18, P18(0)));
+const refused18 = await waitStatus(/Joint created|Nothing was moved|different link/);
+await page.waitForTimeout(300);
+const post18 = await workflowState();
+const ok18 = joined18.every((s) => s === 'Joint created') && pre18.creases === 3 && /add up to 240\.0°, not 360°/.test(refused18) && /Nothing was moved/.test(refused18) && pre18.json === post18.json && pre18.undo === post18.undo && post18.creases === 3 && !/violated/i.test(post18.chip);
+console.log('four regular triangles: 3 creases, 4th refused', JSON.stringify({ joined: joined18, creasesBefore: pre18.creases, refused: refused18.slice(0, 90), modelUnchanged: pre18.json === post18.json, undo: [pre18.undo, post18.undo], chip: post18.chip }), ok18 ? 'OK' : 'FAIL');
+await page.screenshot({ path: `${OUT}/10-four-triangles-refused.png` });
+
+// 19. A developable vertex (sectors 60°, 60°, 120°, 120°) sketched flat with the Sketch tool, snapping the shared
+//     vertices so the shared edges become creases; Ground → DOF 0 with the locked-creases and flat-vertex hints and the
+//     Fold button; Fold → DOF 1, 2-D constraints gone, dihedrals (170°, 160°, 170°, 160°) with a 3:1 mountain/valley
+//     split, one fold driver kept; the crease is pickable and has the crease Properties; Preview moves every panel.
+await freshTopView([[-3, -3, 0], [3, 3, 0]]);
+const R19 = (deg) => [2 * Math.cos((Math.PI / 180) * deg), 2 * Math.sin((Math.PI / 180) * deg), 0];
+await page.click('button[title^="Sketch polygon"]');
+for (const pts of [[O18, R19(0), R19(60)], [O18, R19(60), R19(120)], [O18, R19(120), R19(240)], [O18, R19(240), R19(0)]]) {
+  for (const p of pts) await clickWorld(p);
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(400);
+}
+await page.click('button[title^="Ground —"]');
+await clickWorld([1, 0.5, 0]);
+await waitStatus(/Ground/);
+await page.waitForTimeout(300);
+const flat19 = await workflowState();
+const okFlat19 = flat19.creases === 4 && flat19.bodyJoints === 4 && flat19.dof === 0 && flat19.hints.some((h) => /cannot fold/.test(h)) && flat19.hints.some((h) => /flat/.test(h)) && flat19.foldBtn && flat19.creaseLabels.every((t) => /180°/.test(t));
+console.log('developable vertex sketched flat', JSON.stringify({ creases: flat19.creases, bodyJoints: flat19.bodyJoints, dof: flat19.dof, hints: flat19.hints.length, foldBtn: flat19.foldBtn, labels: flat19.creaseLabels }), okFlat19 ? 'OK' : 'FAIL');
+await page.click('button[title^="Drives one crease"]');
+const folded19 = await waitStatus(/pre-folded|Nothing to fold|already folded|No folded state/);
+await page.waitForTimeout(300);
+const post19 = await workflowState();
+const angles19 = post19.creaseLabels.map((t) => t.match(/Crease ([MV]) (\d+)°/)).map((x) => x && { mv: x[1], deg: +x[2] });
+const pattern19 = angles19.length === 4 && angles19.every(Boolean) && angles19.map((a) => a.deg).sort((a, b) => a - b).join() === '160,160,170,170' && [1, 3].includes(angles19.filter((a) => a.mv === 'M').length);
+const okFold19 = /pre-folded/.test(folded19) && post19.dof === 1 && post19.bodyJoints === 0 && post19.drivers === 1 && post19.undo === flat19.undo + 1 && pattern19 && !post19.foldBtn;
+console.log('fold', JSON.stringify({ status: folded19.slice(0, 80), dof: post19.dof, bodyJoints: post19.bodyJoints, drivers: post19.drivers, labels: post19.creaseLabels }), okFold19 ? 'OK' : 'FAIL');
+await page.click('button[title^="Select —"]');
+const creaseMid19 = await page.evaluate(() => { const { app } = window.linkageDesigner; const m = app.model; const j = Object.values(m.joints).find((x) => x.type === 'revolute' && x.a.kind === 'edge'); const [a, b] = j.a.pointIds.map((id) => m.points[id].pos); return [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2]; });
+await clickWorld(creaseMid19);
+await page.waitForTimeout(300);
+const props19 = await page.evaluate(() => ({ selection: window.linkageDesigner.app.selection?.type, subtitle: document.querySelector('.props-panel .panel__subtitle')?.textContent, rows: [...document.querySelectorAll('.props-panel .prop-row')].map((r) => r.textContent.trim()), buttons: [...document.querySelectorAll('.props-panel button')].map((b) => b.textContent.trim()) }));
+const okProps19 = props19.selection === 'joint' && props19.subtitle === 'Crease' && props19.rows.some((r) => /Fold angle/.test(r)) && props19.rows.some((r) => /Mountain \/ valley/.test(r)) && props19.rows.some((r) => /Target fold angle/.test(r)) && props19.buttons.includes('Fold to target') && props19.buttons.includes('Drive this crease');
+console.log('crease picked, crease properties', JSON.stringify({ selection: props19.selection, subtitle: props19.subtitle, angleRow: props19.rows.find((r) => /Fold angle/.test(r)), buttons: props19.buttons }), okProps19 ? 'OK' : 'FAIL');
+await page.screenshot({ path: `${OUT}/11-developable-folded.png` });
+await page.click('button.mode-tab:has-text("Preview")');
+await page.waitForTimeout(2500);
+const travel19 = await page.evaluate(() => { const { app } = window.linkageDesigner; const m = app.model; const sw = app.sim.sweep; if (!sw) return null; const ground = Object.values(m.links).find((l) => l.ground); const gp = ground.pointIds.map((id) => m.points[id].pos); const farFromGround = (id) => Math.min(...gp.map((g) => Math.hypot(...g.map((v, k) => v - m.points[id].pos[k])))); return Object.values(m.links).filter((l) => !l.ground).map((l) => { const id = l.pointIds.reduce((b, x) => (farFromGround(x) > farFromGround(b) ? x : b), l.pointIds[0]); const a = sw.poses.map((p) => p.positions.get(id)); let mx = 0; for (const q of a) mx = Math.max(mx, Math.hypot(...q.map((v, k) => v - a[0][k]))); return +mx.toFixed(2); }); });
+console.log('preview after fold moves every panel', JSON.stringify(travel19), travel19 && travel19.length === 3 && travel19.every((d) => d > 1) ? 'OK' : 'FAIL');
+await page.screenshot({ path: `${OUT}/12-developable-preview.png` });
+await page.click('button.mode-tab:has-text("Construction")');
+await page.waitForTimeout(300);
 console.log('errors:', errors.length ? errors.join('\n') : 'none');
 await browser.close();
 server.kill();

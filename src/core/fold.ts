@@ -16,10 +16,10 @@
  *
  * Pure core: no DOM or three.js imports; everything here is unit-testable.
  */
-import { add, cross, dot, len, normalize, scale, sub } from './geometry';
+import { add, cross, dot, len, newellNormal, normalize, scale, sub } from './geometry';
 import { jointDihedralDeg } from './jointMeasure';
 import { applyPositions, computeMobility, feasibilityTolerance, isAccepted, measureDriver, positionsFromModel, solveForward, syncDriverValues, type Positions } from './kinematics';
-import { addFoldDriver, bodyPlaneJoint, jointAxisPoints, offAxisPoint, removeJoint, serializeModel, sketchNormal } from './model';
+import { addFoldDriver, bodyPlaneJoint, jointAxisPoints, linkFaces, offAxisPoint, removeJoint, serializeModel, sketchNormal } from './model';
 import { restore } from './feasibility';
 import type { Driver, FeatureKind, ID, Joint, Model, Vec3 } from './types';
 import { isConstructionRef } from './types';
@@ -95,6 +95,101 @@ export function creaseMountainValley(m: Model, j: Joint, up: Vec3, pos?: Positio
   const s = dot(add(perp(get(offA)), perp(get(offB))), normalize(up));
   if (Math.abs(s) < 1e-6) return null;
   return s < 0 ? 'M' : 'V';
+}
+
+// ---------------------------------------------------------------------------
+// Mountain / valley convention
+// ---------------------------------------------------------------------------
+
+/**
+ * Oriented face normal of the first panel of a crease: the normal given by the
+ * vertex winding (newellNormal) of the face of link a that contains the shared
+ * edge, in the given pose. For a polygon drawn counter-clockwise on the sketch
+ * plane, as the Polygon and Sketch tools draw them, this is the sketch-plane
+ * normal, whatever the direction in which the edge was stored. Links without a
+ * face containing the edge (bars, cylinder axes) fall back to
+ * (a1 − a0) × (offA − a0), the normal the dihedral's sign is measured against.
+ * Null when the crease cannot be measured.
+ */
+export function creaseNormal(m: Model, j: Joint, pos?: Positions): Vec3 | null {
+  if (isConstructionRef(j.b)) return null;
+  const axA = jointAxisPoints(m, j, 'a');
+  const linkA = m.links[j.a.linkId];
+  if (!axA || !linkA || !m.points[axA[0]] || !m.points[axA[1]]) return null;
+  const get = (id: ID): Vec3 => pos?.get(id) ?? m.points[id].pos;
+  const face = linkFaces(m, linkA).find((f) => f.length >= 3 && f.includes(axA[0]) && f.includes(axA[1]) && f.every((id) => !!m.points[id]));
+  if (face) {
+    const n = newellNormal(face.map(get));
+    if (len(n) > 1e-12) return normalize(n);
+  }
+  const offA = offAxisPoint(m, linkA, axA);
+  if (!offA) return null;
+  const a0 = get(axA[0]);
+  const n = cross(sub(get(axA[1]), a0), sub(get(offA), a0));
+  return len(n) > 1e-12 ? normalize(n) : null;
+}
+
+/**
+ * Which side of the first panel the positive dihedral lies on: +1 when
+ * (a1 − a0) × (offA − a0), the side a positive creaseDihedralDeg bends panel b
+ * to, points along creaseNormal, −1 when against it, 0 when unmeasurable.
+ */
+function creaseSide(m: Model, j: Joint, pos?: Positions): 1 | -1 | 0 {
+  const n = creaseNormal(m, j, pos);
+  const axA = jointAxisPoints(m, j, 'a');
+  if (!n || !axA) return 0;
+  const offA = offAxisPoint(m, m.links[j.a.linkId], axA);
+  if (!offA) return 0;
+  const get = (id: ID): Vec3 => pos?.get(id) ?? m.points[id].pos;
+  const a0 = get(axA[0]);
+  const s = dot(cross(sub(get(axA[1]), a0), sub(get(offA), a0)), n);
+  return s > 1e-12 ? 1 : s < -1e-12 ? -1 : 0;
+}
+
+/**
+ * Mountain / valley class of a crease in a pose, from the sign of its dihedral.
+ *
+ * Convention: let n be the oriented face normal of the first panel
+ * (creaseNormal: for panels drawn counter-clockwise on the sketch plane, the
+ * sketch normal). The crease is a VALLEY when the second panel is bent toward
+ * the side n points to, so that the two panels form a trough seen from that
+ * side, and a MOUNTAIN when it is bent away from n (a ridge seen from there).
+ * The signed dihedral θ = creaseDihedralDeg is positive exactly when panel b
+ * lies on the side of (a1 − a0) × (offA − a0), so the class is V when θ and
+ * ((a1 − a0) × (offA − a0)) · n have the same sign and M otherwise; |θ| is the
+ * fold angle (180° flat, 0° closed). Because n follows the panel's winding and
+ * not the stored edge direction, neighbouring creases of a sheet drawn on one
+ * sketch plane are classified from the same side. Null when the crease is flat
+ * within FLAT_TOLERANCE_DEG, is not a crease or cannot be measured. Away from
+ * flat this equals creaseMountainValley(m, j, creaseNormal(m, j, pos), pos).
+ */
+export function creaseMV(m: Model, j: Joint, pos?: Positions): 'M' | 'V' | null {
+  const d = creaseDihedralDeg(m, j, pos);
+  if (d === null || isFlatDihedral(d)) return null;
+  const s = creaseSide(m, j, pos);
+  if (s === 0) return null;
+  return d > 0 === s > 0 ? 'V' : 'M';
+}
+
+/**
+ * The signed dihedral (as creaseDihedralDeg measures it and a fold driver
+ * prescribes it) at which crease `j` has fold angle |targetDeg| (clamped to
+ * 180°) and the class `mv` in the creaseMV convention. Without `mv` the
+ * current class is kept, and a flat crease is folded as a valley. Null when
+ * the crease cannot be measured.
+ */
+export function creaseTargetDihedral(m: Model, j: Joint, targetDeg: number, mv?: 'M' | 'V' | null, pos?: Positions): number | null {
+  const s = creaseSide(m, j, pos);
+  if (s === 0) return null;
+  const magnitude = Math.min(180, Math.abs(targetDeg));
+  const cls = mv ?? creaseMV(m, j, pos) ?? 'V';
+  return (cls === 'V') === (s > 0) ? magnitude : -magnitude;
+}
+
+/** The class `mv` (creaseMV convention) expressed as creaseMountainValley seen from `up`: flipped when creaseNormal points against `up`. */
+function mvSeenFrom(m: Model, j: Joint, mv: 'M' | 'V', up: Vec3): 'M' | 'V' {
+  const n = creaseNormal(m, j);
+  return !n || dot(n, up) >= 0 ? mv : mv === 'M' ? 'V' : 'M';
 }
 
 // ---------------------------------------------------------------------------
@@ -276,13 +371,15 @@ export function foldCreaseTo(m: Model, jointId: ID, targetDeg: number, opts: { i
 // ---------------------------------------------------------------------------
 
 /**
- * Why a pre-fold did nothing:
+ * Why a fold did nothing:
  *  noLoop: the model has no crease loop at all;
  *  notFlat: the chosen loop (or every loop, when none was chosen) is already folded;
  *  locked: a panel of the loop other than the ground is locked (its pose may not be edited);
- *  noBranch: no candidate crease and sign produced a converged, fully folded pose with fewer DOF.
+ *  noBranch: no candidate crease and sign produced a converged, fully folded pose with fewer DOF;
+ *  unreachable: (foldCreaseToTarget) the requested fold angle and class cannot be reached from the current
+ *    pose with the other constraints, or the joint is not a crease.
  */
-export type FoldReason = 'noLoop' | 'notFlat' | 'noBranch' | 'locked';
+export type FoldReason = 'noLoop' | 'notFlat' | 'noBranch' | 'locked' | 'unreachable';
 
 export interface FoldResult {
   ok: boolean;
@@ -410,4 +507,187 @@ function predictedSign(m: Model, j: Joint, up: Vec3, pref: 'M' | 'V'): 1 | -1 {
   const side = dot(cross(e, sub(m.points[offA].pos, a0)), up);
   const mountain = side < 0 ? 1 : -1;
   return pref === 'M' ? mountain : mountain === 1 ? -1 : 1;
+}
+
+// ---------------------------------------------------------------------------
+// Fold to target and drive (crease Properties / Driver tool)
+// ---------------------------------------------------------------------------
+
+/**
+ * Return a crease loop to its exactly flat state: every crease of the loop is
+ * prescribed ±180° at once (the sign of its current dihedral; the constraint
+ * wraps, so the sign is immaterial), with the drivers acting on the vertex
+ * released and every other driver held. Prescribing 180° on one crease alone
+ * is not enough: that leaves the vertex anywhere on the straight-hinge branch
+ * through the flat state, where a pre-fold cannot start. Temporary drivers are
+ * removed again and the id counter rewound; on an accepted solve the pose is
+ * applied and the driver values re-measured, otherwise nothing changes.
+ */
+function unfoldLoop(m: Model, loop: CreaseLoop): boolean {
+  const pos0 = positionsFromModel(m);
+  const originalDrivers = m.drivers;
+  const nextId = m.nextId;
+  const onLoop = (d: Driver): boolean => (d.jointId !== undefined && loop.creaseIds.includes(d.jointId)) || (d.linkId !== undefined && loop.linkIds.includes(d.linkId));
+  m.drivers = originalDrivers.filter((d) => !onLoop(d));
+  const values = m.drivers.map((d) => measureDriver(m, d.id, pos0) ?? d.value);
+  for (const id of loop.creaseIds) {
+    if (!addFoldDriver(m, id)) {
+      m.drivers = originalDrivers;
+      m.nextId = nextId;
+      return false;
+    }
+    values.push(180 * Math.sign(creaseDihedralDeg(m, m.joints[id]) ?? 1));
+  }
+  const res = solveForward(m, values, pos0);
+  m.drivers = originalDrivers;
+  m.nextId = nextId;
+  const ok = isAccepted(res, feasibilityTolerance(m));
+  if (ok) {
+    applyPositions(m, res.positions);
+    syncDriverValues(m);
+  }
+  return ok;
+}
+
+/** Panels of a crease and of the loop it belongs to, other than the ground, that are locked. */
+function lockedPanels(m: Model, j: Joint, loop: CreaseLoop | null): ID[] {
+  const ids = new Set<ID>([j.a.linkId, (j.b as { linkId: ID }).linkId, ...(loop?.linkIds ?? [])]);
+  return [...ids].filter((id) => m.links[id]?.locked && !m.links[id].ground);
+}
+
+/**
+ * Fold crease `jointId` to the fold angle |targetDeg| (dihedral magnitude:
+ * 180° flat, 0° closed) with the class `mv` (creaseMV convention; default: the
+ * crease's current class, valley when flat), the "Fold to target" action of a
+ * crease's Properties. A crease of a flat loop is pre-folded first
+ * (prefoldVertex, preferring this crease and the side `mv` asks for), which
+ * selects the generic branch and removes the sketch-plane constraints of the
+ * loop's panels; then foldCreaseTo prescribes the signed target
+ * (creaseTargetDihedral) while the drivers acting on the vertex, other than a
+ * fold driver on this crease, are released (holding them would fix a 1-DOF
+ * vertex), and all driver values are re-measured. When the loop is flat and
+ * the pre-fold drove another crease (this one is collinear with a neighbour),
+ * both signs of the pre-fold are tried so the requested class is reached
+ * without passing through flat again. On an already folded vertex whose crease
+ * has the other class, the whole vertex is first returned to its flat state
+ * (unfoldLoop) and then pre-folded toward the requested side, because the
+ * mirrored branch is only reachable through flat. A target of 180° on a
+ * folded degree-4 vertex brings the vertex to (numerically, within the flat
+ * tolerance) its flat state, since that is the only generic pose in which one
+ * crease is unfolded. A result is accepted only
+ * when the solve is accepted, this crease has the requested class and, unless
+ * the target itself is flat, no crease of the loop is left flat (the
+ * straight-hinge branch); otherwise the model is restored byte for byte and
+ * the reason is 'unreachable' (or the pre-fold's reason).
+ */
+export function foldCreaseToTarget(m: Model, jointId: ID, targetDeg: number, mv?: 'M' | 'V'): FoldResult {
+  const j = m.joints[jointId];
+  if (!j || !isCrease(m, j)) return { ok: false, reason: 'unreachable' };
+  const loop = findCreaseLoops(m).find((l) => l.creaseIds.includes(jointId)) ?? null;
+  if (lockedPanels(m, j, loop).length > 0) return { ok: false, reason: 'locked' };
+  const snapshot = serializeModel(m);
+  const flatTarget = isFlatDihedral(Math.abs(targetDeg));
+
+  /** Signed angular difference in (−180°, 180°]. */
+  const angleDiff = (a: number, b: number): number => ((((a - b) % 360) + 540) % 360) - 180;
+
+  /** Prescribe a signed dihedral on this crease from the current pose, with the other drivers of the vertex released. */
+  const prescribe = (signed: number): boolean => {
+    const current = creaseDihedralDeg(m, j);
+    if (current !== null && Math.abs(angleDiff(current, signed)) <= 1e-6) return true;
+    const originalDrivers = m.drivers;
+    const onVertex = (d: Driver): boolean =>
+      (d.jointId !== undefined && d.jointId !== jointId && (loop?.creaseIds.includes(d.jointId) ?? false)) || (d.linkId !== undefined && (loop?.linkIds.includes(d.linkId) ?? false));
+    m.drivers = originalDrivers.filter((d) => !onVertex(d));
+    const f = foldCreaseTo(m, jointId, signed);
+    m.drivers = originalDrivers;
+    if (!f.ok) return false;
+    syncDriverValues(m);
+    return true;
+  };
+
+  /** Prescribe the signed target on this crease and judge the result. */
+  const settle = (): boolean => {
+    const target = creaseTargetDihedral(m, j, targetDeg, mv);
+    if (target === null || !prescribe(target)) return false;
+    if (mv && !flatTarget && creaseMV(m, j) !== mv) return false;
+    if (loop && !flatTarget) {
+      for (const id of loop.creaseIds) {
+        const d = creaseDihedralDeg(m, m.joints[id]);
+        if (d === null || isFlatDihedral(d)) return false;
+      }
+    }
+    return true;
+  };
+
+  const done = (removedPlanes: ID[]): FoldResult => {
+    const dihedrals: Record<ID, number> = {};
+    for (const id of loop?.creaseIds ?? [jointId]) {
+      const d = creaseDihedralDeg(m, m.joints[id]);
+      if (d !== null) dihedrals[id] = d;
+    }
+    return { ok: true, creaseId: jointId, dihedrals, dof: computeMobility(m).dof, removedPlanes };
+  };
+
+  // the requested side is the mirror image of the current fold: unfold the vertex through flat first, since the
+  // mirrored branch can only be reached through the flat state (a collinear crease cannot cross it directly)
+  let start = loop; // the loop as it is when the pre-fold starts (flat, or made flat below)
+  if (loop && !loop.flat && mv && !flatTarget) {
+    const current = creaseMV(m, j);
+    if (current !== null && current !== mv && unfoldLoop(m, loop)) {
+      const unfolded = findCreaseLoops(m).find((l) => l.creaseIds.includes(jointId));
+      if (unfolded?.flat) start = unfolded;
+      else restore(m, snapshot);
+    }
+  }
+  if (loop && start?.flat && !flatTarget) {
+    const flatSnapshot = serializeModel(m); // every attempt starts from the flat state
+    const pref = mv ? mvSeenFrom(m, j, mv, loopNormal(m, start)) : undefined;
+    let reason: FoldReason = 'unreachable';
+    // the preferred sign of the pre-fold first (prefoldVertex verifies the class when it drives this crease)
+    const attempts: (PrefoldOptions['sign'] | undefined)[] = [undefined, 1, -1];
+    for (const sign of attempts) {
+      const r = prefoldVertex(m, { loop: start, preferCreaseId: jointId, angleDeg: targetDeg, sign, mountainValley: pref && sign === undefined ? { [jointId]: pref } : undefined });
+      if (!r.ok) {
+        reason = r.reason ?? 'noBranch'; // prefoldVertex restored the flat state itself
+        continue;
+      }
+      if (settle()) return done(r.removedPlanes ?? []);
+      restore(m, flatSnapshot);
+      reason = 'unreachable';
+    }
+    restore(m, snapshot);
+    return { ok: false, reason };
+  }
+  if (settle()) return done([]);
+  restore(m, snapshot);
+  return { ok: false, reason: 'unreachable' };
+}
+
+/**
+ * Add a fold driver on revolute joint `jointId` (the Driver tool and the
+ * "Drive this crease" action). When the joint is a crease of a flat loop the
+ * vertex is pre-folded first (prefoldVertex, preferring this crease and the
+ * side its stored fold.mv asks for), because a sweep started in the flat state
+ * follows the degenerate straight-hinge branch; the driver the pre-fold keeps
+ * for a driverless model is replaced by the one on the picked crease, so
+ * exactly one driver is added and it sits where the user asked. Driver values
+ * are re-measured. Returns the new driver (null when the joint is not a
+ * revolute) and the pre-fold result (null when none was needed); a failed
+ * pre-fold still adds the driver so the degenerate motion can be inspected.
+ */
+export function driveCrease(m: Model, jointId: ID): { driver: Driver | null; prefold: FoldResult | null } {
+  const j = m.joints[jointId];
+  if (!j || j.type !== 'revolute') return { driver: null, prefold: null };
+  let prefold: FoldResult | null = null;
+  const loop = isCrease(m, j) ? findCreaseLoops(m).find((l) => l.flat && l.creaseIds.includes(jointId)) : undefined;
+  if (loop) {
+    const hadDrivers = m.drivers.length > 0;
+    const mv = j.fold?.mv;
+    prefold = prefoldVertex(m, { loop, preferCreaseId: jointId, mountainValley: mv ? { [jointId]: mvSeenFrom(m, j, mv, loopNormal(m, loop)) } : undefined });
+    if (prefold.ok && !hadDrivers) m.drivers = [];
+  }
+  const driver = addFoldDriver(m, jointId);
+  syncDriverValues(m);
+  return { driver, prefold };
 }

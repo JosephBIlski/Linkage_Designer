@@ -16,6 +16,9 @@ export interface ColorSettings {
   gridMajor: string;
   gridMinor: string;
   selection: string;
+  /** Origami creases: mountain / valley colours (Lang / Origami Simulator convention: red / blue). */
+  mountain: string;
+  valley: string;
 }
 
 export interface AppSettings {
@@ -43,6 +46,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
     gridMajor: '#9aa0a6',
     gridMinor: '#c3c7cb',
     selection: '#ffb300',
+    mountain: '#d9342b', // origami convention: mountain creases red
+    valley: '#2f6fd6', // valley creases blue
   },
   designSpaceOpacity: 0.3,
   outputPathOpacity: 0.9,

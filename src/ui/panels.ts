@@ -12,13 +12,13 @@ import {
   setGround,
 } from '../core/model';
 import { consistencyTolerance, poseIsConsistent, tryChangeJointType, trySolveCommit } from '../core/feasibility';
-import { prefoldVertex } from '../core/fold';
+import { DEFAULT_PREFOLD_DEG, creaseDihedralDeg, creaseMV, driveCrease, foldCreaseToTarget, isCrease, prefoldVertex } from '../core/fold';
 import type { Construction, ID, Joint, JointType, Link, Target, Vec3 } from '../core/types';
 import { isConstructionRef } from '../core/types';
 import { createColorPicker } from './colorPicker';
 import { icon } from './icons';
 import { DEFAULT_SETTINGS, type AppSettings } from './settings';
-import { APP, EXAMPLES, HELP, JOINTS, MENU, MODES, PANEL, POPUP, PREVIEW, SETTINGS, SIM, STATUS, TOOLS, TOOL_OPTIONS, TREE, jointRefusedMessage } from './strings';
+import { APP, EXAMPLES, HELP, JOINTS, MENU, MODES, PANEL, POPUP, PREVIEW, SETTINGS, SIM, STATUS, TOOLS, TOOL_OPTIONS, TREE, creaseLabel, jointRefusedMessage } from './strings';
 import { duplicateLink, extrudePolygon, translation } from '../core/patterns';
 import { currentViolation, modelSize } from '../core/kinematics';
 import { bodyPlaneJoint, setBodyPlane } from '../core/model';
@@ -304,7 +304,8 @@ export class UI {
     const sel = app.selection;
     const sig = [
       Object.values(m.links).map((l) => `${l.id}:${l.name}:${l.kind}:${+l.ground}${+l.locked}${+l.flexible}${+!!l.hidden}`).join(','),
-      Object.values(m.joints).map((j) => `${j.id}:${j.type}`).join(','),
+      // crease labels carry the fold angle rounded to 1° and the M/V class, so the tree follows the pose
+      Object.values(m.joints).map((j) => `${j.id}:${j.type}:${this.jointLabel(j)}`).join(','),
       Object.values(m.construction).map((c) => `${c.id}:${c.name}`).join(','),
       m.settings.sketchPlaneId,
       m.drivers.map((d) => d.id).join(','),
@@ -412,7 +413,7 @@ export class UI {
     group('joints', TREE.joints, joints.length, (list) => {
       for (const j of joints) {
         list.appendChild(
-          item(`${JOINTS[j.type].short} · ${this.jointEnds(j)}`, sel?.type === 'joint' && sel.id === j.id, () => app.select({ type: 'joint', id: j.id }), {
+          item(`${this.jointLabel(j)} · ${this.jointEnds(j)}`, sel?.type === 'joint' && sel.id === j.id, () => app.select({ type: 'joint', id: j.id }), {
             iconName: j.type,
             hover: () => app.setHover({ type: 'joint', id: j.id, point: [0, 0, 0], distance: 0 }),
           }),
@@ -602,6 +603,12 @@ export class UI {
     return s;
   }
 
+  /** Short label of a joint for the tree: the type letter, or "Crease M 160°" for a crease (construction pose). */
+  private jointLabel(j: Joint): string {
+    const m = this.app.model;
+    return isCrease(m, j) ? creaseLabel(creaseMV(m, j), creaseDihedralDeg(m, j)) : JOINTS[j.type].short;
+  }
+
   /** "<link A> ↔ <link B or datum>" for a joint, used by the tree and the status bar. */
   private jointEnds(j: Joint): string {
     const m = this.app.model;
@@ -634,7 +641,7 @@ export class UI {
     const m = this.app.model;
     if (d.kind === 'angle') return `${m.links[d.linkId ?? '']?.name ?? ''} · angle`;
     const j = d.jointId ? m.joints[d.jointId] : null;
-    return `${j ? JOINTS[j.type].label : ''} · ${d.kind}`;
+    return `${j ? (isCrease(m, j) ? JOINTS.crease.label : JOINTS[j.type].label) : ''} · ${d.kind}`;
   }
 
   // ---------------------------------------------------------------------------
@@ -879,11 +886,12 @@ export class UI {
   private jointProps(box: HTMLElement, j: Joint): void {
     const app = this.app;
     const m = app.model;
-    box.appendChild(el('h4', 'panel__subtitle', JOINTS[j.type].label));
-    box.appendChild(el('p', 'hint', JOINTS[j.type].description));
-    const a = m.links[j.a.linkId]?.name ?? '';
-    const b = isConstructionRef(j.b) ? m.construction[j.b.constructionId]?.name ?? '' : m.links[j.b.linkId]?.name ?? '';
-    box.appendChild(row(PANEL.jointLinks, el('span', 'value', `${a} ↔ ${b}`)));
+    const crease = isCrease(m, j);
+    const info = crease ? JOINTS.crease : JOINTS[j.type];
+    box.appendChild(el('h4', 'panel__subtitle', info.label));
+    box.appendChild(el('p', 'hint', info.description));
+    box.appendChild(row(PANEL.jointLinks, el('span', 'value', this.jointEnds(j))));
+    if (crease) this.creaseProps(box, j);
     if (j.a.kind !== 'body') {
       box.appendChild(
         row(
@@ -916,6 +924,84 @@ export class UI {
       }
     }
     box.appendChild(button(PANEL.deleteItem, () => this.tools.deletePick({ type: 'joint', id: j.id }), { icon: 'delete', cls: 'btn--danger' }));
+  }
+
+  /**
+   * Crease section of the joint Properties: the current fold angle and class (read-only), the mountain / valley
+   * assignment and target fold angle stored in joint.fold (which move nothing by themselves), "Fold to target"
+   * (foldCreaseToTarget inside one undoable change, restored and explained on refusal) and "Drive this crease"
+   * (driveCrease, which pre-folds a flat vertex, then the new driver becomes the active one). The target is written
+   * without rebuilding the panel (like the helper offset and default joint type), so that typing a value and
+   * clicking "Fold to target" straight away is a single click; the fold itself is the undoable change.
+   */
+  private creaseProps(box: HTMLElement, j: Joint): void {
+    const app = this.app;
+    const m = app.model;
+    const deg = creaseDihedralDeg(m, j);
+    const mv = creaseMV(m, j);
+    if (deg !== null) box.appendChild(row(PANEL.creaseAngle, el('span', 'value', PANEL.creaseAngleValue(deg, mv))));
+    const mvRow = row(
+      PANEL.creaseMV,
+      select(
+        [
+          { value: '', label: PANEL.creaseMVUnset },
+          { value: 'M', label: PANEL.creaseMountain },
+          { value: 'V', label: PANEL.creaseValley },
+        ],
+        j.fold?.mv ?? '',
+        (v) => {
+          app.beginChange();
+          if (v === '') delete j.fold?.mv;
+          else j.fold = { ...(j.fold ?? {}), mv: v };
+          if (j.fold && Object.keys(j.fold).length === 0) delete j.fold;
+          app.endChange();
+        },
+      ),
+    );
+    mvRow.title = PANEL.creaseMVHelp;
+    box.appendChild(mvRow);
+    // default target: the stored one, else 160° for a flat crease (the pre-fold angle), else the current angle
+    let target = j.fold?.target ?? (deg === null || mv === null ? DEFAULT_PREFOLD_DEG : Math.round(Math.abs(deg)));
+    const targetRow = row(
+      PANEL.creaseTarget,
+      numberInput(target, (v) => {
+        target = Math.max(0, Math.min(180, v));
+        j.fold = { ...(j.fold ?? {}), target };
+      }, { step: 5, min: 0, max: 180, digits: 1 }),
+    );
+    targetRow.title = PANEL.creaseTargetHelp;
+    box.appendChild(targetRow);
+    const actions = el('div', 'actions');
+    const foldBtn = button(PANEL.creaseFoldTo, () => {
+      const sel = app.selection;
+      app.beginChange();
+      const r = foldCreaseToTarget(m, j.id, target, j.fold?.mv);
+      if (!r.ok) {
+        app.abortChange();
+        app.select(sel);
+        app.setStatus(STATUS.foldFailed(r.reason ?? 'unreachable'));
+        return;
+      }
+      app.setStatus(STATUS.creaseFolded(`${this.jointLabel(j)} · ${this.jointEnds(j)}`, r.dof ?? 0));
+      app.endChange();
+    });
+    foldBtn.title = PANEL.creaseFoldToHelp;
+    actions.appendChild(foldBtn);
+    const driveBtn = button(PANEL.creaseDrive, () => {
+      app.beginChange();
+      const r = driveCrease(m, j.id);
+      if (!r.driver) {
+        app.abortChange();
+        return;
+      }
+      app.endChange();
+      app.setActiveDriver(m.drivers.indexOf(r.driver));
+      const note = r.prefold ? (r.prefold.ok ? STATUS.prefolded : STATUS.flatVertexWarning) : '';
+      app.setStatus(note ? `${STATUS.driverSet} · ${note}` : STATUS.driverSet);
+    }, { icon: 'driver' });
+    driveBtn.title = PANEL.creaseDriveHelp;
+    actions.appendChild(driveBtn);
+    box.appendChild(actions);
   }
 
   private constructionProps(box: HTMLElement, c: Construction): void {
@@ -1084,7 +1170,7 @@ export class UI {
     const box = el('div', 'dialog');
     box.appendChild(el('h2', 'dialog__title', SETTINGS.title));
     box.appendChild(el('h3', 'panel__title', SETTINGS.colors));
-    const colorKeys: (keyof AppSettings['colors'])[] = ['geometry', 'ground', 'construction', 'designSpace', 'outputPath', 'editPointFree', 'editPointConstrained', 'background', 'gridMajor', 'gridMinor', 'selection'];
+    const colorKeys: (keyof AppSettings['colors'])[] = ['geometry', 'ground', 'construction', 'designSpace', 'outputPath', 'editPointFree', 'editPointConstrained', 'background', 'gridMajor', 'gridMinor', 'selection', 'mountain', 'valley'];
     const pickers: ReturnType<typeof createColorPicker>[] = [];
     for (const key of colorKeys) {
       const p = createColorPicker(SETTINGS[key as keyof typeof SETTINGS] as string, app.settings.colors[key], (hex) => app.updateSettings({ colors: { [key]: hex } }));

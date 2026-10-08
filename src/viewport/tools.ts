@@ -7,7 +7,7 @@ import type { App, ToolName } from '../app';
 import { add, dist, dot, len, normalize, scale, sub, cross } from '../core/geometry';
 import { solveSketch, syncDriverValues } from '../core/kinematics';
 import { tryAddJoint, trySolveCommit } from '../core/feasibility';
-import { findCreaseLoops, isCrease, prefoldVertex } from '../core/fold';
+import { driveCrease, findCreaseLoops, isCrease } from '../core/fold';
 import {
   addAngleDriver,
   addBar,
@@ -15,7 +15,6 @@ import {
   addConstructionPlane3,
   addConstructionPoint,
   addCylinder,
-  addFoldDriver,
   addJoint,
   addOffsetPlane,
   addPolygon,
@@ -777,16 +776,10 @@ export class ToolManager {
     if (pick.type === 'joint') {
       const j = m.joints[pick.id];
       if (j?.type === 'revolute') {
-        if (this.inFlatLoop(j.id)) {
-          // a fold driver on a flat vertex would sweep the degenerate straight-hinge branch: pre-fold first, in the
-          // same change (one undo entry). The driver the pre-fold may keep for a driverless model is replaced by the
-          // one the user asked for, on the picked crease.
-          const hadDrivers = m.drivers.length > 0;
-          const r = prefoldVertex(m, { preferCreaseId: j.id });
-          if (r.ok && !hadDrivers) m.drivers = [];
-          note = r.ok ? STATUS.prefolded : STATUS.flatVertexWarning;
-        }
-        addFoldDriver(m, j.id);
+        // a fold driver on a flat vertex would sweep the degenerate straight-hinge branch: driveCrease pre-folds
+        // first, in the same change (one undo entry), and leaves exactly one driver on the picked crease
+        const r = driveCrease(m, j.id);
+        if (r.prefold) note = r.prefold.ok ? STATUS.prefolded : STATUS.flatVertexWarning;
       } else if (j && (j.type === 'prismatic' || j.type === 'cylindrical' || j.type === 'screw')) addSlideDriver(m, j.id);
     } else if (pick.linkId) {
       const cands = candidateAngleDrivers(m).filter((c) => c.linkId === pick.linkId);
