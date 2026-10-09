@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { addBar, addJoint, addPolygonFromPoints, bodyPlaneJoint, createModel, jointAxisPoints, offAxisPoint, parseModel, serializeModel, setGround } from '../src/core/model';
+import { addBar, addFoldDriver, addJoint, addPolygonFromPoints, bodyPlaneJoint, createModel, jointAxisPoints, offAxisPoint, parseModel, serializeModel, setGround } from '../src/core/model';
 import { tryAddJoint } from '../src/core/feasibility';
-import { computeMobility, currentViolation } from '../src/core/kinematics';
+import { computeMobility, currentViolation, sweepDriver, syncDriverValues } from '../src/core/kinematics';
 import { origamiMiuraVertex } from '../src/core/examples';
 import {
   creaseDihedralDeg,
@@ -18,7 +18,7 @@ import {
 } from '../src/core/fold';
 import { cross, dist, dot, sub } from '../src/core/geometry';
 import type { Feature, ID, Joint, Link, Model, Vec3 } from '../src/core/types';
-import { creaseLabel } from '../src/ui/strings';
+import { PANEL, creaseLabel } from '../src/ui/strings';
 import { DEFAULT_SETTINGS, loadSettings } from '../src/ui/settings';
 
 /** Edge feature of `link` whose end points are nearest to p and q. */
@@ -250,6 +250,56 @@ describe('creaseTargetDihedral and foldCreaseToTarget', () => {
     expect(serializeModel(flat.m)).toBe(before);
   });
 
+  it('flips the class of a plain hinge (open fan, no loop) at the same fold angle by passing through flat: M 90° → V 90° and back', () => {
+    const m = createModel();
+    const A = addPolygonFromPoints(m, [[0, 0, 0], [2, 0, 0], [1, 2, 0]], { onPlaneId: null });
+    const B = addPolygonFromPoints(m, [[0, 0, 0], [1, -2, 0], [2, 0, 0]], { onPlaneId: null });
+    setGround(m, A.id);
+    const j = tryAddJoint(m, 'revolute', edgeNear(m, A, O, [2, 0, 0]), edgeNear(m, B, O, [2, 0, 0])).joint!;
+    expect(findCreaseLoops(m).length).toBe(0);
+    const steps: [number, 'M' | 'V'][] = [[90, 'M'], [90, 'V'], [90, 'M'], [45, 'V'], [170, 'M'], [10, 'V'], [10, 'M'], [120, 'V']];
+    for (const [angle, mv] of steps) {
+      const f = foldCreaseToTarget(m, j.id, angle, mv);
+      expect(f).toMatchObject({ ok: true, creaseId: j.id, removedPlanes: [] });
+      expect(Math.abs(creaseDihedralDeg(m, j)!)).toBeCloseTo(angle, 5);
+      expect(creaseMV(m, j)).toBe(mv);
+      expect(currentViolation(m)).toBeLessThan(1e-9);
+      expect(m.drivers.length).toBe(0); // no driver is left behind on a driverless model without a loop
+    }
+    // fully closed (0°, the panels coincide, no class) and back open to flat (180°): the half turn is taken in steps
+    expect(foldCreaseToTarget(m, j.id, 0, 'V').ok).toBe(true);
+    expect(Math.abs(creaseDihedralDeg(m, j)!)).toBeLessThan(1e-5);
+    expect(foldCreaseToTarget(m, j.id, 180).ok).toBe(true);
+    expect(Math.abs(creaseDihedralDeg(m, j)!)).toBeCloseTo(180, 5);
+    expect(foldCreaseToTarget(m, j.id, 60, 'M').ok).toBe(true);
+    expect(creaseMV(m, j)).toBe('M');
+  });
+
+  it('flips the middle crease of a three-panel fan at the same angle while the other crease is held by its driver', () => {
+    const { m, tris } = developable({ planar: false });
+    // keep only two creases: D1–D2 and D2–D3 (an open fan), D1 ground
+    const [loop] = findCreaseLoops(m);
+    const keep = loop.creaseIds.slice(0, 2);
+    for (const id of loop.creaseIds) if (!keep.includes(id)) delete m.joints[id];
+    expect(findCreaseLoops(m)).toEqual([]);
+    const [first, middle] = keep.map((id) => m.joints[id]);
+    expect(foldCreaseToTarget(m, first.id, 150, 'M').ok).toBe(true);
+    expect(foldCreaseToTarget(m, middle.id, 100, 'V').ok).toBe(true);
+    addFoldDriver(m, first.id); // holds the first crease where it is (a driverless hinge may move with the solve)
+    syncDriverValues(m);
+    const held = creaseDihedralDeg(m, first)!;
+    for (const mv of ['M', 'V', 'M'] as const) {
+      const f = foldCreaseToTarget(m, middle.id, 100, mv);
+      expect(f.ok).toBe(true);
+      expect(Math.abs(creaseDihedralDeg(m, middle)!)).toBeCloseTo(100, 5);
+      expect(creaseMV(m, middle)).toBe(mv);
+      expect(creaseDihedralDeg(m, first)).toBeCloseTo(held, 5); // not on the loop (there is none): the driver holds it
+      expect(currentViolation(m)).toBeLessThan(1e-9);
+      expect(m.drivers.length).toBe(1);
+    }
+    void tris;
+  });
+
   it('c) releases a fold driver that sits on another crease of the vertex and re-measures it', () => {
     const { m } = developable();
     const r = prefoldVertex(m);
@@ -310,13 +360,13 @@ describe('driveCrease', () => {
       expect(tris.every((t) => bodyPlaneJoint(m, t.id) === null)).toBe(true);
       expect(noneFlat(m, creases.map((c) => c.id))).toBe(true);
       expect(computeMobility(m).dof).toBe(1);
-      // the pre-fold drove a non-collinear crease; the picked collinear crease still folds and its class follows fold.mv
-      // whenever the pre-fold could honour it (verified for the driven crease; here checked for the picked one)
-      expect(creaseMV(m, j)).not.toBeNull();
+      // the pre-fold drove a non-collinear crease, with the sign that gives the picked (collinear) crease its stored class
+      expect(r.reused).toBe(false);
+      expect(creaseMV(m, j)).toBe(mv);
     }
   });
 
-  it('honours fold.mv on the crease it drives, needs no pre-fold on a folded vertex and keeps existing drivers', () => {
+  it('honours fold.mv on the crease it drives, needs no pre-fold on a folded vertex and moves the single driver of a one-DOF vertex to the picked crease', () => {
     const { m, creases } = developable();
     const j = creases[1]; // non-collinear: the pre-fold drives this crease itself
     for (const mv of ['M', 'V'] as const) {
@@ -325,18 +375,75 @@ describe('driveCrease', () => {
       const r = driveCrease(fresh, j.id);
       expect(r.prefold?.ok).toBe(true);
       expect(r.prefold?.creaseId).toBe(j.id);
+      expect(r.reused).toBe(false);
       expect(creaseMV(fresh, fresh.joints[j.id])).toBe(mv);
       expect(fresh.drivers.length).toBe(1);
     }
+    // the Miura example has one fold driver on a one-DOF vertex: driving another crease moves it (a second driver
+    // would freeze the vertex)
     const miura = origamiMiuraVertex(60);
-    const other = Object.values(miura.joints).find((x) => x.type === 'revolute' && x.id !== miura.drivers[0].jointId)!;
+    const previous = miura.drivers[0].jointId!;
+    const other = Object.values(miura.joints).find((x) => x.type === 'revolute' && x.id !== previous)!;
     const r = driveCrease(miura, other.id);
     expect(r.prefold).toBeNull();
-    expect(miura.drivers.length).toBe(2);
-    expect(miura.drivers[1]).toBe(r.driver);
-    expect(miura.drivers[1].value).toBeCloseTo(creaseDihedralDeg(miura, other)!, 9);
+    expect(r.reused).toBe(false);
+    expect(miura.drivers.length).toBe(1);
+    expect(miura.drivers[0]).toBe(r.driver);
+    expect(miura.drivers[0].jointId).toBe(other.id);
+    expect(miura.drivers[0].value).toBeCloseTo(creaseDihedralDeg(miura, other)!, 9);
+    expect(sweepDriver(miura, 0).poses.length).toBeGreaterThan(10);
+    // a model with several drivers is left alone: a deliberate extra driver stays
+    const extra = origamiMiuraVertex(60);
+    extra.drivers.push({ ...extra.drivers[0], id: 'driver_extra', jointId: undefined, kind: 'angle', linkId: Object.keys(extra.links)[0] });
+    const r2 = driveCrease(extra, other.id);
+    expect(extra.drivers.length).toBe(3);
+    expect(extra.drivers[2]).toBe(r2.driver);
     const sph = addJoint(miura, 'spherical', vertex(addBar(miura, [5, 0, 0], [6, 0, 0]), 0), vertex(addBar(miura, [5, 0, 0], [5, 1, 0]), 0))!;
-    expect(driveCrease(miura, sph.id)).toEqual({ driver: null, prefold: null });
+    expect(driveCrease(miura, sph.id)).toEqual({ driver: null, prefold: null, reused: false });
+  });
+
+  it('after Fold, driving the crease that already has the driver reuses it, and driving another crease moves it: never two fold drivers on the vertex', () => {
+    const { m, tris } = developable({ planar: true });
+    const r = prefoldVertex(m);
+    expect(r.ok).toBe(true);
+    expect(m.drivers.length).toBe(1);
+    const kept = m.drivers[0];
+    // "Drive this crease" on the crease Fold selected
+    const same = driveCrease(m, r.creaseId!);
+    expect(same.reused).toBe(true);
+    expect(same.prefold).toBeNull();
+    expect(same.driver).toBe(kept);
+    expect(m.drivers.length).toBe(1);
+    const sweep = sweepDriver(m, 0);
+    expect(sweep.poses.length).toBeGreaterThan(10);
+    expect(sweep.range[1] - sweep.range[0]).toBeGreaterThan(30);
+    // the Driver tool on another crease of the vertex
+    const [loop] = findCreaseLoops(m);
+    const other = loop.creaseIds.find((id) => id !== r.creaseId)!;
+    const moved = driveCrease(m, other);
+    expect(moved.reused).toBe(false);
+    expect(moved.prefold).toBeNull();
+    expect(m.drivers.length).toBe(1);
+    expect(m.drivers[0]).toBe(moved.driver);
+    expect(m.drivers[0].jointId).toBe(other);
+    expect(m.drivers[0].value).toBeCloseTo(creaseDihedralDeg(m, m.joints[other])!, 9);
+    const sweep2 = sweepDriver(m, 0);
+    expect(sweep2.poses.length).toBeGreaterThan(10);
+    for (const t of tris.slice(1)) {
+      const far = t.pointIds.filter((id) => dist(m.points[id].pos, O) > 1);
+      const move = Math.max(...far.map((pid) => Math.max(...sweep2.poses.map((pose) => dist(pose.positions.get(pid)!, m.points[pid].pos)))));
+      expect(move).toBeGreaterThan(1);
+    }
+    // a flat vertex whose crease already carries a driver: the pre-fold runs and the driver is reused, still one
+    const flat = developable({ planar: true });
+    const cid = findCreaseLoops(flat.m)[0].creaseIds[1];
+    flat.m.drivers.push({ id: 'driver_x', kind: 'fold', jointId: cid, value: 180 });
+    const again = driveCrease(flat.m, cid);
+    expect(again.prefold?.ok).toBe(true);
+    expect(again.reused).toBe(true);
+    expect(flat.m.drivers.length).toBe(1);
+    expect(flat.m.drivers[0].id).toBe('driver_x');
+    expect(Math.abs(flat.m.drivers[0].value)).toBeLessThan(179); // re-measured on the folded pose
   });
 });
 
@@ -346,6 +453,21 @@ describe('crease presentation: labels and colours', () => {
     expect(creaseLabel('V', 119.6)).toBe('Crease V 120°');
     expect(creaseLabel(null, 180)).toBe('Crease 180°');
     expect(creaseLabel(null, null)).toBe('Crease');
+  });
+
+  it('the Properties readout shows the fold angle magnitude with the class, never a signed dihedral', () => {
+    expect(PANEL.creaseAngleValue(-169.9, 'V')).toBe('169.9° · Valley (V)');
+    expect(PANEL.creaseAngleValue(160, 'M')).toBe('160.0° · Mountain (M)');
+    expect(PANEL.creaseAngleValue(-180, null)).toBe('180.0° · flat');
+    const { m, creases } = developable();
+    expect(prefoldVertex(m).ok).toBe(true);
+    for (const j of creases) {
+      const deg = creaseDihedralDeg(m, j)!;
+      const text = PANEL.creaseAngleValue(deg, creaseMV(m, j));
+      expect(text).toMatch(/^\d/);
+      expect(text.startsWith(`${Math.abs(deg).toFixed(1)}°`)).toBe(true);
+      expect(creaseLabel(creaseMV(m, j), deg)).toContain(`${Math.round(Math.abs(deg))}°`);
+    }
   });
 
   it('mountain / valley colours default to red / blue and are filled in for stored settings that predate them', () => {

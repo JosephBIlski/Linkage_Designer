@@ -333,8 +333,12 @@ export function angleDriver(tip: PRef, pivot: PRef, n: Vec3, u: Vec3, theta: num
   };
 }
 
-/** Generic numeric Jacobian (central differences) over the variable columns touched by refs. */
-function numericJac(refs: PRef[], f: (x: Float64Array) => number, Lc: number) {
+/**
+ * Generic numeric Jacobian (central differences) over the variable columns touched by refs. For a `periodic` f (an
+ * angle wrapped to (−π, π]) the difference is wrapped as well, so the derivative stays finite when the two samples
+ * straddle the ±π discontinuity instead of blowing up to ±2π/2h.
+ */
+function numericJac(refs: PRef[], f: (x: Float64Array) => number, Lc: number, periodic = false) {
   const cols = new Set<number>();
   for (const r of refs) for (const c of r.cols) if (c >= 0) cols.add(c);
   const colList = [...cols];
@@ -347,7 +351,8 @@ function numericJac(refs: PRef[], f: (x: Float64Array) => number, Lc: number) {
       x[c] = old - h;
       const fm = f(x);
       x[c] = old;
-      push(row, c, ((fp - fm) / (2 * h)) * Lc);
+      const df = periodic ? wrapAngle(fp - fm) : fp - fm;
+      push(row, c, (df / (2 * h)) * Lc);
     }
   };
 }
@@ -363,7 +368,7 @@ export function dihedral(a: PRef, b: PRef, p: PRef, q: PRef, theta: number, Lc: 
     eval(x, out, off) {
       out[off] = f(x) * Lc;
     },
-    jac: numericJac([a, b, p, q], f, Lc),
+    jac: numericJac([a, b, p, q], f, Lc, true),
   };
 }
 

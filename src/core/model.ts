@@ -538,6 +538,23 @@ export const EDGE_LENGTH_TOLERANCE = 1e-3;
  */
 export const CREASE_EXACT_TOLERANCE = 1e-9;
 
+/**
+ * Largest change of a rest distance (relative to the longer edge) an adapting link may take when a crease merges two
+ * edges of slightly different length: twice the merge tolerance, i.e. the snap-sized noise the merge was meant to
+ * absorb. A released solve that reshapes a panel by more than this is not absorbing noise but closing a loop that
+ * rigid panels cannot close, and is refused (feasibility.ts adaptationLimit, kinematics.ts releaseDrift).
+ */
+export const CREASE_ADAPTATION_TOLERANCE = 2 * EDGE_LENGTH_TOLERANCE;
+
+/** Current-pose lengths of the two edges of an edge/axis–edge/axis revolute (la for feature a, lb for b), else null. */
+export function creaseEdgeLengths(m: Model, joint: Joint): { la: number; lb: number } | null {
+  if (joint.type !== 'revolute' || isConstructionRef(joint.b)) return null;
+  if (!axisLike(joint.a.kind) || !axisLike(joint.b.kind)) return null;
+  const ids = [...joint.a.pointIds, ...joint.b.pointIds];
+  if (ids.length < 4 || ids.some((id) => !m.points[id])) return null;
+  return { la: dist(P(m, joint.a.pointIds[0]), P(m, joint.a.pointIds[1])), lb: dist(P(m, joint.b.pointIds[0]), P(m, joint.b.pointIds[1])) };
+}
+
 /** Point of `link` farthest from the line through the two axis points (null if all collinear). */
 export function offAxisPoint(m: Model, link: Link, axis: [ID, ID]): ID | null {
   const a = P(m, axis[0]);
@@ -703,19 +720,29 @@ export function addJoint(m: Model, type: JointType, a: Feature, b: Feature | Con
  * Callers pass the ids as freePointIds to solveSketch / solveSketchWithRelease and to commitSketch.
  */
 export function creaseReleasePoints(m: Model, joint: Joint, preferLinkId?: ID): ID[] {
-  if (joint.type !== 'revolute' || isConstructionRef(joint.b) || joint.pairs?.length !== 2) return [];
+  if (!mergedCreaseMismatch(m, joint)) return [];
   const fa = joint.a;
-  const fb = joint.b;
-  if (!axisLike(fa.kind) || !axisLike(fb.kind)) return [];
-  const la = dist(P(m, fa.pointIds[0]), P(m, fa.pointIds[1]));
-  const lb = dist(P(m, fb.pointIds[0]), P(m, fb.pointIds[1]));
-  if (Math.abs(la - lb) <= CREASE_EXACT_TOLERANCE * Math.max(la, lb)) return [];
+  const fb = joint.b as Feature;
   const mayMove = (f: Feature): boolean => {
     const link = m.links[f.linkId];
     return !!link && !link.ground && !link.locked;
   };
   const side = (preferLinkId === fa.linkId ? [fa, fb] : [fb, fa]).find(mayMove);
   return side ? [side.pointIds[0], side.pointIds[1]] : [];
+}
+
+/**
+ * Lengths of the two edges of a merged edge/axis crease (two end-point pairs) that differ by more than
+ * CREASE_EXACT_TOLERANCE in the current pose, i.e. a crease that needs one link to adapt its rest geometry; null for
+ * identical lengths and for joints that are not merged creases. creaseReleasePoints names the link that adapts; when
+ * it names none (both panels ground or locked) the mismatch cannot be absorbed and the crease is refused
+ * (feasibility.ts unabsorbedCreaseLengths).
+ */
+export function mergedCreaseMismatch(m: Model, joint: Joint): { la: number; lb: number } | null {
+  if (joint.pairs?.length !== 2) return null;
+  const lengths = creaseEdgeLengths(m, joint);
+  if (!lengths) return null;
+  return Math.abs(lengths.la - lengths.lb) > CREASE_EXACT_TOLERANCE * Math.max(lengths.la, lengths.lb) ? lengths : null;
 }
 
 export function sketchNormal(m: Model): Vec3 {

@@ -165,7 +165,8 @@ export const PANEL = {
   jointPitch: 'Pitch',
   // Crease (edge–edge revolute with merged end points) properties; angles are dihedral magnitudes, 180° = flat
   creaseAngle: 'Fold angle (current)',
-  creaseAngleValue: (deg: number, mv: 'M' | 'V' | null): string => `${deg.toFixed(1)}° · ${mv === 'M' ? PANEL.creaseMountain : mv === 'V' ? PANEL.creaseValley : PANEL.creaseFlat}`,
+  // the fold angle is the dihedral magnitude (as in the tree, the viewport label and the target field); the class carries the sign
+  creaseAngleValue: (deg: number, mv: 'M' | 'V' | null): string => `${Math.abs(deg).toFixed(1)}° · ${mv === 'M' ? PANEL.creaseMountain : mv === 'V' ? PANEL.creaseValley : PANEL.creaseFlat}`,
   creaseMountain: 'Mountain (M)',
   creaseValley: 'Valley (V)',
   creaseFlat: 'flat',
@@ -200,6 +201,9 @@ export const PANEL = {
   constrainTo: 'Constrain to construction geometry',
   constrainToNone: '— choose —',
   mechanism: 'Mechanism',
+  // a refusal (joint, fold, edit, solidify) is kept in the Mechanism panel until dismissed or the next change, since the status bar is replaced on the next hover
+  noticeDismiss: 'Dismiss',
+  noticeDismissHelp: 'Hide this message.',
   links: 'links',
   joints: 'joints',
   pointsShown: 'points displayed',
@@ -240,9 +244,10 @@ export const SIM = {
   rigidBodyModes: 'includes rigid-body modes of the floating assembly',
   solveFailed: 'The mechanism cannot be assembled at this input value.',
   timing: 'Timing: prescribed (each editing point keeps its input value)',
-  // Shown in the Mechanism panel and as the DOF chip tooltip when creasesLockedByPlane is non-empty
-  creasesLocked: (n: number): string =>
-    `${n} crease${n === 1 ? '' : 's'} cannot fold: both panels are kept on the sketch plane. Untick 'Keep on sketch plane' in Properties, or use Fold.`,
+  // Shown in the Mechanism panel and as the DOF chip tooltip when creasesLockedByPlane is non-empty; Fold is only
+  // suggested when the Fold button is offered (a flat crease loop exists)
+  creasesLocked: (n: number, foldAvailable: boolean): string =>
+    `${n} crease${n === 1 ? '' : 's'} cannot fold: both panels are kept on the sketch plane. Untick 'Keep on sketch plane' in Properties${foldAvailable ? ', or use Fold' : ''}.`,
   // Fold (pre-fold) command for flat origami vertices (docs/CONSTRUCTION_PLAN.md, item 1a)
   flatVertices: (n: number): string =>
     n === 1
@@ -294,6 +299,7 @@ export const STATUS = {
   dragHint: 'Drag the editing point. Shift: free direction. Esc: cancel.',
   groundSet: 'Ground link set',
   driverSet: 'Driver added',
+  driverReused: 'This crease already has a fold driver; it is now the active one.',
   jointCreated: 'Joint created',
   jointIncompatible: 'These features cannot be connected with this joint type.',
   // Joint pre-flight refusals (the model is restored; nothing moves)
@@ -303,15 +309,17 @@ export const STATUS = {
   jointRefusedSector: (vertexName: string, sumDeg: number, constrained2d: boolean): string =>
     `The panels around vertex ${vertexName} have corner angles that add up to ${sumDeg.toFixed(1)}°, not 360°, so they cannot lie flat around it. ` +
     (constrained2d
-      ? 'They can only meet by folding out of the sketch plane: remove the 2-D constraint from these panels, or change their shapes. '
+      ? 'They can only meet by folding out of the sketch plane: remove the 2-D constraint from these panels and move them out of the plane (build the vertex in its folded shape) before adding this joint, or change their shapes. '
       : 'Change the panel shapes so the angles add up to 360°, or build the vertex in its folded shape. ') +
     'Nothing was moved.',
-  jointRefusedNeeds3d: 'This joint can only be satisfied out of the sketch plane. Remove the 2-D constraint from the links involved (or sketch them in 3-D mode) and add the joint again. Nothing was moved.',
+  jointRefusedNeeds3d:
+    'This joint can only be satisfied out of the sketch plane. Remove the 2-D constraint from the links involved and move them out of the plane (with the Edit tool, or sketch them in 3-D mode in their folded shape), then add the joint again. Nothing was moved.',
   jointRefusedInfeasible: (residual: number): string =>
     `This joint cannot be satisfied together with the existing constraints (a gap of ${num(residual)} units remains). Remove a conflicting joint or move the links into place before joining. Nothing was moved.`,
   editRefused: 'The constraints cannot all be satisfied with this change, so it was not applied.',
   // Fold (pre-fold) command and the flat-vertex hints around it
   folded: (creaseName: string, dof: number): string => `Vertex pre-folded about crease ${creaseName}. Mechanism DOF: ${dof}.`,
+  foldedDriverKept: 'A fold driver was kept on that crease so the vertex can be previewed; the Driver tool moves it to another crease.',
   foldFailed: (reason: FoldReason): string => {
     switch (reason) {
       case 'noLoop':
@@ -323,7 +331,7 @@ export const STATUS = {
       case 'noBranch':
         return 'No folded state was found for this vertex: every crease is collinear with another one (an "X" vertex folds only as a straight hinge), or the panels cannot all leave the plane. Nothing was changed.';
       case 'unreachable':
-        return 'The crease cannot be folded to that angle together with the other constraints and drivers (a driver on another crease of the vertex, or a target on the other side of flat, may hold it). Nothing was changed.';
+        return 'No pose was found in which this crease has that fold angle: a joint, a driver on another crease of the vertex or a locked panel holds it. Nothing was changed.';
     }
   },
   creaseFolded: (creaseName: string, dof: number): string => `Folded to target: ${creaseName}. Mechanism DOF: ${dof}.`,

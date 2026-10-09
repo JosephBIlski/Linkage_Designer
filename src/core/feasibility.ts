@@ -8,9 +8,27 @@
  * byte from the snapshot and the caller receives a diagnosis to show. No tool
  * path commits a non-converged pose (docs/CONSTRUCTION_PLAN.md, item 0b).
  */
-import { dist, dot, normalize, sub } from './geometry';
-import { commitSketch, currentViolation, feasibilityTolerance, isAccepted, modelSize, positionsFromModel, solveSketch, solveSketchWithRelease, type Positions, type SketchOptions } from './kinematics';
-import { EDGE_LENGTH_TOLERANCE, addJoint, bodyPlaneJoint, changeJointType, cloneModel, creaseReleasePoints, parseModel, refreshRigidity, removeJoint, serializeModel, type JointOptions } from './model';
+import { add, cross, dist, dot, len, newellNormal, normalize, rotateAbout, sub } from './geometry';
+import { jointDihedralDeg } from './jointMeasure';
+import { commitSketch, currentViolation, feasibilityTolerance, isAccepted, modelSize, positionsFromModel, solveSketch, solveSketchWithRelease, type Positions, type ReleaseResult, type SketchOptions } from './kinematics';
+import {
+  CREASE_ADAPTATION_TOLERANCE,
+  EDGE_LENGTH_TOLERANCE,
+  addJoint,
+  bodyPlaneJoint,
+  changeJointType,
+  cloneModel,
+  creaseEdgeLengths,
+  creaseReleasePoints,
+  jointAxisPoints,
+  linkAllPointIds,
+  mergedCreaseMismatch,
+  parseModel,
+  refreshRigidity,
+  removeJoint,
+  serializeModel,
+  type JointOptions,
+} from './model';
 import type { ConstructionRef, Feature, ID, Joint, JointType, Link, Model, Vec3 } from './types';
 import { isConstructionRef } from './types';
 
@@ -145,17 +163,100 @@ export function tryChangeJointType(m: Model, jointId: ID, type: JointType, opts:
   return verifyJoint(m, joint, snapshot, loop);
 }
 
-/** Solve for a freshly added joint; commit on acceptance, otherwise diagnose and restore. */
+/**
+ * Solve for a freshly added joint; commit on acceptance, otherwise diagnose and
+ * restore. A crease between edges of slightly different length lets one link's
+ * edge adapt (creaseReleasePoints), and the result is accepted only when that
+ * adaptation stays within adaptationLimit: releasing both end points of a
+ * triangle releases all of its distances, so a released solve of a loop that
+ * rigid panels cannot close (four 60° sectors, hand-placed) would otherwise
+ * "converge" by collapsing the adapting panel, bake that as its design and
+ * report success. The diagnosis of a refused joint is made from the rigid
+ * step, whose residual carries the sector-sum / needs-3-D information. A
+ * merged crease that pulled a panel drawn elsewhere onto its neighbour (the
+ * two panels coincide, dihedral ≈ 0°) is re-solved from the pose rotated by a
+ * half turn about the shared edge, so the panel is placed beside its
+ * neighbour (dihedral 180°) where a crease can fold.
+ */
 function verifyJoint(m: Model, joint: Joint, snapshot: string, loop: ID[] | null): FeasibilityResult {
   const free = new Set(creaseReleasePoints(m, joint));
-  const res = solveSketchWithRelease(m, free);
-  if (isAccepted(res, feasibilityTolerance(m))) {
+  const limit = adaptationLimit(m, [joint]);
+  const before = positionsFromModel(m);
+  let res = solveSketchWithRelease(m, free);
+  if (isReleaseAccepted(m, res, limit)) {
+    const init = unfoldedInit(m, joint, before, res.positions);
+    if (init) {
+      const beside = solveSketchWithRelease(m, free, { init });
+      if (isReleaseAccepted(m, beside, limit)) res = beside;
+    }
     commitSketch(m, res, free);
     return { ok: true, joint, residual: res.residual };
   }
-  const diagnosis = diagnoseJoint(m, joint, res.residual, loop);
+  const diagnosis = diagnoseJoint(m, joint, res.rigid.residual, loop);
   restore(m, snapshot);
-  return { ok: false, diagnosis, residual: res.residual };
+  return { ok: false, diagnosis, residual: res.drift > limit ? res.rigid.residual : res.residual };
+}
+
+/**
+ * Largest change a rest distance of an adapting link may take for the creases
+ * `joints` (CREASE_ADAPTATION_TOLERANCE of the longest edge involved, plus the
+ * solve tolerance): the snap-sized noise a crease merge absorbs. Compared with
+ * ReleaseResult.drift by every caller that commits a released solve.
+ */
+export function adaptationLimit(m: Model, joints: Joint[]): number {
+  let scale = 0;
+  for (const j of joints) {
+    const l = creaseEdgeLengths(m, j);
+    if (l) scale = Math.max(scale, l.la, l.lb);
+  }
+  return CREASE_ADAPTATION_TOLERANCE * scale + feasibilityTolerance(m);
+}
+
+/** isAccepted, and the adapting links changed shape by no more than `limit` (adaptationLimit). */
+export function isReleaseAccepted(m: Model, res: ReleaseResult, limit: number): boolean {
+  return isAccepted(res, feasibilityTolerance(m)) && res.drift <= limit;
+}
+
+/** A crease counts as folded flat onto its neighbour when |dihedral| is below this (degrees). */
+const COINCIDENT_PANELS_DEG = 1;
+
+/**
+ * Warm start that places the moving panel of a merged crease beside its
+ * neighbour: when the two panels started apart (a pair of end points further
+ * apart than the solve tolerance in `before`) and the solve brought them to
+ * coincide (|dihedral| < COINCIDENT_PANELS_DEG in `solved`), every point of the
+ * non-ground panel is rotated by π about the shared edge, which keeps all
+ * joints and a sketch-plane constraint satisfied (the edge lies in the plane)
+ * and gives the unfolded crease. Null when none of this applies.
+ */
+function unfoldedInit(m: Model, joint: Joint, before: Positions, solved: Positions): Positions | null {
+  if (joint.type !== 'revolute' || isConstructionRef(joint.b) || joint.pairs?.length !== 2) return null;
+  if (!creaseEdgeLengths(m, joint)) return null;
+  const tol = feasibilityTolerance(m);
+  const apart = joint.pairs.some(([x, y]) => {
+    const px = before.get(x);
+    const py = before.get(y);
+    return !!px && !!py && dist(px, py) > tol;
+  });
+  if (!apart) return null;
+  const d = jointDihedralDeg(m, joint, solved);
+  if (d === null || Math.abs(d) > COINCIDENT_PANELS_DEG) return null;
+  const linkB = m.links[joint.b.linkId];
+  const mover = linkB.ground ? m.links[joint.a.linkId] : linkB;
+  if (!mover || mover.ground) return null;
+  const ax = jointAxisPoints(m, joint, 'a');
+  if (!ax) return null;
+  const a0 = solved.get(ax[0]);
+  const a1 = solved.get(ax[1]);
+  if (!a0 || !a1) return null;
+  const k = normalize(sub(a1, a0));
+  if (len(k) < 0.5) return null;
+  const init: Positions = new Map(solved);
+  for (const id of linkAllPointIds(mover)) {
+    const p = init.get(id);
+    if (p) init.set(id, add(a0, rotateAbout(sub(p, a0), k, Math.PI)));
+  }
+  return init;
 }
 
 // ---------------------------------------------------------------------------
@@ -189,19 +290,26 @@ export function restore(m: Model, snapshot: string): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Explain why the solve for `joint` was refused. `loop` is the chain of links
- * that already connected the two sides before the joint was added (null when
- * they were not connected, so the joint closes no loop).
+ * Explain why the solve for `joint` was refused, most specific first in the
+ * order of docs/CONSTRUCTION_PLAN.md 0b: (1) the two edges of an edge–edge
+ * revolute differ in length, either beyond the merge tolerance (no end points
+ * were merged, the hinge slides) or by a small amount that no link may absorb
+ * (both panels ground or locked); (2) the panels around the vertex the joint
+ * closes a loop around have sector angles that do not add up to 360°; (3) the
+ * loop closes once the sketch-plane constraints are removed; (4) the generic
+ * residual. `loop` is the chain of links that already connected the two sides
+ * before the joint was added (null when they were not connected, so the joint
+ * closes no loop). `residual` is the gap left by the rigid solve.
  */
 export function diagnoseJoint(m: Model, joint: Joint, residual: number, loop: ID[] | null): Diagnosis {
+  const lengths = unequalEdgeLengths(m, joint) ?? unabsorbedCreaseLengths(m, joint);
+  if (lengths) return { kind: 'edgeLengths', ...lengths };
   if (loop) {
     const sector = sectorSumAt(m, joint);
     if (sector && Math.abs(sector.sumDeg - 360) > SECTOR_SUM_TOLERANCE_DEG) return { kind: 'sectorSum', ...sector };
   }
   const linkIds = loop ?? [joint.a.linkId, ...(isConstructionRef(joint.b) ? [] : [joint.b.linkId])];
   if (closesWithout2d(m, joint, linkIds)) return { kind: 'needs3d', linkIds };
-  const lengths = unequalEdgeLengths(m, joint);
-  if (lengths) return { kind: 'edgeLengths', ...lengths };
   return { kind: 'infeasible', residual };
 }
 
@@ -274,7 +382,16 @@ export function sectorSumAt(m: Model, joint: Joint): SectorSum | null {
   };
 }
 
-/** Interior angle (degrees) of a polygon / prism-face ring at one of its vertices, null if the point is not on a ring. */
+/**
+ * Interior angle (degrees, 0–360) of a polygon / prism-face ring at one of its
+ * vertices, null if the point is not on a ring. Measured as the signed angle
+ * from the next edge to the previous edge about the ring's own winding normal
+ * (newellNormal), so a reflex corner of a non-convex panel (an L-shape, a
+ * notched square) is 270° rather than the unsigned 90° between its edges; the
+ * value does not depend on the orientation of the ring, since reversing it
+ * flips both the normal and the order of the two edges. A degenerate ring with
+ * no winding normal falls back to the unsigned angle.
+ */
 export function interiorAngleDeg(m: Model, link: Link, pointId: ID): number | null {
   const ring = vertexRing(link, pointId);
   if (!ring || ring.length < 3) return null;
@@ -284,11 +401,14 @@ export function interiorAngleDeg(m: Model, link: Link, pointId: ID): number | nu
   const next = m.points[ring[(i + 1) % ring.length]].pos;
   const u = sub(prev, v);
   const w = sub(next, v);
-  const lu = Math.hypot(u[0], u[1], u[2]);
-  const lw = Math.hypot(w[0], w[1], w[2]);
+  const lu = len(u);
+  const lw = len(w);
   if (lu < 1e-12 || lw < 1e-12) return null;
-  const c = Math.max(-1, Math.min(1, dot(u, w) / (lu * lw)));
-  return (Math.acos(c) * 180) / Math.PI;
+  const n = newellNormal(ring.map((id) => m.points[id].pos));
+  if (len(n) < 1e-18) return (Math.acos(Math.max(-1, Math.min(1, dot(u, w) / (lu * lw)))) * 180) / Math.PI;
+  let a = (Math.atan2(dot(cross(w, u), normalize(n)), dot(u, w)) * 180) / Math.PI;
+  if (a < 0) a += 360;
+  return a;
 }
 
 /** The ordered vertex ring a point belongs to: the polygon itself, or the bottom / top face of a prism. */
@@ -323,8 +443,8 @@ export function closesWithout2d(m: Model, joint: Joint, linkIds: ID[]): boolean 
   if (removed.length === 0) return false;
   const cj = clone.joints[joint.id];
   const free = new Set(cj ? creaseReleasePoints(clone, cj) : []);
-  const tol = feasibilityTolerance(clone);
-  if (isAccepted(solveSketchWithRelease(clone, free), tol)) return true;
+  const limit = adaptationLimit(clone, cj ? [cj] : []);
+  if (isReleaseAccepted(clone, solveSketchWithRelease(clone, free), limit)) return true;
   const init: Positions = positionsFromModel(clone);
   const h = 0.05 * modelSize(clone);
   for (const { link, normal } of removed) {
@@ -334,17 +454,27 @@ export function closesWithout2d(m: Model, joint: Joint, linkIds: ID[]): boolean 
       if (p) init.set(id, [p[0] + normal[0] * h, p[1] + normal[1] * h, p[2] + normal[2] * h]);
     }
   }
-  return isAccepted(solveSketchWithRelease(clone, free, { init }), tol);
+  return isReleaseAccepted(clone, solveSketchWithRelease(clone, free, { init }), limit);
 }
 
 /** Lengths of an edge/axis–edge/axis revolute whose edges differ by more than the merge tolerance, else null. */
 export function unequalEdgeLengths(m: Model, joint: Joint): { la: number; lb: number } | null {
-  if (joint.type !== 'revolute' || isConstructionRef(joint.b)) return null;
-  const axisLike = (f: Feature) => f.kind === 'edge' || f.kind === 'axis';
-  if (!axisLike(joint.a) || !axisLike(joint.b)) return null;
-  const la = dist(m.points[joint.a.pointIds[0]].pos, m.points[joint.a.pointIds[1]].pos);
-  const lb = dist(m.points[joint.b.pointIds[0]].pos, m.points[joint.b.pointIds[1]].pos);
+  const lengths = creaseEdgeLengths(m, joint);
+  if (!lengths) return null;
+  const { la, lb } = lengths;
   return Math.abs(la - lb) > EDGE_LENGTH_TOLERANCE * Math.max(la, lb) ? { la, lb } : null;
+}
+
+/**
+ * Lengths of a merged crease whose edges differ (within the merge tolerance,
+ * beyond CREASE_EXACT_TOLERANCE) while neither panel may adapt its rest
+ * geometry (both ground or locked, creaseReleasePoints is empty): the merged
+ * end points force one edge to the other's length, so such a crease can only
+ * be satisfied by changing a design that may not change. Null otherwise.
+ */
+export function unabsorbedCreaseLengths(m: Model, joint: Joint): { la: number; lb: number } | null {
+  const mismatch = mergedCreaseMismatch(m, joint);
+  return mismatch && creaseReleasePoints(m, joint).length === 0 ? mismatch : null;
 }
 
 // ---------------------------------------------------------------------------

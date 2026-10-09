@@ -266,6 +266,25 @@ describe('prefoldVertex', () => {
       expect(r.creaseId).toBe(cid);
       expect(creaseMountainValley(m, m.joints[cid], loopNormal(m, loop))).toBe(pref);
     }
+    // a preference on a collinear crease is honoured too: it is never driven first, so the sign of the crease that
+    // is driven is chosen so that the collinear crease ends up with the requested class
+    for (const collinear of loop.collinearPairs.flat()) {
+      for (const pref of ['M', 'V'] as const) {
+        const m = fresh();
+        const r = prefoldVertex(m, { preferCreaseId: collinear, mountainValley: { [collinear]: pref } });
+        expect(r.ok).toBe(true);
+        expect(loop.collinearPairs.flat()).not.toContain(r.creaseId);
+        expect(creaseMountainValley(m, m.joints[collinear], loopNormal(m, loop))).toBe(pref);
+      }
+    }
+    // several preferences at once (the bent pair share a class): met when consistent, refused when contradictory
+    const bent = loop.creaseIds.filter((id) => !loop.collinearPairs.flat().includes(id));
+    const okBoth = prefoldVertex(fresh(), { mountainValley: { [bent[0]]: 'M', [bent[1]]: 'M' } });
+    expect(okBoth.ok).toBe(true);
+    const contradictory = fresh();
+    const before = serializeModel(contradictory);
+    expect(prefoldVertex(contradictory, { mountainValley: { [bent[0]]: 'M', [bent[1]]: 'V' } })).toEqual({ ok: false, reason: 'noBranch' });
+    expect(serializeModel(contradictory)).toBe(before);
   });
 
   it('releases a fold driver that already sits on a crease of the loop instead of holding the vertex flat', () => {

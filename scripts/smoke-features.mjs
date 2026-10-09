@@ -246,6 +246,71 @@ const ok18 = joined18.every((s) => s === 'Joint created') && pre18.creases === 3
 console.log('four regular triangles: 3 creases, 4th refused', JSON.stringify({ joined: joined18, creasesBefore: pre18.creases, refused: refused18.slice(0, 90), modelUnchanged: pre18.json === post18.json, undo: [pre18.undo, post18.undo], chip: post18.chip }), ok18 ? 'OK' : 'FAIL');
 await page.screenshot({ path: `${OUT}/10-four-triangles-refused.png` });
 
+// 18b. The same workflow with the triangles placed by mouse clicks instead of typed coordinates: the clicked
+//      circumcircle point is never exactly on the circle, so the shared edges differ by screen-pixel noise and the
+//      first three joints are merged creases whose panels adapt by that noise; the fourth must still be refused with
+//      the sector-angle message (a released solve must not collapse the fourth triangle to close the loop), the model
+//      byte-identical, and the whole diagnosis readable: as the status bar's tooltip and in the Mechanism panel.
+await freshTopView([[-4, -4, 0], [4, 4, 0]]);
+await page.click('button[title^="Polygon —"]');
+await page.fill('.tool-options input[type="number"]', '3');
+await page.press('.tool-options input[type="number"]', 'Tab');
+for (let k = 0; k < 4; k++) {
+  await clickWorld(plus(centroid18(k), offset18(k)));
+  await clickWorld(plus(P18(k + 1), offset18(k)));
+}
+await page.click('button[title^="Ground —"]');
+await clickWorld(centroid18(0));
+await waitStatus(/Ground/);
+await page.click('button[title^="Joint —"]');
+const joined18b = [];
+for (let k = 0; k < 3; k++) {
+  await clickWorld(await edgeMid(k, O18, P18(k + 1)));
+  await waitStatus(/Now pick/);
+  await clickWorld(await edgeMid(k + 1, plus(O18, offset18(k + 1)), plus(P18(k + 1), offset18(k + 1))));
+  joined18b.push((await waitStatus(/Joint created|Nothing was moved|different link/)).slice(0, 30));
+}
+const pre18b = await workflowState();
+const angles18b = await page.evaluate(() => { const { app } = window.linkageDesigner; const m = app.model; return Object.values(m.links).map((l) => l.pointIds.map((id, i) => { const v = m.points[id].pos, a = m.points[l.pointIds[(i + 2) % 3]].pos, b = m.points[l.pointIds[(i + 1) % 3]].pos; const u = [a[0] - v[0], a[1] - v[1]], w = [b[0] - v[0], b[1] - v[1]]; return (Math.acos((u[0] * w[0] + u[1] * w[1]) / Math.hypot(...u) / Math.hypot(...w)) * 180) / Math.PI; })); });
+await clickWorld(await edgeMid(3, O18, P18(4)));
+await waitStatus(/Now pick/);
+await clickWorld(await edgeMid(0, O18, P18(0)));
+const refused18b = await waitStatus(/Joint created|Nothing was moved|different link/);
+await page.waitForTimeout(300);
+const post18b = await workflowState();
+const readable18b = await page.evaluate(() => ({ title: document.querySelector('.status-text')?.title ?? '', notice: document.querySelector('.mode-panel .notice .hint')?.textContent ?? '', status: window.linkageDesigner.app.status }));
+const intact18b = angles18b.every((tri) => tri.every((a) => Math.abs(a - 60) < 0.5));
+const ok18b = joined18b.every((s) => s === 'Joint created') && pre18b.creases === 3 && intact18b && /add up to 240\.0°, not 360°/.test(refused18b) && /Nothing was moved/.test(refused18b) && pre18b.json === post18b.json && pre18b.undo === post18b.undo && post18b.creases === 3 && !/violated/i.test(post18b.chip) && readable18b.title === readable18b.status && readable18b.notice === readable18b.status;
+console.log('four regular triangles placed by mouse: 3 creases, 4th refused, diagnosis readable', JSON.stringify({ joined: joined18b, creasesBefore: pre18b.creases, trianglesIntact: intact18b, refused: refused18b.slice(0, 90), modelUnchanged: pre18b.json === post18b.json, undo: [pre18b.undo, post18b.undo], chip: post18b.chip, tooltip: readable18b.title === readable18b.status, notice: readable18b.notice === readable18b.status }), ok18b ? 'OK' : 'FAIL');
+// dismissing the notice removes it from the Mechanism panel
+await page.click('.mode-panel .notice button');
+await page.waitForTimeout(200);
+const dismissed18b = await page.evaluate(() => !document.querySelector('.mode-panel .notice'));
+console.log('notice dismissed', JSON.stringify({ dismissed: dismissed18b }), dismissed18b ? 'OK' : 'FAIL');
+
+// 18c. A refused Properties edit leaves no stale widget behind: on the four-bar example the crank's Length is typed
+//      as 100 (impossible in the closed loop), which is refused; the input must then show the model's length again,
+//      and a following feasible edit (1.2) must reach the model (previously the panel kept the refused value and its
+//      widgets wrote into the discarded model).
+await page.evaluate(() => { const { app } = window.linkageDesigner; app.loadExample('fourBar'); });
+await page.waitForTimeout(600);
+const crank18c = () => page.evaluate(() => { const { app } = window.linkageDesigner; const l = Object.values(app.model.links).find((x) => x.name === 'Crank'); const r = l.rigidity.find((c) => c.kind === 'dist' && !c.fixed); return { id: l.id, length: r.length, undo: app.undoStack.length, status: app.status }; });
+const before18c = await crank18c();
+await page.evaluate((id) => window.linkageDesigner.app.select({ type: 'link', id }), before18c.id);
+await page.waitForTimeout(300);
+const lengthInput = '.props-panel label.prop-row:has-text("Length") input';
+await page.fill(lengthInput, '100');
+await page.press(lengthInput, 'Enter');
+await page.waitForTimeout(500);
+const refused18c = await crank18c();
+const shown18c = await page.inputValue(lengthInput);
+await page.fill(lengthInput, '1.2');
+await page.press(lengthInput, 'Enter');
+await page.waitForTimeout(500);
+const applied18c = await crank18c();
+const ok18c = refused18c.length === before18c.length && refused18c.undo === before18c.undo && /not applied/.test(refused18c.status) && Math.abs(Number(shown18c) - before18c.length) < 1e-3 && Math.abs(applied18c.length - 1.2) < 1e-9 && applied18c.undo === before18c.undo + 1;
+console.log('refused Length edit: input shows the model value, next edit applies', JSON.stringify({ lengthBefore: +before18c.length.toFixed(4), afterRefusal: +refused18c.length.toFixed(4), shown: shown18c, status: refused18c.status.slice(0, 60), afterEdit: +applied18c.length.toFixed(4), undo: [before18c.undo, refused18c.undo, applied18c.undo] }), ok18c ? 'OK' : 'FAIL');
+
 // 19. A developable vertex (sectors 60°, 60°, 120°, 120°) sketched flat with the Sketch tool, snapping the shared
 //     vertices so the shared edges become creases; Ground → DOF 0 with the locked-creases and flat-vertex hints and the
 //     Fold button; Fold → DOF 1, 2-D constraints gone, dihedrals (170°, 160°, 170°, 160°) with a 3:1 mountain/valley

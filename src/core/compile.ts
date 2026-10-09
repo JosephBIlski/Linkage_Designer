@@ -281,7 +281,10 @@ export function compile(m: Model, opts: CompileOptions): CompiledSystem {
             if (sameGroup(r.a, r.b)) break;
             const pa = R(k, r.a);
             const pb = R(k, r.b);
-            if (isConst(pa) && isConst(pb)) break;
+            // A distance between two constant points (both pinned, merged with the ground, or of a locked link
+            // joined to the ground) has no variable columns, but its residual is still emitted: a rest length that
+            // disagrees with the two frozen positions is a violation the DOF chip, Solidify and Save must see, not a
+            // row to be silently dropped (docs/CONSTRUCTION_PLAN.md, item 0c).
             if (r.fixed) {
               constraints.push(distance(pa, pb, r.length, 1, true, tag));
               break;

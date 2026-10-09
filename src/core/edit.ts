@@ -4,7 +4,7 @@
  * the Edit and Sketch tools).
  */
 import { add, cross, dist, dot, len, normalize, perpendicular, scale, sub } from './geometry';
-import { feasibilityTolerance, isAccepted, restore } from './feasibility';
+import { adaptationLimit, isReleaseAccepted, restore } from './feasibility';
 import { applyPositions, commitSketch, modelSize, solveSketch, solveSketchWithRelease } from './kinematics';
 import {
   addJoint,
@@ -234,10 +234,11 @@ export function autoJoinCoincident(m: Model, link: Link, vertexIds: ID[], opts: 
     }
   }
   if (created.length) {
-    // creases between edges that coincide only within the snap tolerance: the edited link's edge adapts
+    // creases between edges that coincide only within the snap tolerance: the edited link's edge adapts, by no more
+    // than the snap-sized adaptation limit (a released solve that reshapes the link closes no legitimate loop)
     const free = new Set(created.flatMap((j) => creaseReleasePoints(m, j, link.id)));
     const res = solveSketchWithRelease(m, free, { maxIter: 60 });
-    if (!isAccepted(res, feasibilityTolerance(m))) {
+    if (!isReleaseAccepted(m, res, adaptationLimit(m, created))) {
       restore(m, snapshot);
       return [];
     }

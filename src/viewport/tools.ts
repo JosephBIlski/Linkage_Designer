@@ -737,7 +737,8 @@ export class ToolManager {
     const r = tryAddJoint(m, type, this.featureA, f, { axis: sketchNormal(m), pitch: app.toolOptions.pitch });
     if (!r.ok || !r.joint) {
       app.abortChange();
-      app.setStatus(jointRefusedMessage(r.diagnosis ?? { kind: 'infeasible', residual: r.residual }));
+      // kept in the Mechanism panel as well: the diagnosis is long and the status bar is replaced on the next hover
+      app.report(jointRefusedMessage(r.diagnosis ?? { kind: 'infeasible', residual: r.residual }));
     } else {
       app.select({ type: 'joint', id: r.joint.id });
       // a crease that closes a flat loop of panels leaves the vertex in its singular flat state: point at Fold
@@ -773,13 +774,18 @@ export class ToolManager {
     if (!pick) return;
     app.beginChange();
     let note = '';
+    let active = -1; // index of the driver to activate (default: the last one)
+    let message = STATUS.driverSet;
     if (pick.type === 'joint') {
       const j = m.joints[pick.id];
       if (j?.type === 'revolute') {
         // a fold driver on a flat vertex would sweep the degenerate straight-hinge branch: driveCrease pre-folds
-        // first, in the same change (one undo entry), and leaves exactly one driver on the picked crease
+        // first, in the same change (one undo entry), and leaves exactly one driver on the picked crease; a crease
+        // that already has one keeps it (no second driver, which would freeze the vertex) and it becomes active
         const r = driveCrease(m, j.id);
         if (r.prefold) note = r.prefold.ok ? STATUS.prefolded : STATUS.flatVertexWarning;
+        if (r.reused) message = STATUS.driverReused;
+        if (r.driver) active = m.drivers.indexOf(r.driver);
       } else if (j && (j.type === 'prismatic' || j.type === 'cylindrical' || j.type === 'screw')) addSlideDriver(m, j.id);
     } else if (pick.linkId) {
       const cands = candidateAngleDrivers(m).filter((c) => c.linkId === pick.linkId);
@@ -788,9 +794,9 @@ export class ToolManager {
       else app.setStatus(TOOLS.driver.hint);
     }
     syncDriverValues(m);
-    app.sim.activeDriver = Math.max(0, m.drivers.length - 1);
-    app.endChange();
-    app.setStatus(note ? `${STATUS.driverSet} · ${note}` : STATUS.driverSet);
+    app.sim.activeDriver = active >= 0 ? active : Math.max(0, m.drivers.length - 1);
+    app.endChange(); // records an undo entry only when the model changed (not for a reused driver on a folded vertex)
+    app.setStatus(note ? `${message} · ${note}` : message);
   }
 
   private deleteTool(ev: ViewportPointerEvent): void {

@@ -13,6 +13,8 @@ import {
 } from '../src/core/model';
 import { commitSketch, computeMobility, currentViolation, solveSketch, solveSketchWithRelease } from '../src/core/kinematics';
 import { autoJoinCoincident } from '../src/core/edit';
+import { tryAddJoint } from '../src/core/feasibility';
+import { creaseDihedralDeg } from '../src/core/fold';
 import { add, dist } from '../src/core/geometry';
 import type { Feature, ID, Link, Model, Vec3 } from '../src/core/types';
 
@@ -89,6 +91,8 @@ describe('edge–edge revolute (crease) matching', () => {
 
   it('c) a 1e-5 relative mismatch with reversed order is merged and B rubber-bands instead of flipping', () => {
     const { m, A, B, edgeA, edgeB, before } = twoTriangles({ ratio: 1 + 1e-5, reversed: true });
+    const rest0 = B.rigidity.map((r) => (r.kind === 'dist' ? { a: r.a, b: r.b, length: r.length } : null));
+    const restBefore = (a: ID, b: ID): number => rest0.find((r) => r && ((r.a === a && r.b === b) || (r.a === b && r.b === a)))!.length;
     const j = addJoint(m, 'revolute', edgeA, edgeB)!;
     expect(j.pairs?.length).toBe(2);
     const free = new Set(creaseReleasePoints(m, j));
@@ -98,10 +102,43 @@ describe('edge–edge revolute (crease) matching', () => {
     commitSketch(m, res, free);
     expect(currentViolation(m)).toBeLessThan(1e-9);
     expect(maxMove(m, before, A)).toBeLessThan(1e-12);
-    expect(maxMove(m, before, B)).toBeLessThan(1e-4); // previously every vertex of B moved by ≈ 2 (flipped across the axis)
-    expect(dist(m.points[B.pointIds[2]].pos, before.get(B.pointIds[2])!)).toBeLessThan(1e-4);
-    // B's rest geometry took A's edge length
+    // the merged pairs force B's edge to A's length, so B's released end point moves by exactly Δ = |la − lb| and
+    // its apex by less (previously every vertex of B moved by ≈ 2: flipped across the axis)
+    const delta = L * 1e-5;
+    expect(maxMove(m, before, B)).toBeLessThanOrEqual(delta + 1e-9);
+    expect(maxMove(m, before, B)).toBeGreaterThan(delta / 2);
+    expect(dist(m.points[B.pointIds[2]].pos, before.get(B.pointIds[2])!)).toBeLessThan(delta);
+    // B's rest geometry took A's edge length and no other rest distance changed by more than Δ
     expect(restLength(B, B.pointIds[0], B.pointIds[1])).toBeCloseTo(L, 9);
+    for (const r of B.rigidity) {
+      if (r.kind !== 'dist') continue;
+      expect(Math.abs(r.length - restBefore(r.a, r.b))).toBeLessThanOrEqual(delta * (1 + 1e-6));
+    }
+    expect(computeMobility(m).dof).toBe(1);
+  });
+
+  it('a 1e-5 jitter on every vertex (hand-placed panels) merges, B adapts by about the jitter and keeps its shape', () => {
+    let seed = 7;
+    const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296 - 0.5);
+    const jit = (p: Vec3, e: number): Vec3 => [p[0] + e * rnd(), p[1] + e * rnd(), 0];
+    const m = createModel();
+    const A = addPolygonFromPoints(m, [jit([0, 0, 0], 1e-5), jit([L, 0, 0], 1e-5), jit([L / 2, H, 0], 1e-5)], { name: 'A' });
+    const B = addPolygonFromPoints(m, [jit([0, 0, 0], 1e-5), jit([L, 0, 0], 1e-5), jit([L / 2, -H, 0], 1e-5)], { name: 'B' });
+    setGround(m, A.id);
+    const before = snapshot(m);
+    const rest0 = B.rigidity.map((r) => (r.kind === 'dist' ? r.length : 0));
+    const j = addJoint(m, 'revolute', edge(A), edge(B))!;
+    expect(j.pairs?.length).toBe(2);
+    const free = new Set(creaseReleasePoints(m, j));
+    expect(free.size).toBe(2);
+    const res = solveSketchWithRelease(m, free);
+    expect(res.converged).toBe(true);
+    expect(res.drift).toBeLessThan(3e-5);
+    commitSketch(m, res, free);
+    expect(currentViolation(m)).toBeLessThan(1e-9);
+    expect(maxMove(m, before, A)).toBeLessThan(1e-12);
+    expect(maxMove(m, before, B)).toBeLessThan(3e-5);
+    B.rigidity.forEach((r, i) => r.kind === 'dist' && expect(Math.abs(r.length - rest0[i])).toBeLessThan(3e-5));
     expect(computeMobility(m).dof).toBe(1);
   });
 
@@ -230,6 +267,34 @@ describe('edge–edge revolute (crease) matching', () => {
       commitSketch(m, res);
       expect(currentViolation(m)).toBeLessThan(1e-9);
       expect(computeMobility(m).dof).toBe(type === 'cylindrical' ? 2 : 1);
+    }
+  });
+});
+
+describe('a panel drawn elsewhere is placed beside its neighbour, not on top of it', () => {
+  it('two Polygon-tool triangles drawn 4.5 units apart: the crease is created with the panels side by side (dihedral 180°), in 2-D and in 3-D', () => {
+    for (const planar of [true, false]) {
+      const m = createModel();
+      const s = Math.sqrt(3);
+      const P = (k: number): Vec3 => [s * Math.cos((Math.PI / 3) * k), s * Math.sin((Math.PI / 3) * k), 0];
+      const mk = (k: number, off: Vec3, name: string): Link => {
+        const c: Vec3 = [(P(k)[0] + P(k + 1)[0]) / 3 + off[0], (P(k)[1] + P(k + 1)[1]) / 3 + off[1], 0];
+        return addPolygon(m, c, [0, 0, 1], 1, 3, { startAngle: Math.atan2(off[1] - c[1], off[0] - c[0]), onPlaneId: planar ? 'plane_top' : null, name });
+      };
+      const T1 = mk(0, [0, 0, 0], 'T1');
+      const off: Vec3 = [4.5, 1.8, 0];
+      const T2 = mk(1, off, 'T2');
+      setGround(m, T1.id);
+      const nearest = (link: Link, p: Vec3): ID => link.pointIds.reduce((b, id) => (dist(m.points[id].pos, p) < dist(m.points[b].pos, p) ? id : b), link.pointIds[0]);
+      const r = tryAddJoint(m, 'revolute', { linkId: T1.id, kind: 'edge', pointIds: [nearest(T1, [0, 0, 0]), nearest(T1, P(1))] }, { linkId: T2.id, kind: 'edge', pointIds: [nearest(T2, off), nearest(T2, add(P(1), off))] });
+      expect(r.ok).toBe(true);
+      expect(r.joint?.pairs?.length).toBe(2);
+      expect(Math.abs(creaseDihedralDeg(m, r.joint!)!)).toBeCloseTo(180, 6);
+      expect(currentViolation(m)).toBeLessThan(1e-9);
+      // T2 occupies the sector beside T1 (60°–120°), with its far corner at P(2), not T1's corners
+      const far = T2.pointIds.map((id) => m.points[id].pos).find((p) => dist(p, [0, 0, 0]) > 1 && dist(p, P(1)) > 1)!;
+      expect(dist(far, P(2))).toBeLessThan(1e-6);
+      expect(computeMobility(m).dof).toBe(planar ? 0 : 1);
     }
   });
 });

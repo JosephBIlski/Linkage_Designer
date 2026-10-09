@@ -143,6 +143,40 @@ export function solveSketch(m: Model, opts: SketchOptions = {}): ForwardResult {
   return { positions: sys.extract(res.x, 0), converged: res.converged, residual: res.hardResidual, iterations: res.iterations, sys };
 }
 
+/** Result of solveSketchWithRelease: the released solve together with the rigid step it started from and its drift. */
+export interface ReleaseResult extends ForwardResult {
+  /** The rigid projection (no released points); the result itself when nothing was released. */
+  rigid: ForwardResult;
+  /** releaseDrift of the result: the largest change of a rest distance of the adapting links (0 when nothing was released). */
+  drift: number;
+}
+
+/**
+ * How much the links owning `freePointIds` changed shape in a released pose:
+ * the largest |dist(positions) − rest length| over every distance constraint of
+ * those links (length units). A legitimate rubber-band after a crease merged two
+ * edges of slightly different length moves one rest distance by about the
+ * length difference; a released solve that instead reshapes the panel (a loop
+ * that does not close with rigid panels) shows up here as a drift of the order
+ * of the panel size, although its residual is zero because every distance of
+ * the panel was released. Callers compare it with a snap-sized limit
+ * (feasibility.ts adaptationLimit) before committing.
+ */
+export function releaseDrift(m: Model, freePointIds: Set<ID>, positions: Positions): number {
+  const links = new Set<ID>();
+  for (const pid of freePointIds) if (m.points[pid]) links.add(m.points[pid].linkId);
+  let drift = 0;
+  for (const lid of links) {
+    for (const r of m.links[lid]?.rigidity ?? []) {
+      if (r.kind !== 'dist') continue;
+      const a = positions.get(r.a) ?? m.points[r.a]?.pos;
+      const b = positions.get(r.b) ?? m.points[r.b]?.pos;
+      if (a && b) drift = Math.max(drift, Math.abs(dist(a, b) - r.length));
+    }
+  }
+  return drift;
+}
+
 /**
  * Sketch solve for a change that one link's rest shape must absorb: a rigid
  * projection first, so every link is carried to its joint partners as a whole,
@@ -156,12 +190,17 @@ export function solveSketch(m: Model, opts: SketchOptions = {}): ForwardResult {
  * place, because releasing both end points of a triangle releases all of its
  * distances. With no release points this is a plain solveSketch. An `init`
  * warm start applies to the rigid step (the released step always starts from
- * the rigid result).
+ * the rigid result). The rigid step and the drift of the released pose are
+ * returned with the result: a released solve can "converge" by reshaping the
+ * adapting panel (every distance of a triangle is released when both end
+ * points of one edge are), so acceptance has to look at the drift as well, and
+ * the diagnosis of a refused joint belongs to the rigid step.
  */
-export function solveSketchWithRelease(m: Model, freePointIds: Set<ID>, opts: Omit<SketchOptions, 'freePointIds'> = {}): ForwardResult {
-  if (freePointIds.size === 0) return solveSketch(m, opts);
+export function solveSketchWithRelease(m: Model, freePointIds: Set<ID>, opts: Omit<SketchOptions, 'freePointIds'> = {}): ReleaseResult {
   const rigid = solveSketch(m, opts);
-  return solveSketch(m, { ...opts, freePointIds, init: rigid.positions });
+  if (freePointIds.size === 0) return { ...rigid, rigid, drift: 0 };
+  const released = solveSketch(m, { ...opts, freePointIds, init: rigid.positions });
+  return { ...released, rigid, drift: releaseDrift(m, freePointIds, released.positions) };
 }
 
 /**

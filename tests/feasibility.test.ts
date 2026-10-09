@@ -13,20 +13,24 @@ import {
 } from '../src/core/model';
 import {
   SECTOR_SUM_TOLERANCE_DEG,
+  adaptationLimit,
   closesWithout2d,
   diagnoseJoint,
   feasibilityTolerance,
   interiorAngleDeg,
   isAccepted,
+  isReleaseAccepted,
   linkPath,
   sectorSumAt,
   tryAddJoint,
   tryChangeJointType,
   trySolveCommit,
+  unabsorbedCreaseLengths,
   unequalEdgeLengths,
 } from '../src/core/feasibility';
+import { CREASE_ADAPTATION_TOLERANCE, creaseReleasePoints } from '../src/core/model';
 import { autoJoinCoincident } from '../src/core/edit';
-import { computeMobility, currentViolation, modelSize, solveSketch } from '../src/core/kinematics';
+import { computeMobility, currentViolation, modelSize, releaseDrift, solveSketch, solveSketchWithRelease } from '../src/core/kinematics';
 import { dist } from '../src/core/geometry';
 import type { Feature, ID, Link, Model, Vec3 } from '../src/core/types';
 
@@ -44,30 +48,75 @@ const SIDE = Math.sqrt(3); // side of a regular triangle with circumradius 1
 const O: Vec3 = [0, 0, 0];
 const corner = (k: number): Vec3 => [SIDE * Math.cos((Math.PI / 3) * k), SIDE * Math.sin((Math.PI / 3) * k), 0];
 
+/** Deterministic pseudo-random offsets in [−0.5, 0.5) (a linear congruential generator) for hand-placed geometry. */
+function lcg(seed = 1): () => number {
+  let s = seed;
+  return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296 - 0.5);
+}
+
+/** Point offset by ±jitter/2 per in-plane coordinate (0 leaves it alone). */
+const jitterer = (jitter: number | undefined, r: () => number) => (p: Vec3): Vec3 => (jitter ? [p[0] + jitter * r(), p[1] + jitter * r(), p[2]] : p);
+
 /**
- * Four regular triangles as the Polygon tool draws them in 2-D mode (circumradius 1, flat in XY, body planar joint to
- * TOP), consecutive triangles sharing the edge O–corner(k+1); T1 is ground.
+ * Four regular triangles around the origin, consecutive ones sharing the edge O–corner(k+1); T1 is ground. By
+ * default as the Polygon tool draws them in 2-D mode (addPolygon, circumradius 1, flat in XY, body planar joint to
+ * TOP), whose shared edges agree to floating-point precision. `radii` gives each triangle its own circumradius (the
+ * mouse-placed Polygon tool: the clicked circumcircle point is never exactly on the circle); `jitter` builds them
+ * from points offset by ±jitter/2 per coordinate (typed or snapped vertices that agree to a snap distance only).
  */
-function fourRegularTriangles(opts: { planar?: boolean } = {}): { m: Model; tris: Link[] } {
+function fourRegularTriangles(opts: { planar?: boolean; jitter?: number; radii?: number[] } = {}): { m: Model; tris: Link[] } {
   const m = createModel();
   const tris: Link[] = [];
+  const onPlaneId = opts.planar === false ? null : 'plane_top';
+  const jit = jitterer(opts.jitter, lcg());
   for (let k = 0; k < 4; k++) {
+    if (opts.jitter) {
+      tris.push(addPolygonFromPoints(m, [jit(O), jit(corner(k)), jit(corner(k + 1))], { onPlaneId, name: `T${k + 1}` }));
+      continue;
+    }
     const c: Vec3 = [(corner(k)[0] + corner(k + 1)[0]) / 3, (corner(k)[1] + corner(k + 1)[1]) / 3, 0];
-    tris.push(addPolygon(m, c, [0, 0, 1], 1, 3, { startAngle: Math.atan2(O[1] - c[1], O[0] - c[0]), onPlaneId: opts.planar === false ? null : 'plane_top', name: `T${k + 1}` }));
+    tris.push(addPolygon(m, c, [0, 0, 1], opts.radii?.[k] ?? 1, 3, { startAngle: Math.atan2(O[1] - c[1], O[0] - c[0]), onPlaneId, name: `T${k + 1}` }));
   }
   setGround(m, tris[0].id);
   return { m, tris };
 }
 
-/** Four developable triangles O–p_i–p_{i+1} with sectors 60°, 60°, 120°, 120° on a circle of radius 2, flat, 2-D. */
-function fourDevelopableTriangles(): { m: Model; tris: Link[]; p: (i: number) => Vec3 } {
+/** Four developable triangles O–p_i–p_{i+1} with sectors 60°, 60°, 120°, 120° on a circle of radius 2, flat, 2-D (`jitter` as above). */
+function fourDevelopableTriangles(opts: { jitter?: number } = {}): { m: Model; tris: Link[]; p: (i: number) => Vec3 } {
   const m = createModel();
   const ang = [0, 60, 120, 240, 360].map((d) => (d * Math.PI) / 180);
   const p = (i: number): Vec3 => [2 * Math.cos(ang[i]), 2 * Math.sin(ang[i]), 0];
-  const tris = [0, 1, 2, 3].map((i) => addPolygonFromPoints(m, [O, p(i), p(i + 1)], { onPlaneId: 'plane_top', name: `D${i + 1}` }));
+  const jit = jitterer(opts.jitter, lcg());
+  const tris = [0, 1, 2, 3].map((i) => addPolygonFromPoints(m, [jit(O), jit(p(i)), jit(p(i + 1))], { onPlaneId: 'plane_top', name: `D${i + 1}` }));
   setGround(m, tris[0].id);
   return { m, tris, p };
 }
+
+/** Three unit squares in a row on TOP (S0 ground), which can only close into a triangular tube out of the plane (`jitter` as above). */
+function threeSquares(opts: { jitter?: number } = {}): { m: Model; sq: Link[] } {
+  const m = createModel();
+  const jit = jitterer(opts.jitter, lcg());
+  const sq: Link[] = [];
+  for (let i = 0; i < 3; i++) sq.push(addPolygonFromPoints(m, [jit([i, 0, 0]), jit([i + 1, 0, 0]), jit([i + 1, 1, 0]), jit([i, 1, 0])], { onPlaneId: 'plane_top', name: `S${i}` }));
+  setGround(m, sq[0].id);
+  return { m, sq };
+}
+
+/** Largest change of an interior angle (degrees) and of a rest distance of `tris` since `before` was taken. */
+function shapeChange(m: Model, tris: Link[], before: { angles: number[][]; rest: number[][] }): { angle: number; rest: number } {
+  let angle = 0;
+  let rest = 0;
+  tris.forEach((t, k) => {
+    const link = m.links[t.id];
+    link.pointIds.forEach((id, i) => (angle = Math.max(angle, Math.abs(interiorAngleDeg(m, link, id)! - before.angles[k][i]))));
+    link.rigidity.filter((c) => c.kind === 'dist').forEach((c, i) => (rest = Math.max(rest, Math.abs((c.kind === 'dist' ? c.length : 0) - before.rest[k][i]))));
+  });
+  return { angle, rest };
+}
+const shapeOf = (m: Model, tris: Link[]): { angles: number[][]; rest: number[][] } => ({
+  angles: tris.map((t) => t.pointIds.map((id) => interiorAngleDeg(m, m.links[t.id], id)!)),
+  rest: tris.map((t) => m.links[t.id].rigidity.filter((c) => c.kind === 'dist').map((c) => (c.kind === 'dist' ? c.length : 0))),
+});
 
 /** Planar four-bar on TOP with revolute pins; returns the coupler so a test can change its length. */
 function fourBar(): { m: Model; coupler: Link } {
@@ -147,6 +196,106 @@ describe('tryAddJoint: four regular triangles (the reported workflow)', () => {
     expect(r.ok).toBe(false);
     expect(r.diagnosis).toMatchObject({ kind: 'sectorSum', sumDeg: 240, constrained2d: false });
   });
+
+  // Hand-placed geometry: the shared edges agree only to a snap distance, so joints 1–3 are merged creases whose
+  // adapting panel takes its neighbour's edge length (a rubber-band of the order of the jitter), and the fourth joint
+  // must still be refused: a released solve could "close" the 240° loop by reshaping T4 into a line, which the
+  // adaptation limit forbids, and the diagnosis is made from the rigid solve.
+  for (const jitter of [1e-7, 1e-5, 5e-4]) {
+    for (const planar of [true, false]) {
+      it(`hand-placed (jitter ${jitter}, ${planar ? '2-D' : '3-D'}): joints 1–3 merge with a snap-sized adaptation, the fourth is refused with the sector diagnosis and the model restored`, () => {
+        const { m, tris } = fourRegularTriangles({ planar, jitter });
+        const shape0 = shapeOf(m, tris);
+        for (let k = 0; k < 3; k++) {
+          const r = tryAddJoint(m, 'revolute', edgeNear(m, tris[k], O, corner(k + 1)), edgeNear(m, tris[k + 1], O, corner(k + 1)));
+          expect(r.ok).toBe(true);
+          expect(r.joint?.pairs?.length).toBe(2);
+        }
+        const change = shapeChange(m, tris, shape0);
+        expect(change.angle).toBeLessThan(0.05);
+        expect(change.rest).toBeLessThanOrEqual(2 * jitter + 1e-12);
+        expect(currentViolation(m)).toBeLessThan(1e-8);
+        const snapshot = serializeModel(m);
+        const r = tryAddJoint(m, 'revolute', edgeNear(m, tris[3], O, corner(4)), edgeNear(m, tris[0], O, corner(0)));
+        expect(r.ok).toBe(false);
+        expect(r.diagnosis).toMatchObject({ kind: 'sectorSum', sumDeg: 240, constrained2d: planar });
+        expect(r.residual).toBeGreaterThan(0.1); // the rigid solve's gap, not the collapsed panel's zero
+        expect(serializeModel(m)).toBe(snapshot);
+        expect(shapeChange(m, tris, shape0).angle).toBeLessThan(0.05); // T4 was not collapsed into a line (180°, 0°, 0°)
+      });
+    }
+  }
+
+  it('mouse-placed Polygon-tool triangles (circumradii off by 1e-7 … 4e-4) are refused like the exact ones, with T4 intact', () => {
+    for (const radii of [[1.000000047, 0.99999967, 0.99999951, 0.99999979], [1, 1.0003, 0.9997, 1.0004]]) {
+      const { m, tris } = fourRegularTriangles({ radii });
+      const shape0 = shapeOf(m, tris);
+      for (let k = 0; k < 3; k++) expect(tryAddJoint(m, 'revolute', edgeNear(m, tris[k], O, corner(k + 1)), edgeNear(m, tris[k + 1], O, corner(k + 1))).ok).toBe(true);
+      const snapshot = serializeModel(m);
+      const r = tryAddJoint(m, 'revolute', edgeNear(m, tris[3], O, corner(4)), edgeNear(m, tris[0], O, corner(0)));
+      expect(r.ok).toBe(false);
+      expect(r.diagnosis).toMatchObject({ kind: 'sectorSum', sumDeg: 240, vertexName: 'T4 V0', constrained2d: true });
+      expect(serializeModel(m)).toBe(snapshot);
+      expect(shapeChange(m, tris, shape0).angle).toBeLessThan(0.05); // T4 kept its 60° corners
+      expect(computeMobility(m).dof).toBe(0);
+    }
+  });
+});
+
+describe('crease adaptation limit', () => {
+  it('bounds the adapting link\'s shape change by twice the merge tolerance of the longer edge, plus the solve tolerance', () => {
+    const m = createModel();
+    const A = addPolygonFromPoints(m, [[0, 0, 0], [2, 0, 0], [1, 1.5, 0]], { name: 'A' });
+    setGround(m, A.id);
+    const B = addPolygonFromPoints(m, [[0, 0, 0], [2.0005, 0, 0], [1.00025, -1.5, 0]], { name: 'B' });
+    const j = addJoint(m, 'revolute', edgeNear(m, A, [0, 0, 0], [2, 0, 0]), edgeNear(m, B, [0, 0, 0], [2.0005, 0, 0]))!;
+    expect(j.pairs?.length).toBe(2);
+    const limit = adaptationLimit(m, [j]);
+    expect(limit).toBeCloseTo(CREASE_ADAPTATION_TOLERANCE * 2.0005 + feasibilityTolerance(m), 12);
+    expect(CREASE_ADAPTATION_TOLERANCE).toBe(2e-3);
+    const free = new Set(creaseReleasePoints(m, j));
+    const res = solveSketchWithRelease(m, free);
+    expect(res.rigid.converged).toBe(false); // B's edge rest length disagrees with the merged end points by 5e-4
+    expect(res.drift).toBeCloseTo(0.0005, 6); // B's edge takes A's length, nothing else changes
+    expect(releaseDrift(m, free, res.positions)).toBe(res.drift);
+    expect(releaseDrift(m, new Set(), res.positions)).toBe(0);
+    expect(isReleaseAccepted(m, res, limit)).toBe(true);
+    expect(isReleaseAccepted(m, { ...res, drift: limit * 1.01 }, limit)).toBe(false);
+    expect(isReleaseAccepted(m, { ...res, converged: false, residual: 1 }, limit)).toBe(false);
+    // without released points the result is the rigid solve itself
+    const plain = solveSketchWithRelease(m, new Set());
+    expect(plain.drift).toBe(0);
+    expect(plain.rigid.residual).toBe(plain.residual);
+  });
+});
+
+describe('tryAddJoint: hand-placed loops that do close', () => {
+  it('developable triangles drawn with a 1e-5 jitter: all four joints accepted, every panel keeps its shape to within the jitter', () => {
+    const { m, tris, p } = fourDevelopableTriangles({ jitter: 1e-5 });
+    const shape0 = shapeOf(m, tris);
+    for (let i = 0; i < 4; i++) {
+      const r = tryAddJoint(m, 'revolute', edgeNear(m, tris[i], O, p(i + 1)), edgeNear(m, tris[(i + 1) % 4], O, p(i + 1)));
+      expect(r.ok).toBe(true);
+      expect(r.joint?.pairs?.length).toBe(2);
+    }
+    const change = shapeChange(m, tris, shape0);
+    expect(change.angle).toBeLessThan(0.05);
+    expect(change.rest).toBeLessThan(1e-4);
+    expect(currentViolation(m)).toBeLessThan(1e-8);
+    expect(computeMobility(m).dof).toBe(0);
+  });
+
+  for (const jitter of [1e-5, 1e-4, 5e-4]) {
+    it(`three squares drawn with a ${jitter} jitter still report needs3d for the closing edge (the tube closes with rigid panels once the 2-D constraint is gone)`, () => {
+      const { m, sq } = threeSquares({ jitter });
+      for (let i = 0; i < 2; i++) expect(tryAddJoint(m, 'revolute', edgeNear(m, sq[i], [i + 1, 0, 0], [i + 1, 1, 0]), edgeNear(m, sq[i + 1], [i + 1, 0, 0], [i + 1, 1, 0])).ok).toBe(true);
+      const snapshot = serializeModel(m);
+      const r = tryAddJoint(m, 'revolute', edgeNear(m, sq[2], [3, 0, 0], [3, 1, 0]), edgeNear(m, sq[0], [0, 0, 0], [0, 1, 0]));
+      expect(r.ok).toBe(false);
+      expect(r.diagnosis?.kind).toBe('needs3d');
+      expect(serializeModel(m)).toBe(snapshot);
+    });
+  }
 });
 
 describe('tryAddJoint: four developable triangles (60°, 60°, 120°, 120°)', () => {
@@ -198,10 +347,7 @@ describe('tryAddJoint: other diagnoses', () => {
   });
 
   it('needs3d: three squares in a row can only close into a tube out of the sketch plane', () => {
-    const m = createModel();
-    const sq: Link[] = [];
-    for (let i = 0; i < 3; i++) sq.push(addPolygonFromPoints(m, [[i, 0, 0], [i + 1, 0, 0], [i + 1, 1, 0], [i, 1, 0]], { onPlaneId: 'plane_top', name: `S${i}` }));
-    setGround(m, sq[0].id);
+    const { m, sq } = threeSquares();
     for (let i = 0; i < 2; i++) expect(tryAddJoint(m, 'revolute', edgeNear(m, sq[i], [i + 1, 0, 0], [i + 1, 1, 0]), edgeNear(m, sq[i + 1], [i + 1, 0, 0], [i + 1, 1, 0])).ok).toBe(true);
     const snapshot = serializeModel(m);
     const r = tryAddJoint(m, 'revolute', edgeNear(m, sq[2], [3, 0, 0], [3, 1, 0]), edgeNear(m, sq[0], [0, 0, 0], [0, 1, 0]));
@@ -227,6 +373,54 @@ describe('tryAddJoint: other diagnoses', () => {
       expect(r.diagnosis.la).toBeCloseTo(2, 9);
       expect(r.diagnosis.lb).toBeCloseTo(2.2, 9);
     }
+    expect(serializeModel(m)).toBe(snapshot);
+  });
+
+  it('edgeLengths: a merged crease whose small mismatch neither panel may absorb (ground + locked) is refused instead of hiding the conflict', () => {
+    for (const groundA of [true, false]) {
+      const m = createModel();
+      const A = addPolygonFromPoints(m, [[0, 0, 0], [2, 0, 0], [1, 1.5, 0]], { name: 'A' });
+      const B = addPolygonFromPoints(m, [[0, 0, 0], [2.0005, 0, 0], [1.00025, -1.5, 0]], { name: 'B' });
+      // ground A + locked B, or locked A + ground B: the 2.5e-4 relative mismatch merges, but no link may adapt
+      setGround(m, groundA ? A.id : B.id);
+      (groundA ? B : A).locked = true;
+      const snapshot = serializeModel(m);
+      const r = tryAddJoint(m, 'revolute', edgeNear(m, A, [0, 0, 0], [2, 0, 0]), edgeNear(m, B, [0, 0, 0], [2.0005, 0, 0]));
+      expect(r.ok).toBe(false);
+      expect(r.diagnosis).toMatchObject({ kind: 'edgeLengths' });
+      if (r.diagnosis?.kind === 'edgeLengths') {
+        expect(r.diagnosis.la).toBeCloseTo(2, 9);
+        expect(r.diagnosis.lb).toBeCloseTo(2.0005, 9);
+      }
+      expect(r.residual).toBeCloseTo(5e-4, 6); // the rest length of the locked edge against the merged (frozen) end points
+      expect(serializeModel(m)).toBe(snapshot);
+      const j = addJoint(m, 'revolute', edgeNear(m, A, [0, 0, 0], [2, 0, 0]), edgeNear(m, B, [0, 0, 0], [2.0005, 0, 0]))!;
+      expect(creaseReleasePoints(m, j)).toEqual([]);
+      expect(unabsorbedCreaseLengths(m, j)).toEqual({ la: 2, lb: 2.0005 });
+      expect(unequalEdgeLengths(m, j)).toBeNull(); // within the merge tolerance: it is the locking that forbids it
+    }
+    // control: with B free to adapt the same crease is accepted and B's edge takes A's length
+    const m = createModel();
+    const A = addPolygonFromPoints(m, [[0, 0, 0], [2, 0, 0], [1, 1.5, 0]], { name: 'A' });
+    const B = addPolygonFromPoints(m, [[0, 0, 0], [2.0005, 0, 0], [1.00025, -1.5, 0]], { name: 'B' });
+    setGround(m, A.id);
+    expect(tryAddJoint(m, 'revolute', edgeNear(m, A, [0, 0, 0], [2, 0, 0]), edgeNear(m, B, [0, 0, 0], [2.0005, 0, 0])).ok).toBe(true);
+    expect(currentViolation(m)).toBeLessThan(1e-9);
+    setGround(m, null);
+    expect(currentViolation(m)).toBeLessThan(1e-9); // no hidden inconsistency once the ground is released
+  });
+
+  it('infeasible: a triangle pinned corner by corner to a ground triangle with a different edge length is refused (a distance between two frozen points counts)', () => {
+    const m = createModel();
+    const t1 = addPolygonFromPoints(m, [[0, 0, 0], [2, 0, 0], [1, -1.5, 0]]);
+    setGround(m, t1.id);
+    const t2 = addPolygonFromPoints(m, [[0, 0, 0], [2.2, 0, 0], [1.1, 1.5, 0]]);
+    expect(tryAddJoint(m, 'revolute', vertex(t2, 0), vertex(t1, 0), { axis: [0, 0, 1] }).ok).toBe(true);
+    const snapshot = serializeModel(m);
+    const r = tryAddJoint(m, 'revolute', vertex(t2, 1), vertex(t1, 1), { axis: [0, 0, 1] });
+    expect(r.ok).toBe(false);
+    expect(r.diagnosis).toMatchObject({ kind: 'infeasible' });
+    if (r.diagnosis?.kind === 'infeasible') expect(r.diagnosis.residual).toBeCloseTo(0.2, 6);
     expect(serializeModel(m)).toBe(snapshot);
   });
 
@@ -271,12 +465,84 @@ describe('sector sums', () => {
     expect(interiorAngleDeg(m, bar, bar.pointIds[0])).toBeNull();
   });
 
+  it('measures reflex corners of non-convex panels as interior angles (270°), independently of the winding', () => {
+    const m = createModel();
+    const notched = addPolygonFromPoints(m, [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0.5, 0.5, 0], [0, 1, 0]]);
+    expect(interiorAngleDeg(m, notched, notched.pointIds[3])).toBeCloseTo(270, 9);
+    expect(notched.pointIds.reduce((sum, id) => sum + interiorAngleDeg(m, notched, id)!, 0)).toBeCloseTo(540, 9); // (n − 2)·180°
+    const reversed = addPolygonFromPoints(m, [[0, 1, 0], [0.5, 0.5, 0], [1, 1, 0], [1, 0, 0], [0, 0, 0]]);
+    expect(interiorAngleDeg(m, reversed, reversed.pointIds[1])).toBeCloseTo(270, 9);
+    const arrow = addPolygonFromPoints(m, [[0, 0, 0], [2, -2, 0], [0, 3, 0], [-2, -2, 0]]);
+    expect(interiorAngleDeg(m, arrow, arrow.pointIds[0])).toBeCloseTo(270, 9);
+    const L = addPolygonFromPoints(m, [[0, 0, 0], [0, 1, 0], [-1, 1, 0], [-1, -1, 0], [1, -1, 0], [1, 0, 0]]);
+    expect(interiorAngleDeg(m, L, L.pointIds[0])).toBeCloseTo(270, 9);
+    expect(L.pointIds.reduce((sum, id) => sum + interiorAngleDeg(m, L, id)!, 0)).toBeCloseTo(720, 9);
+  });
+
+  it('an L-shaped panel (270° at the vertex) with two 45° triangles is developable: sector sum 360°, the closing crease is accepted', () => {
+    const m = createModel();
+    const L = addPolygonFromPoints(m, [O, [0, 1, 0], [-1, 1, 0], [-1, -1, 0], [1, -1, 0], [1, 0, 0]], { onPlaneId: 'plane_top', name: 'L' });
+    setGround(m, L.id);
+    const T1 = addPolygonFromPoints(m, [O, [1, 0, 0], [1, 1, 0]], { onPlaneId: 'plane_top' });
+    const T2 = addPolygonFromPoints(m, [O, [1, 1, 0], [0, 1, 0]], { onPlaneId: 'plane_top' });
+    expect(tryAddJoint(m, 'revolute', edgeNear(m, L, O, [1, 0, 0]), edgeNear(m, T1, O, [1, 0, 0])).ok).toBe(true);
+    expect(tryAddJoint(m, 'revolute', edgeNear(m, T1, O, [1, 1, 0]), edgeNear(m, T2, O, [1, 1, 0])).ok).toBe(true);
+    const probe = serializeModel(m);
+    const j = addJoint(m, 'revolute', edgeNear(m, T2, O, [0, 1, 0]), edgeNear(m, L, O, [0, 1, 0]))!;
+    expect(sectorSumAt(m, j)?.sumDeg).toBe(360);
+    expect(diagnoseJoint(m, j, 0.1, linkPath(m, T2.id, L.id, j.id)).kind).not.toBe('sectorSum');
+    const fresh = createModel();
+    Object.assign(fresh, JSON.parse(probe));
+    const r = tryAddJoint(fresh, 'revolute', edgeNear(fresh, fresh.links[T2.id], O, [0, 1, 0]), edgeNear(fresh, fresh.links[L.id], O, [0, 1, 0]));
+    expect(r.ok).toBe(true);
+    expect(currentViolation(fresh)).toBeLessThan(1e-9);
+  });
+
   it(`uses a ${SECTOR_SUM_TOLERANCE_DEG}° tolerance on the 360° sum`, () => {
     const { m, tris, p } = fourDevelopableTriangles();
     for (let i = 0; i < 3; i++) expect(tryAddJoint(m, 'revolute', edgeNear(m, tris[i], O, p(i + 1)), edgeNear(m, tris[i + 1], O, p(i + 1))).ok).toBe(true);
     const j = addJoint(m, 'revolute', edgeNear(m, tris[3], O, p(4)), edgeNear(m, tris[0], O, p(0)))!;
     expect(sectorSumAt(m, j)?.sumDeg).toBe(360);
     expect(diagnoseJoint(m, j, 0.1, linkPath(m, tris[3].id, tris[0].id, j.id)).kind).not.toBe('sectorSum');
+  });
+});
+
+describe('diagnosis precedence (plan 0b: edge lengths first, then the sector sum, then the 2-D closure)', () => {
+  it('an unequal closing edge on a developable vertex drawn in 2-D reports the edge lengths, not needs3d', () => {
+    const m = createModel();
+    const pp = (deg: number, rad = 2): Vec3 => [rad * Math.cos((deg * Math.PI) / 180), rad * Math.sin((deg * Math.PI) / 180), 0];
+    const D1 = addPolygonFromPoints(m, [O, pp(0), pp(60)], { onPlaneId: 'plane_top' });
+    const D2 = addPolygonFromPoints(m, [O, pp(60), pp(120)], { onPlaneId: 'plane_top' });
+    const D3 = addPolygonFromPoints(m, [O, pp(120), pp(240)], { onPlaneId: 'plane_top' });
+    const q = pp(359.7, 2.04); // D4's closing edge is 2 % longer than D1's and 0.3° off: sectors still sum to 360° within tolerance
+    const D4 = addPolygonFromPoints(m, [O, pp(240), q], { onPlaneId: 'plane_top' });
+    setGround(m, D1.id);
+    expect(tryAddJoint(m, 'revolute', edgeNear(m, D1, O, pp(60)), edgeNear(m, D2, O, pp(60))).ok).toBe(true);
+    expect(tryAddJoint(m, 'revolute', edgeNear(m, D2, O, pp(120)), edgeNear(m, D3, O, pp(120))).ok).toBe(true);
+    expect(tryAddJoint(m, 'revolute', edgeNear(m, D3, O, pp(240)), edgeNear(m, D4, O, pp(240))).ok).toBe(true);
+    const snapshot = serializeModel(m);
+    const r = tryAddJoint(m, 'revolute', edgeNear(m, D4, O, q), edgeNear(m, D1, O, pp(0)));
+    expect(r.ok).toBe(false);
+    expect(r.diagnosis?.kind).toBe('edgeLengths');
+    if (r.diagnosis?.kind === 'edgeLengths') {
+      expect(r.diagnosis.la).toBeCloseTo(2.04, 9);
+      expect(r.diagnosis.lb).toBeCloseTo(2, 9);
+    }
+    expect(serializeModel(m)).toBe(snapshot);
+  });
+
+  it('a 240° loop closed with a 5 % longer edge reports the edge lengths before the sector sum', () => {
+    const { m, tris } = fourRegularTriangles({ radii: [1, 1, 1, 1.05] });
+    for (let k = 0; k < 3; k++) expect(tryAddJoint(m, 'revolute', edgeNear(m, tris[k], O, corner(k + 1)), edgeNear(m, tris[k + 1], O, corner(k + 1))).ok).toBe(true);
+    const snapshot = serializeModel(m);
+    const r = tryAddJoint(m, 'revolute', edgeNear(m, tris[3], O, corner(4)), edgeNear(m, tris[0], O, corner(0)));
+    expect(r.ok).toBe(false);
+    expect(r.diagnosis?.kind).toBe('edgeLengths');
+    expect(serializeModel(m)).toBe(snapshot);
+    // with equal edges the same loop reports the sector sum (the committed four-regular-triangle case)
+    const exact = fourRegularTriangles();
+    for (let k = 0; k < 3; k++) expect(tryAddJoint(exact.m, 'revolute', edgeNear(exact.m, exact.tris[k], O, corner(k + 1)), edgeNear(exact.m, exact.tris[k + 1], O, corner(k + 1))).ok).toBe(true);
+    expect(tryAddJoint(exact.m, 'revolute', edgeNear(exact.m, exact.tris[3], O, corner(4)), edgeNear(exact.m, exact.tris[0], O, corner(0))).diagnosis?.kind).toBe('sectorSum');
   });
 });
 

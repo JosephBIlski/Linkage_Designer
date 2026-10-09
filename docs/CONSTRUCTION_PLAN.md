@@ -1,13 +1,16 @@
 # Mechanism construction workflow: diagnosis and plan (v0.3)
 
-Status: Phase 0 and Phase 1 in progress. Phases 2 and 3 are planned.
+Status: Phase 0 and Phase 1 are implemented (v0.3). Phases 2 and 3 remain
+planned.
 
 This document records why a user could not build a degree-4 origami vertex
 from four triangles with the Joint tool, what the evidence showed, which
 options were weighed, and the phased plan that was chosen. It is the
-specification for the v0.3 changes; `docs/SPEC.md` describes the behaviour of
-each feature once implemented and `docs/DESIGN_DECISIONS.md` §8 keeps the
-lessons learned.
+specification for the v0.3 changes; `docs/SPEC.md` §17 describes the
+behaviour of each feature as implemented and `docs/DESIGN_DECISIONS.md` §8
+keeps the lessons learned. The *Implemented* note under each phase in §5
+records where the implementation differs from the plan; §2 (evidence) and §4
+(options) are left as they were written.
 
 ## 1. The report
 
@@ -119,10 +122,30 @@ inverse design and compliant hinges keep working unchanged.
   end points, and *measure* `offsets.slide` from the current pose exactly as
   the construction-axis branch does, instead of assuming zero.
 - Acceptance: two triangles sharing an edge with a 1e-5 relative mismatch and
-  reversed edge order are a no-op (residual 0, no vertex moves more than
-  1e-6). Two triangles whose shared edges differ by 5 % keep the paired apex
-  within 1e-6 of its position after the solve. Exactly equal edges still merge
-  into two pairs. Existing Miura and edit tests pass.
+  reversed edge order merge with residual 0; the ground triangle does not
+  move, the adapting triangle's released end point moves by exactly
+  Δ = |la − lb| (2e-5 for a 2-unit edge), its apex by less, and no rest
+  distance of the adapting triangle changes by more than Δ (the merged pairs
+  force the Δ displacement, so the "1e-6" bound first written here is
+  unattainable). Two triangles whose shared edges differ by 5 % keep the
+  paired apex within 1e-6 of its position after the solve. Exactly equal
+  edges still merge into two pairs. Existing Miura and edit tests pass.
+- *Implemented as planned, with these additions.* The mismatch is absorbed
+  by one link only (`creaseReleasePoints`: the second-picked link unless it
+  is ground or locked, else the first; the Sketch / Edit tools name the link
+  being drawn or edited) through a two-step solve, rigid first and then
+  released from the rigid pose (`solveSketchWithRelease`), because a single
+  released solve leaves a displaced triangle's apex behind. The adaptation
+  is accepted only while no rest distance of the adapting link changes by
+  more than 2 × the merge tolerance of the longer edge
+  (`CREASE_ADAPTATION_TOLERANCE`); beyond that the joint is refused (0b), so
+  hand- or mouse-placed four regular triangles are refused instead of
+  collapsing the fourth triangle into a line. A merged crease that neither
+  panel may absorb (both ground or locked) is refused as an edge-length
+  conflict. A panel that the merge would fold flat onto its neighbour
+  (dihedral ≈ 0°) is placed beside it (dihedral 180°) instead. For unequal
+  lengths the stored feature b lists its end points in the order matching a.
+  Tests: `tests/joints.test.ts`.
 
 **0b. Joint-tool pre-flight, rollback and diagnostics.**
 - A shared helper (core) performs "add joint, solve, verify": if the sketch
@@ -145,6 +168,26 @@ inverse design and compliant hinges keep working unchanged.
 - Acceptance: the four-regular-triangle scenario ends with the first three
   joints created and the fourth refused with the sector-angle message; no
   link moves on the refused attempt; undo history has no entry for it.
+- *Implemented as planned.* The diagnosis order is 1–4 as listed (a merged
+  crease whose small mismatch neither panel may absorb also reports 1); the
+  helper is `tryAddJoint` / `tryChangeJointType` / `trySolveCommit` in
+  `src/core/feasibility.ts`, and it also covers the typed vertex Position,
+  the Select-tool drag release, the 2-D checkbox (0d) and the automatic joins
+  of the Sketch and Edit tools (a refused re-solve leaves the polygon
+  unjoined). Interior angles are signed about the ring's winding normal (a
+  reflex corner counts 270°); the 3-D probe runs from the flat pose and again
+  from a pose nudged 5 % of the model size out of the plane, since a flat
+  start is a bifurcation; the refused joint's residual is the rigid solve's
+  gap. An incompatible type change leaves the joint as it was (previously it
+  was deleted) and the pop-up cycle stops at a refused type. Messages end
+  with "Nothing was moved.", show numbers with four significant digits, and
+  are kept as a dismissable notice in the Mechanism panel (the status bar's
+  tooltip carries the whole text). Two solver fixes were needed on the way:
+  the Levenberg–Marquardt damping is floored at 1e-3 of the largest diagonal
+  entry of JᵀJ (crease merges of nearly axis-aligned hand-placed edges
+  stalled), and a system with no free variables is converged only when its
+  residual is small. Tests: `tests/feasibility.test.ts`,
+  `tests/solver.test.ts`.
 
 **0c. Rest-geometry baking guard.**
 - `solidifyAssumptions`, `saveToJson` and any other `refreshRigidity` caller
@@ -152,6 +195,17 @@ inverse design and compliant hinges keep working unchanged.
   tolerance, and the UI reports that assumptions were not solidified.
 - Acceptance: saving a violated model preserves the rest lengths; a test
   covers `commitSketch`/solidify behaviour on a violated pose.
+- *Implemented as planned.* A pose is consistent when `currentViolation` is
+  at most max(1e-6, 1e-7 × model size) (`consistencyTolerance`); the DOF
+  chip's "Constraints violated" flag uses the same tolerance (previously a
+  fixed 1e-5), so it warns exactly when Solidify, Save and Extrude refuse.
+  Save still writes the file when the pose is inconsistent (previous rest
+  geometry plus the violated positions) and says so; Solidify reports
+  success as well as refusal; Extrude is refused on an inconsistent pose;
+  `commitSketch` refreshes released rest geometry only from an accepted
+  solve and returns whether it did; a rest distance between two frozen
+  points is no longer dropped at compile time, so it counts as a violation.
+  Tests: `tests/baking.test.ts`.
 
 **0d. Expose the sketch-plane constraint.**
 - Link Properties gain a checkbox "Keep on sketch plane (2-D)" that adds or
@@ -161,6 +215,15 @@ inverse design and compliant hinges keep working unchanged.
 - The DOF chip or Mechanism panel shows a hint when the mechanism has
   revolute creases whose axes lie in a sketch plane that all their links are
   constrained to ("creases locked by the 2-D constraint").
+- *Implemented as planned.* `setBodyPlane` adds, replaces or removes the
+  body planar joint (bars and polygons only, against the active sketch
+  plane; a link is on one plane at a time; drawing in 2-D and ticking the box
+  give byte-identical models). The hint reads "n creases cannot fold: both
+  panels are kept on the sketch plane. Untick 'Keep on sketch plane' in
+  Properties" and adds ", or use Fold" only while a flat crease loop exists;
+  it appears in the Mechanism panel and as the DOF chip's tooltip. The
+  link-end pop-up's constraint tooltip names the plane. Tests:
+  `tests/model.test.ts`.
 
 ### Phase 1: folding (medium)
 
@@ -186,6 +249,23 @@ inverse design and compliant hinges keep working unchanged.
   up to a global sign, DOF 1, and a fold-driver sweep moves all four panels.
   An "X" vertex (90°, 90°, 90°, 90°) reports failure with the reason that no
   generic branch was found. The Miura example is unaffected.
+- *Implemented with these differences.* The Fold button lives in the
+  Mechanism panel only (shown in every mode whenever a flat loop exists); a
+  crease's Properties offer "Fold to target" and "Drive this crease" (1b)
+  instead of a second Fold button. The DOF test compares against the flat
+  state *after* the planar joints were removed (2 for a degree-4 vertex; with
+  them the flat vertex has DOF 0 and nothing could be lower). Drivers acting
+  on the loop are released during the search and re-measured afterwards; a
+  locked non-ground panel is a further failure reason ("locked"); the Driver
+  tool replaces the driver the pre-fold kept with one on the picked crease,
+  never leaves two fold drivers on a crease, and moves the single driver that
+  Fold left on another crease of the same vertex. Loop selection: the given
+  loop → the loop containing the preferred crease → the first flat loop →
+  "notFlat" when loops exist but none is flat → "noLoop". Mountain / valley
+  preferences (passed by "Drive this crease" and "Fold to target"; the Fold
+  button passes none) are verified on every named crease of the loop, so a
+  preference on a collinear crease (never driven first) selects the sign of
+  the crease that is driven. Tests: `tests/fold.test.ts`.
 
 **1b. Creases as first-class presentation.**
 - `Joint.fold?: { target?: number; mv?: 'M' | 'V' }` stores the target fold
@@ -198,6 +278,23 @@ inverse design and compliant hinges keep working unchanged.
   target fold angle, "Fold to target" (uses the Fold core), "Drive this
   crease" (adds a fold driver and makes it active).
 - Model tree: creases are labelled "Crease" with the current fold angle.
+- *Implemented with these differences.* The mountain / valley class is
+  referenced to the first panel's face normal from its vertex winding
+  (`creaseNormal`), not to the stored edge direction, so neighbouring creases
+  of one sheet are judged from the same side; a degree-4 vertex on its
+  generic branch then shows Maekawa's 3 : 1 split with the crease between the
+  two equal small sectors as the odd one (the bent pair share a class, the
+  collinear pair differ). "Fold to target" is `foldCreaseToTarget`: pre-fold
+  of a flat loop preferring the crease and class asked for, unfolding through
+  flat when the mirrored side of a folded vertex is requested, and
+  continuation in steps of at most 120° (an antipodal target routed through
+  flat) so that an open-fan hinge can be flipped M ↔ V; targets of 0° and
+  180° skip the class check; a further failure reason "unreachable" was
+  added. The target field is written without an undo entry (the fold is the
+  undoable change). The tree and the Properties show the construction pose
+  (the Properties readout shows the fold-angle magnitude with the class);
+  only the viewport colours the rendered (preview) pose. Tests:
+  `tests/crease.test.ts`.
 
 ### Phase 2: construction workflow (medium, planned)
 
@@ -227,30 +324,44 @@ inverse design and compliant hinges keep working unchanged.
 | `Joint.offsets.slide` measured for unequal edges | 0a | Existing files load unchanged; new joints store the measured value. |
 | `Joint.fold?: { target?, mv? }` | 1b | Optional field; absent in old files. |
 | Settings colours `mountain`, `valley` | 1b | Defaults applied when missing. |
+| `Joint.b` of an unequal-length hinge stored with its end points in the order matching `Joint.a` | 0a | Order only, no new field; existing files load unchanged. |
 
 No change to `Model.version` is needed: all additions are optional.
 
 ## 7. Test plan
 
-- Unit (vitest): edge matching cases (0a); feasibility helper rollback and
-  each diagnosis (0b); baking guard (0c); body-plane toggle (0d); Fold on the
-  developable and X vertices, DOF before/after, sweep motion (1a); crease
-  detection and M/V sign (1b).
-- Headless browser (`scripts/smoke-features.mjs`): the user's workflow with
-  four regular triangles ends with a refused fourth joint and the
-  sector-angle message; four developable triangles joined, then Fold, then a
-  fold driver animates all panels.
+- Unit (vitest): `tests/joints.test.ts` (0a: edge matching, release points,
+  cylinder axes, side-by-side placement, hand-placed panels),
+  `tests/feasibility.test.ts` (0b: acceptance, every diagnosis and its
+  precedence, exact / mouse- / hand-placed regular triangles, rollback, type
+  change, the automatic joins), `tests/baking.test.ts` (0c),
+  `tests/model.test.ts` (0d: `setBodyPlane`, `creasesLockedByPlane`),
+  `tests/fold.test.ts` (1a: loops, pre-fold of the developable and X
+  vertices, DOF before / after, sweep motion, preferences),
+  `tests/crease.test.ts` (1b: M/V convention, persistence, Fold to target,
+  Drive this crease, labels and colours), `tests/solver.test.ts` (damping
+  floor). 165 tests in all.
+- Headless browser (`scripts/smoke-features.mjs`, steps 18–19): four regular
+  triangles placed exactly and by mouse end with a refused fourth joint, the
+  sector-angle message, an unchanged model and no undo entry; a refused
+  Length edit leaves no stale widget; a developable vertex sketched flat
+  shows the hints and the Fold button, Fold gives DOF 1 and the 3 : 1
+  pattern, the crease is pickable with its Properties, and Preview moves
+  every panel.
 - Regression: all existing tests, `npm run build`, both smoke scripts.
 
-## 8. Open decisions
+## 8. Decisions taken (formerly open)
 
-- Default pre-fold angle 160° and tolerance 1° are starting values; expose
-  them in Settings only if users ask.
-- Whether the Fold command keeps the temporary driver as the model's driver
-  when none exists (current plan: yes, if the model has no driver, so the
-  vertex is immediately previewable).
-- Mountain/valley colours: red mountain, blue valley follows Lang and the
-  Origami Simulator convention; configurable.
+- The default pre-fold angle 160° and the 1° flat / collinear tolerances are
+  constants (`DEFAULT_PREFOLD_DEG`, `FLAT_TOLERANCE_DEG`,
+  `COLLINEAR_TOLERANCE_DEG` in `src/core/fold.ts`), not Settings; expose them
+  only if users ask.
+- The Fold command keeps the temporary driver when the model has none, so
+  the vertex is previewable at once; the Driver tool moves it to the crease
+  the user picks.
+- Mountain/valley colours: red mountain (`#d9342b`), blue valley (`#2f6fd6`),
+  following Lang and the Origami Simulator convention; configurable in
+  Settings.
 
 ## 9. References
 

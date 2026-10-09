@@ -2,7 +2,9 @@
 
 This document records *why* the prototype is built the way it is. The
 feature-level behaviour is specified in [SPEC.md](SPEC.md); the original brief
-is in [ORIGINAL_SPEC.md](ORIGINAL_SPEC.md).
+is in [ORIGINAL_SPEC.md](ORIGINAL_SPEC.md); the diagnosis and plan behind the
+v0.3 joining / folding work are in
+[CONSTRUCTION_PLAN.md](CONSTRUCTION_PLAN.md).
 
 ## 1. Point-based constraint formulation (the "Crane" idea)
 
@@ -41,14 +43,22 @@ Jacobian. Three properties made it the right choice here:
   four-bar has only 9–15 variables per pose. All linear algebra is dense
   (Cholesky on the normal equations, Householder QR with column pivoting for
   rank and null space). This is simpler than sparse solvers and fast enough
-  for mechanisms with up to a few hundred variables.
+  for mechanisms with up to a few hundred variables. A constraint whose points
+  are all frozen (a rest length between two pinned points) keeps its residual
+  row even though it has no variable columns: it can still be violated, and a
+  system with no free variables counts as converged only when its residual is
+  small (§8, "Never commit a non-converged pose").
 - The projection uses Levenberg–Marquardt (Nocedal & Wright, ch. 10) rather
   than plain Gauss–Newton because the Jacobian is rank deficient *by design*
   (the mechanism has motion freedom); the damping yields the minimum-norm step
-  and tolerates singular poses.
+  and tolerates singular poses. The diagonal damping is floored at 1e-3 of
+  the largest diagonal entry of JᵀJ so that a coordinate the residuals hardly
+  depend on is damped too (§8, "Levenberg–Marquardt damping floor").
 - Residuals are all in length units. Angular constraints (drivers, dihedral
   angles, helper attachments) are multiplied by a characteristic length so one
-  tolerance works for everything.
+  tolerance works for everything. The numeric Jacobian of the dihedral
+  constraint wraps its difference at ±π, so the derivative stays finite when
+  the two samples straddle the discontinuity.
 
 ## 2. Rigid bodies, planarity and joint helper points
 
@@ -70,9 +80,17 @@ Jacobian. Three properties made it the right choice here:
   bar. Because none of these depend on the bar's length, changing the length
   during inverse design never fights the helper attachment and the helper
   geometry never adds spurious design freedom.
-- **Revolute between edges** (origami crease) merges the two edges' end
-  points when the edges have equal length, otherwise uses two
-  point-on-line constraints plus a slide lock (5 equations).
+- **Revolute between edges** (origami crease). The end points of the two
+  edges (or cylinder axes) are paired by proximity in the current pose,
+  straight or crossed, so the drawing or picking order never matters. When
+  the lengths agree within one part in a thousand of the longer edge the two
+  pairs are merged into shared variables (5 equations) — this is a *crease* —
+  and a small residual mismatch is absorbed by one link's rest geometry (the
+  second-picked link unless it is ground or locked; see §8, "Joining edges of
+  unequal length"). When they genuinely differ the second edge is oriented
+  like the first and held on its line by two point-on-line constraints plus a
+  slide lock whose offset is *measured* from the current pose (5 equations),
+  exactly as a revolute against a datum axis; such a hinge is not a crease.
 - **Cylindrical** = two point-on-line constraints (4 eq.), **prismatic** =
   cylindrical + a reference point held in a plane containing the axis (5 eq.),
   **screw** = cylindrical + translation−pitch·rotation/2π coupling (5 eq.),
@@ -171,13 +189,26 @@ damping dynamics.
 - The 2-D workflow is a *sketch plane*: new bars/polygons receive a planar
   "body" constraint to the active construction plane, which the compiler turns
   into frozen coordinates. Removing that constraint (or sketching in 3-D mode)
-  frees the link into space.
+  frees the link into space. Since v0.3 the constraint is exposed as the link
+  property *Keep on sketch plane (2-D)* with a "2-D" badge in the model tree,
+  because an invisible constraint that makes every in-plane crease rigid (a
+  flat origami vertex drawn in 2-D reports DOF 0) was the single most
+  confusing part of the origami workflow (CONSTRUCTION_PLAN.md §2.1); the
+  Mechanism panel names the creases it locks.
+- Refusals are explained, not silently absorbed: a construction edit that
+  cannot be satisfied is rolled back and its reason is shown in the status
+  bar and, because the bar is overwritten by the next hover, kept as a
+  dismissable notice in the Mechanism panel until the next successful change.
+  The vocabulary of the messages is the user's (edge lengths, corner angles,
+  the sketch plane), never the solver's.
 - Editing points, output paths and the design space are coloured exactly as
   specified; every colour has an HWB picker with a HEX field and is persisted
-  in `localStorage`. Defaults live in `src/ui/settings.ts`.
+  in `localStorage`. Defaults live in `src/ui/settings.ts`. Creases follow the
+  origami convention of red mountain / blue valley (Lang 2018; the Origami
+  Simulator of Ghassaei et al.), configurable like every other colour.
 - All strings live in `src/ui/strings.ts`.
 
-## 8. Lessons from testing (v0.2)
+## 8. Lessons from testing (v0.2 and v0.3)
 
 **Degree-4 vertex example (Miura).** The first version used sector angles
 (α, π−α, α, π−α), which makes *both* crease pairs collinear: an "X" vertex,
@@ -226,10 +257,134 @@ vertices are joined automatically, and two consecutive coincident vertices on
 a shared edge become one crease rather than two parallel pins (which would
 lock the panels, DOF 0).
 
+**Joining edges of unequal length (v0.3).** Hand-placed or mouse-placed
+geometry never gives two edges of exactly equal length, so the old "merge if
+equal to one part in a million" rule took the slide-lock path for nearly
+every crease, and because the slide was assumed zero and the orientation was
+never checked, a reversed edge was flipped to the other side of the axis: the
+"glitch" of the report. The fix has three parts. (1) End points are matched
+by proximity for *every* edge pair and merged when the lengths agree within a
+snap-sized tolerance (1e-3 of the longer edge); when they genuinely differ,
+the hinge orients the second edge like the first and measures its slide from
+the current pose, as the datum-axis branch always did. (2) Merging the end
+points of edges whose rest lengths differ by Δ makes the two bodies' rigidity
+contradict each other, and a least-squares solve spreads Δ over every
+non-ground link and never converges. The solver has to be told which body
+yields: the design distances at the adapting edge's end points are released,
+the model is solved rigidly first (so the adapting link is carried onto its
+partner as a whole), then solved again from that pose with the release, and
+the adapting link's rest geometry is refreshed (`solveSketchWithRelease`). A
+single released solve is not enough: releasing both end points of a triangle
+releases all of its distances, and a scratch run left a displaced triangle's
+apex three units from its edge. (3) For the same reason a released solve can
+"converge" by reshaping the adapting panel, so the change of its rest
+distances (`releaseDrift`) is bounded by twice the merge tolerance; beyond
+that the loop is one that rigid panels cannot close, the joint is refused and
+the diagnosis is made from the rigid step. Finally, a crease that pulled a
+panel drawn elsewhere flat onto its neighbour (dihedral ≈ 0°) is re-solved
+from the pose rotated by a half turn about the shared edge, so the panels end
+up side by side where a crease can fold.
+
+**Never commit a non-converged pose (v0.3).** The Joint tool, the joint type
+change, the bar-length editor and the drag release committed whatever the
+sketch solve returned, so an impossible joint produced a least-squares
+compromise spread over the whole mechanism, "Joint created" in the status bar
+and "Constraints violated" in the chip; Save and Solidify then baked that
+compromise into the rest geometry (violation 1.58 → 0 after baking, rest
+lengths changed), destroying the design. The rule is now: every re-solved
+edit is a snapshot → edit → solve → verify sequence (`src/core/feasibility.ts`);
+a result is accepted when the solver converged or its hard residual is within
+1e-7 of the model size, otherwise the model is restored byte for byte, no
+undo entry is recorded and the user gets a diagnosis. Rest geometry is
+refreshed only from an accepted result (`commitSketch`) and only when the
+pose is consistent (`solidifyRestGeometry`), with one tolerance,
+max(1e-6, 1e-7 × model size), shared by Solidify, Save, Extrude and the DOF
+chip: a converged solve legitimately leaves residuals up to 1e-7 (sketch /
+forward) or 1e-6 (inverse design), and a pose the app itself just accepted
+must never be called inconsistent. Two solver details surfaced on the way: a
+distance between two frozen points (both ends pinned) had no variable
+columns and was dropped at compile time, hiding a violation that the Length
+editor can create; and a system with no free variables reported itself
+converged whatever its residual. Both now count.
+
+**Explaining a refused joint (v0.3).** A refusal is only useful with a reason
+in the user's vocabulary. Whether a joint closes a loop is a connectivity
+question (breadth-first search over link–link joints: a joint between already
+connected links closes a loop made of the links on the shortest path); the
+vertex is the merged-point group containing one of the joint's end points
+that touches the most links, and the panels' interior angles there (signed
+about the ring's Newell normal, so a reflex corner counts 270°) are compared
+with 360°. Whether the loop closes once the 2-D constraints are removed is
+probed on a copy — but an exactly flat model is a bifurcation where every
+out-of-plane gradient vanishes, so the probe is run again from a start nudged
+5 % of the model size along the plane normal (the three-square tube is
+diagnosed only with the nudge). The diagnoses are ordered edge lengths →
+sector sum → needs 3-D → generic residual, because the earlier ones name the
+thing the user can change, and the probe is consulted only after a failed
+solve, so a consistent model trivially "closing" without 2-D is harmless.
+
+**Levenberg–Marquardt damping floor (v0.3).** Marquardt's diagonal scaling
+(λ·A_ii) leaves a column whose Jacobian entries are nearly zero almost
+undamped: a coordinate the residuals hardly depend on (the x of a point on an
+almost vertical distance) was moved by a large amount for no gain, the step
+was rejected and the solve stalled, so a jittered square's crease merge never
+converged and the joint was refused as infeasible. The scaling is now floored
+at 1e-3 of the largest diagonal entry (`DAMPING_FLOOR`); in such directions
+the step is the minimum-norm (damped pseudo-inverse) step, which is what a
+projection onto the constraint manifold wants. No existing test changed.
+
+**Flat vertices and the pre-fold (branch selection, v0.3).** The flat state
+of a degree-4 vertex is a bifurcation of the constraint manifold: the
+numerical DOF is 2 there (1 once folded), and a sweep started from it falls
+onto the straight-hinge branch where two creases never move (Huffman 1976;
+Tachi 2009). The Miura example avoids this only because it is created in a
+closed-form folded pose; user-built vertices need an explicit operation,
+which no construction workflow can avoid. The pre-fold prescribes a modest
+dihedral (160°) on one crease and forward-solves the rest of the mechanism
+from the flat pose; the branch is selected by the choice of crease — driving
+a crease that is *not* collinear with another one at the vertex lands on the
+generic branch, driving a collinear one lands on the hinge branch, which the
+acceptance test (no crease of the loop still within 1° of flat, and a DOF
+lower than the flat state's) rejects. The sketch-plane constraints of the
+panels have to go first (they hold the vertex flat), and drivers acting on
+the vertex are released during the search, since holding them at their flat
+values forbids any fold. An "X" vertex (four 90° sectors) has every crease
+collinear with another and folds only as a straight hinge, so the pre-fold
+reports that no branch was found. Prescribing a dihedral is itself a
+continuation problem (Allgower & Georg 1990): the constraint wraps at ±180°
+from its target, so a single solve cannot cross that discontinuity and
+"Fold to target" steps toward its target in increments of at most 120°,
+routes an antipodal target (same fold angle, other class) through the flat
+state, and returns a folded vertex to *exactly* flat — all creases
+prescribed ±180° at once, because prescribing one alone leaves the vertex
+anywhere on the hinge branch — before pre-folding to the mirrored side.
+
+**Mountain / valley sign convention (v0.3).** The signed dihedral follows
+the right-hand rule about the stored direction of the first edge, so it flips
+when the edge happens to be stored the other way round, which the Joint
+tool's end-point pairing can do. A crease's class is therefore referenced to
+the face normal of its first panel given by its vertex winding (Newell
+normal): valley when the second panel bends toward that side, mountain when
+away. For panels drawn counter-clockwise on the sketch plane this is the
+sketch normal, so neighbouring creases of one sheet are judged from the same
+side. With this convention a degree-4 vertex with sectors (α, α, π−α, π−α)
+on its generic branch shows Maekawa's 3 : 1 split (Lang 2018; Demaine &
+O'Rourke 2007) with the crease between the two equal α sectors as the odd
+one: the bent (zigzag) pair share a class and the collinear pair differ — the
+plan's expectation that both pairs share a class cannot hold under any
+consistent convention. The pre-fold's preference check (used by *Drive this
+crease* and *Fold to target*; the Fold button passes no preference) uses an
+orientation-independent test (`creaseMountainValley`, the panels' in-plane
+directions summed against the loop's normal) and verifies every requested
+assignment on the folded pose, so a preference on a collinear crease, which
+is never driven first, is honoured through the sign of the crease that is
+driven; contradictory preferences on the bent pair are refused.
+
 ## 9. Known limitations (prototype)
 
 - Patterning copies one link at a time; joints between copies are not
-  replicated.
+  replicated, and copy / paste / mirror / pattern build the new link's
+  rigidity from the visible geometry without a consistency check.
 - Dense linear algebra: systems beyond ~1000 variables (large origami
   patterns × many poses) will be slow; reduce `poseCount` or lock panels.
 - Design space is first-order (tangent) rather than the true reachable set.
@@ -237,6 +392,21 @@ lock the panels, DOF 0).
 - Prism and cylinder internal geometry is treated as fixed during inverse
   design (only bars and polygons change shape); cylinders are rigid.
 - Branch handling in sweeps is heuristic (displacement guard).
+- The Fold command pre-folds one vertex (one crease loop) per press, and only
+  loops around a single vertex are detected; a vertex where more than one
+  cycle of panels meets is skipped, and the vertices of a multi-vertex sheet
+  are not folded consistently with each other.
+- "Fold to target" follows one continuation path; a crease whose other
+  constraints admit several branches may be reported unreachable although a
+  different path exists.
+- The sector-sum diagnosis counts only polygon / prism panels (bars
+  contribute no angle); the needs-3-D probe removes only the sketch-plane
+  constraints of the links in the loop.
+- The locked-creases hint ignores hinges between edges of different length
+  and creases whose panels are kept on two different planes.
+- Mountain / valley classes of creases whose first panel is a bar or a
+  cylinder use the cross-product normal of the stored edge, so they can flip
+  with the edge direction.
 - No collision detection, no dynamics.
 
 ## References
@@ -246,8 +416,20 @@ lock the panels, DOF 0).
   Origami Products.* ACM Trans. Comput.-Hum. Interact. 30(4), art. 52, 2023.
   https://doi.org/10.1145/3576856
 - T. Tachi. *Simulation of Rigid Origami.* In Origami 4 (4OSME), 2009.
+- D. A. Huffman. *Curvature and Creases: A Primer on Paper.* IEEE Trans.
+  Computers C-25(10), 1976 (degree-4 vertex folding, straight-hinge
+  degeneracy).
 - A. Ghassaei, E. Demaine, N. Gershenfeld. *Fast, Interactive Origami
   Simulation using GPU Computation.* In Origami 7 (7OSME), 2018.
+- R. J. Lang. *Twists, Tilings, and Tessellations: Mathematical Methods for
+  Geometric Origami.* CRC Press, 2018 (Kawasaki and Maekawa conditions,
+  mountain / valley conventions).
+- E. D. Demaine, J. O'Rourke. *Geometric Folding Algorithms: Linkages,
+  Origami, Polyhedra.* Cambridge University Press, 2007 (developability:
+  sector angles sum to 2π; flat-foldability conditions).
+- E. L. Allgower, K. Georg. *Numerical Continuation Methods: An
+  Introduction.* Springer, 1990 (predictor steps, branch switching at
+  bifurcations).
 - M. Bächer, S. Coros, B. Thomaszewski. *LinkEdit: Interactive Linkage
   Editing using Symbolic Kinematics.* ACM Trans. Graph. 34(4), SIGGRAPH 2015.
 - S. Coros, B. Thomaszewski, G. Noris, S. Sueda, M. Forberg, R. Sumner,

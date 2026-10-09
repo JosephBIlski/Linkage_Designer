@@ -93,6 +93,12 @@ export class App {
   ghost: Positions | null = null;
   status = STATUS.ready;
   hint = '';
+  /**
+   * A refusal or failure message (joint pre-flight, fold, refused edit, solidify) kept in the Mechanism panel until
+   * it is dismissed or the next change succeeds: the status bar shows the same text but is replaced by the next
+   * hover description, and long diagnoses do not fit on one line there.
+   */
+  notice = '';
   viewport: Viewport;
   renderer: ModelRenderer;
   sim: SimState = { activeDriver: 0, sweep: null, surface: null, poseValues: [], poses: [], design: null, analysis: null, mobility: null, violation: 0, lockedCreaseIds: [], creaseLoops: [], assembled: true, showDesignSpace: true, showEditPoints: true, showPaths: true, message: '' };
@@ -165,10 +171,13 @@ export class App {
   /** Call after mutating the model. */
   endChange(opts: { skipUndo?: boolean; keepSelection?: boolean } = {}): void {
     if (this.pendingSnapshot !== null) {
-      if (!opts.skipUndo && this.pendingSnapshot !== serializeModel(this.model)) {
-        this.undoStack.push(this.pendingSnapshot);
-        if (this.undoStack.length > 100) this.undoStack.shift();
-        this.redoStack = [];
+      if (this.pendingSnapshot !== serializeModel(this.model)) {
+        this.notice = ''; // a change went through: the previous refusal no longer applies
+        if (!opts.skipUndo) {
+          this.undoStack.push(this.pendingSnapshot);
+          if (this.undoStack.length > 100) this.undoStack.shift();
+          this.redoStack = [];
+        }
       }
       this.pendingSnapshot = null;
     }
@@ -201,6 +210,7 @@ export class App {
     this.redoStack.push(serializeModel(this.model));
     this.model = parseModel(s);
     this.selection = null;
+    this.notice = '';
     this.markDirty();
   }
 
@@ -210,6 +220,7 @@ export class App {
     this.undoStack.push(serializeModel(this.model));
     this.model = parseModel(s);
     this.selection = null;
+    this.notice = '';
     this.markDirty();
   }
 
@@ -274,6 +285,18 @@ export class App {
     this.onStatus?.();
   }
 
+  /** Keep a message in the Mechanism panel (see `notice`); an empty string dismisses it. */
+  setNotice(text: string): void {
+    this.notice = text;
+    this.notify();
+  }
+
+  /** Report a refusal or failure: in the status bar now and in the Mechanism panel until dismissed or the next change. */
+  report(text: string): void {
+    this.setStatus(text);
+    this.setNotice(text);
+  }
+
   setOverlay(o: OverlayView): void {
     this.overlay = o;
     this.requestRender();
@@ -298,6 +321,7 @@ export class App {
     this.redoStack = [];
     this.pendingSnapshot = null;
     this.selection = null;
+    this.notice = '';
     this.sim.sweep = null;
     this.sim.design = null;
     this.sim.analysis = null;
@@ -546,7 +570,8 @@ export class App {
     this.beginChange();
     const ok = solidifyRestGeometry(this.model);
     this.endChange(); // records nothing when the links were left alone
-    this.setStatus(ok ? SIM.solidified : SIM.solidifyRefused(currentViolation(this.model)));
+    if (ok) this.setStatus(SIM.solidified);
+    else this.report(SIM.solidifyRefused(currentViolation(this.model)));
     return ok;
   }
 
@@ -683,7 +708,7 @@ export class App {
    * status bar says so; CSV / OBJ exports never solidify.
    */
   saveToJson(): string {
-    if (!solidifyRestGeometry(this.model)) this.setStatus(SIM.savedUnsolidified(currentViolation(this.model)));
+    if (!solidifyRestGeometry(this.model)) this.report(SIM.savedUnsolidified(currentViolation(this.model)));
     return serializeModel(this.model);
   }
 

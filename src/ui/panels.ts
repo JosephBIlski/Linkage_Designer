@@ -118,6 +118,8 @@ export class UI {
   private lastPanelKey = '';
   private sliderValue: HTMLInputElement | null = null;
   private previewReadout: HTMLElement | null = null;
+  /** The model object the panels were last built from; a replaced model (abortChange, undo, load) forces a rebuild. */
+  private builtFor: import('../core/types').Model | null = null;
 
   constructor(
     private app: App,
@@ -129,7 +131,7 @@ export class UI {
     app.subscribe(() => this.refresh());
     app.onStatus = () => {
       this.statusText.textContent = app.status || app.hint;
-      this.statusText.title = app.hint;
+      this.statusText.title = app.status || app.hint; // the whole message as a tooltip: long diagnoses are clipped in the bar
     };
     tools.onPopup = (pid) => this.showPopup(pid);
     this.refresh();
@@ -265,7 +267,7 @@ export class UI {
     this.undoBtn.disabled = !app.canUndo;
     this.redoBtn.disabled = !app.canRedo;
     this.statusText.textContent = app.status || app.hint;
-    this.statusText.title = app.hint;
+    this.statusText.title = app.status || app.hint;
     const mob = app.sim.mobility;
     if (mob) {
       const extra = mob.grounded ? '' : ` (${SIM.rigidBodyModes}: ${mob.rigidBodyModes})`;
@@ -274,15 +276,19 @@ export class UI {
       this.dofChip.textContent = `${STATUS.dof}: ${mob.dof}${extra}` + (violated ? ` · ${STATUS.violated}` : '');
       this.dofChip.classList.toggle('chip--warn', violated);
       const locked = app.sim.lockedCreaseIds.length;
-      this.dofChip.title = locked ? SIM.creasesLocked(locked) : '';
+      this.dofChip.title = locked ? SIM.creasesLocked(locked, this.foldAvailable()) : '';
     } else {
       this.dofChip.textContent = '';
       this.dofChip.title = '';
     }
-    // avoid rebuilding panels while the user is typing in them
+    // avoid rebuilding panels while the user is typing in them, unless the model object was replaced (a refused
+    // edit's abortChange, undo / redo, a loaded file): the widgets and their closures then belong to a discarded
+    // model and would show the refused values and write edits into it
+    const modelReplaced = this.builtFor !== app.model;
+    this.builtFor = app.model;
     const active = document.activeElement;
     const typing = active && (active.tagName === 'INPUT' || active.tagName === 'SELECT') && (this.props.contains(active) || this.modePanel.contains(active) || this.toolOptions.contains(active) || this.tree.contains(active));
-    if (typing && active !== this.sliderValue) {
+    if (typing && active !== this.sliderValue && !modelReplaced) {
       this.updateLiveReadouts();
       return;
     }
@@ -520,8 +526,14 @@ export class UI {
     if (sim.mobility) {
       summary.appendChild(el('p', 'readout', `${SIM.motionDOF}: ${sim.mobility.dof}${sim.mobility.grounded ? '' : ` — ${SIM.notGrounded}`}`));
     }
-    if (sim.lockedCreaseIds.length) summary.appendChild(el('p', 'hint warn', SIM.creasesLocked(sim.lockedCreaseIds.length)));
+    if (app.notice) {
+      const notice = el('div', 'notice');
+      notice.appendChild(el('p', 'hint warn', app.notice));
+      notice.appendChild(button(PANEL.noticeDismiss, () => app.setNotice(''), { cls: 'btn--small', title: PANEL.noticeDismissHelp }));
+      summary.appendChild(notice);
+    }
     const flatLoops = sim.creaseLoops.filter((l) => l.flat).length;
+    if (sim.lockedCreaseIds.length) summary.appendChild(el('p', 'hint warn', SIM.creasesLocked(sim.lockedCreaseIds.length, flatLoops > 0)));
     if (flatLoops > 0) {
       summary.appendChild(el('p', 'hint warn', SIM.flatVertices(flatLoops)));
       const actions = el('div', 'actions');
@@ -624,16 +636,18 @@ export class UI {
   private foldFlatVertex(): void {
     const app = this.app;
     const m = app.model;
+    const hadDrivers = m.drivers.length > 0;
     app.beginChange();
     const r = prefoldVertex(m);
     if (!r.ok || !r.creaseId) {
       app.abortChange();
-      app.setStatus(STATUS.foldFailed(r.reason ?? 'noBranch'));
+      app.report(STATUS.foldFailed(r.reason ?? 'noBranch'));
       return;
     }
     const crease = m.joints[r.creaseId];
     app.select({ type: 'joint', id: r.creaseId });
-    app.setStatus(STATUS.folded(crease ? this.jointEnds(crease) : '', r.dof ?? 0));
+    const folded = STATUS.folded(crease ? this.jointEnds(crease) : '', r.dof ?? 0);
+    app.setStatus(!hadDrivers && m.drivers.length > 0 ? `${folded} ${STATUS.foldedDriverKept}` : folded);
     app.endChange();
   }
 
@@ -828,17 +842,34 @@ export class UI {
     if (this.clipboardLinkId) this.pasteCopied();
   }
 
-  /** Finish a re-solved Properties edit: record it when the solve was accepted, otherwise restore the pre-edit model and say so. */
+  /** Is the Fold command offered (a flat crease loop exists)? Keeps the locked-creases hint honest about suggesting it. */
+  private foldAvailable(): boolean {
+    return this.app.sim.creaseLoops.some((l) => l.flat);
+  }
+
+  /**
+   * Finish a re-solved Properties edit: record it when the solve was accepted, otherwise restore the pre-edit model
+   * and say so. The refused widget still has focus, so it is blurred first; refresh() then rebuilds the panel from
+   * the restored model (abortChange replaces the model object), so the widget shows the model's value instead of
+   * the refused one and later edits reach the live model.
+   */
   private resolveOrRevert(ok: boolean): void {
     const app = this.app;
     if (ok) {
       app.endChange();
       return;
     }
+    this.blurActive();
     const sel = app.selection;
     app.abortChange();
     app.select(sel);
-    app.setStatus(STATUS.editRefused);
+    app.report(STATUS.editRefused);
+  }
+
+  /** Drop keyboard focus from the widget that triggered a refused edit (see resolveOrRevert). */
+  private blurActive(): void {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && this.root.contains(active)) active.blur();
   }
 
   private pointProps(box: HTMLElement, pointId: ID): void {
@@ -905,9 +936,10 @@ export class UI {
               app.select({ type: 'joint', id: r.joint.id });
               app.endChange();
             } else {
+              this.blurActive(); // the select keeps focus otherwise and refresh() would leave the stale panel
               app.abortChange();
               app.select(sel);
-              app.setStatus(r.diagnosis?.kind === 'incompatible' ? STATUS.jointIncompatible : jointRefusedMessage(r.diagnosis ?? { kind: 'infeasible', residual: r.residual }));
+              app.report(r.diagnosis?.kind === 'incompatible' ? STATUS.jointIncompatible : jointRefusedMessage(r.diagnosis ?? { kind: 'infeasible', residual: r.residual }));
             }
           }),
         ),
@@ -979,7 +1011,7 @@ export class UI {
       if (!r.ok) {
         app.abortChange();
         app.select(sel);
-        app.setStatus(STATUS.foldFailed(r.reason ?? 'unreachable'));
+        app.report(STATUS.foldFailed(r.reason ?? 'unreachable'));
         return;
       }
       app.setStatus(STATUS.creaseFolded(`${this.jointLabel(j)} · ${this.jointEnds(j)}`, r.dof ?? 0));
@@ -994,10 +1026,11 @@ export class UI {
         app.abortChange();
         return;
       }
-      app.endChange();
+      app.endChange(); // records an undo entry only when the model changed (a reused driver on a folded vertex changes nothing)
       app.setActiveDriver(m.drivers.indexOf(r.driver));
       const note = r.prefold ? (r.prefold.ok ? STATUS.prefolded : STATUS.flatVertexWarning) : '';
-      app.setStatus(note ? `${STATUS.driverSet} · ${note}` : STATUS.driverSet);
+      const message = r.reused ? STATUS.driverReused : STATUS.driverSet;
+      app.setStatus(note ? `${message} · ${note}` : message);
     }, { icon: 'driver' });
     driveBtn.title = PANEL.creaseDriveHelp;
     actions.appendChild(driveBtn);

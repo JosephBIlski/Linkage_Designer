@@ -174,6 +174,44 @@ describe('commitSketch', () => {
   });
 });
 
+describe('distances between two frozen points are violations, not dropped rows (0c guard)', () => {
+  it('currentViolation reports a bar whose two ends are pinned to the ground at the wrong distance, and Solidify refuses it', () => {
+    const m = createModel();
+    const g = addBar(m, [0, 0, 0], [4, 0, 0]);
+    setGround(m, g.id);
+    const b = addBar(m, [0, 0, 0], [4, 0, 0]);
+    addJoint(m, 'revolute', vertex(b, 0), vertex(g, 0), { axis: [0, 0, 1] });
+    addJoint(m, 'revolute', vertex(b, 1), vertex(g, 1), { axis: [0, 0, 1] });
+    expect(currentViolation(m)).toBeLessThan(1e-12);
+    const rest = restGeometry(m);
+    barRest(b).length = 7; // the Length editor's edit: both ends are merged with ground points, so nothing can move
+    expect(currentViolation(m)).toBeCloseTo(3, 9);
+    expect(poseIsConsistent(m)).toBe(false);
+    expect(solidifyRestGeometry(m)).toBe(false);
+    expect(barRest(b).length).toBe(7);
+    const r = trySolveCommit(m, {});
+    expect(r.ok).toBe(false);
+    expect(r.residual).toBeCloseTo(3, 9);
+    barRest(m.links[b.id]).length = 4; // (the refusal restored the model from its snapshot, so go through the model)
+    expect(restGeometry(m)).toBe(rest);
+    expect(trySolveCommit(m, {}).ok).toBe(true);
+  });
+
+  it('a locked link joined to the ground with a stretched rest length is reported and never baked', () => {
+    const m = createModel();
+    const g = addPolygonFromPoints(m, [[0, 0, 0], [2, 0, 0], [1, -1.5, 0]]);
+    setGround(m, g.id);
+    const tri = addPolygonFromPoints(m, [[0, 0, 0], [2, 0, 0], [1, 1.5, 0]]);
+    addJoint(m, 'spherical', vertex(tri, 0), vertex(g, 0));
+    addJoint(m, 'spherical', vertex(tri, 1), vertex(g, 1));
+    const edge = tri.rigidity.find((r) => r.kind === 'dist' && r.a === tri.pointIds[0] && r.b === tri.pointIds[1])!;
+    if (edge.kind === 'dist') edge.length = 2.3;
+    expect(currentViolation(m)).toBeCloseTo(0.3, 9);
+    expect(solidifyRestGeometry(m)).toBe(false);
+    expect(edge.kind === 'dist' && edge.length).toBe(2.3);
+  });
+});
+
 describe('trySolveCommit (the Select tool release path) with released points', () => {
   it('restores the whole model when the released solve is refused', () => {
     const { m, free } = impossibleTriangle();

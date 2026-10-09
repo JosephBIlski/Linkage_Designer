@@ -17,6 +17,8 @@ import { compile } from '../src/core/compile';
 import { tryAddJoint, trySolveCommit } from '../src/core/feasibility';
 import { computeMobility, currentViolation } from '../src/core/kinematics';
 import { foldedVertexPositions } from '../src/core/examples';
+import { findCreaseLoops } from '../src/core/fold';
+import { SIM } from '../src/ui/strings';
 import { dist } from '../src/core/geometry';
 import type { Feature, ID, Link, Model, Vec3 } from '../src/core/types';
 import { isConstructionRef } from '../src/core/types';
@@ -230,6 +232,11 @@ describe('creasesLockedByPlane', () => {
     expect(r.ok).toBe(true);
     expect(creasesLockedByPlane(m)).toEqual([r.joint!.id]);
     expect(computeMobility(m).dof).toBe(0);
+    // the hint for this model (no flat crease loop, so no Fold button) must not point at Fold
+    expect(findCreaseLoops(m).some((l) => l.flat)).toBe(false);
+    expect(SIM.creasesLocked(1, false)).not.toMatch(/Fold/);
+    expect(SIM.creasesLocked(1, false)).toMatch(/^1 crease cannot fold/);
+    expect(SIM.creasesLocked(4, true)).toMatch(/4 creases cannot fold.*or use Fold\.$/);
     setBodyPlane(m, B.id, null);
     expect(creasesLockedByPlane(m)).toEqual([]);
     expect(computeMobility(m).dof).toBe(1);
