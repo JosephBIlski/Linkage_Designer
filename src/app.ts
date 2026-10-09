@@ -32,6 +32,7 @@ import { loadSettings, saveSettings, type AppSettings } from './ui/settings';
 import { LINK_NAMES, SIM, STATUS } from './ui/strings';
 import { ModelRenderer, type DesignSpaceView, type EditPointView, type OverlayView, type PathView, type RenderState, type SelectionView, type SurfaceView } from './viewport/render';
 import { Viewport, type PickResult } from './viewport/scene';
+import { pickKey } from './viewport/pickRank';
 
 export type Mode = 'construction' | 'simulation' | 'preview';
 export type ToolName = 'select' | 'bar' | 'sketch' | 'polygon' | 'prism' | 'cylinder' | 'edit' | 'cpoint' | 'caxis' | 'cplane' | 'joint' | 'ground' | 'driver' | 'mirror' | 'pattern' | 'delete';
@@ -262,7 +263,8 @@ export class App {
   }
 
   setHover(h: PickResult | null): void {
-    const changed = JSON.stringify(h && { t: h.type, id: h.id, p: h.pointId, k: h.pose }) !== JSON.stringify(this.hover && { t: this.hover.type, id: this.hover.id, p: this.hover.pointId, k: this.hover.pose });
+    // the full feature identity (point ids, face index included): the query cycle steps between edges of one polygon
+    const changed = (h ? pickKey(h) : '') !== (this.hover ? pickKey(this.hover) : '');
     this.hover = h;
     if (changed) {
       if (this.mode === 'simulation' && !(this.selection?.type === 'editPoint')) {

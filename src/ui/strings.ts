@@ -59,19 +59,19 @@ export const EXAMPLES: Record<string, { label: string; description: string }> = 
 };
 
 export const TOOLS = {
-  select: { label: 'Select', hint: 'Click to select. Drag links or link ends to relocate them. Click a link end for its constraint pop-up.' },
+  select: { label: 'Select', hint: 'Click to select. Drag links or link ends to relocate them. Click a link end for its constraint pop-up. Right-click: cycle through the features under the pointer.' },
   bar: { label: 'Link', hint: 'Click the first point, then the second point. Click an existing link end to join to it. Or type a coordinate, "length<angle" or a length below.' },
-  polygon: { label: 'Polygon', hint: 'Click the centre, then a point on the circumcircle. Set the number of sides in the tool options.' },
-  prism: { label: 'Prism (3-D polygon)', hint: 'Click the centre, then a point on the circumcircle. Height and sides are set in the tool options.' },
+  polygon: { label: 'Polygon', hint: 'Click the centre, then a point on the circumcircle. Set the number of sides in the tool options. Vertices that land on existing vertices are joined (shared edges become creases).' },
+  prism: { label: 'Prism (3-D polygon)', hint: 'Click the centre, then a point on the circumcircle. Height and sides are set in the tool options. Vertices that land on existing vertices are joined (shared edges become creases).' },
   cylinder: { label: 'Cylinder', hint: 'Click the start of the axis, then the end of the axis. Radius is set in the tool options.' },
   cpoint: { label: 'Datum point', hint: 'Click to place a construction point (or type coordinates below).' },
   caxis: { label: 'Datum axis', hint: 'Click two points to define a construction axis.' },
   cplane: { label: 'Datum plane', hint: 'Click three points for a plane, or choose "Offset" in the tool options and click a base plane.' },
-  joint: { label: 'Joint', hint: 'Choose a joint type, click a feature on the first link, then a compatible feature on the second link (or construction geometry).' },
+  joint: { label: 'Joint', hint: 'Choose a joint type, click a feature on the first link, then a compatible feature on the second link (or construction geometry). Right-click: cycle through the features under the pointer.' },
   ground: { label: 'Ground', hint: 'Click a link to make it the ground (fixed) link.' },
   driver: { label: 'Driver', hint: 'Click a link with a grounded pivot to drive its angle, or a revolute/prismatic joint to drive its fold angle / slide.' },
   delete: { label: 'Delete', hint: 'Click an item to delete it (Del key deletes the selection).' },
-  sketch: { label: 'Sketch polygon', hint: 'Click the vertices of a polygon on the sketch plane. Click the first vertex again, double-click or press Enter to close it. Extrude it later from its Properties.' },
+  sketch: { label: 'Panel (sketch polygon)', hint: 'Click the vertices of a panel on the sketch plane. Vertices placed on existing vertices (snapped or typed) are joined when the panel is closed and shared edges become creases; the label at a shared vertex shows the sector-angle sum there. Click the first vertex again, double-click or press Enter to close it. Extrude it later from its Properties.' },
   edit: { label: 'Edit points', hint: 'Click a vertex of existing geometry, then click where it should go: another link\'s vertex (joins them), a datum point, or type coordinates below.' },
   mirror: { label: 'Mirror', hint: 'Click a link, then click a datum plane to create its mirror image.' },
   pattern: { label: 'Pattern', hint: 'Click a link, then two points for the spacing (linear) or a datum axis / centre point (polar). Count and angle are in the tool options.' },
@@ -338,8 +338,15 @@ export const STATUS = {
   prefolded: 'The flat vertex was pre-folded first so that every crease moves.',
   flatVertexWarning: 'This crease belongs to a flat vertex that could not be pre-folded: the simulation may fold only two of its creases.',
   vertexFlatHint: 'The vertex is flat: use Fold to pre-fold it before simulating.',
-  jointSameLink: 'Pick a feature on a different link.',
+  jointSameLink: 'That feature belongs to the first link too. Pick a feature on a different link (right-click cycles through everything under the pointer).',
+  // the pointer found the first link again (coincident edges, a shared vertex) and another link's feature from the same spot was used instead
+  pickedOtherLink: (description: string): string => `Used ${description} (the feature under the pointer was on the first link)`,
   pickSecondFeature: 'Now pick a compatible feature on another link or construction geometry.',
+  // Query cycle: a right-click without a drag steps through everything under the pointer (docs/CONSTRUCTION_PLAN.md, item 2a)
+  queryPick: (index: number, count: number, description: string, hint: string): string => `${index} of ${count} · ${description} · ${hint}`,
+  queryHint: 'right-click: next · left-click: use it · Esc: stop',
+  queryHintSingle: 'the only feature here · left-click: use it',
+  queryNothing: 'Nothing under the pointer to cycle through.',
   linkLocked: 'This link is locked.',
   nothingToUndo: 'Nothing to undo.',
   dragNothing: 'Nothing to drag here — grab a link body (bar, edge or face); zoom in (F) if the link is too thin to hit.',
@@ -358,6 +365,16 @@ export const STATUS = {
   pasted: 'Pasted',
   nothingToCopy: 'Select a link to copy.',
   extruded: 'Polygon extruded to a prism',
+};
+
+/** Labels drawn in the viewport by the tools (overlay), not in the status bar. */
+export const OVERLAY = {
+  /**
+   * Sector-angle label at a sketch vertex that sits on an existing vertex (Panel tool): the sum of the corner angles
+   * of the panels around that vertex including the one being drawn, and the angle the new panel adds, e.g.
+   * "360.0° (+120.0°)".
+   */
+  sectorSum: (sumDeg: number, addedDeg: number): string => `${sumDeg.toFixed(1)}° (+${addedDeg.toFixed(1)}°)`,
 };
 
 /** Status-bar message for a refused joint (tryAddJoint / tryChangeJointType diagnosis). */
@@ -423,14 +440,15 @@ export const HELP = {
   title: 'Quick help',
   lines: [
     'Right-drag: orbit. Middle-drag (or Shift+right-drag): pan. Wheel: zoom.',
+    'Right-click (without dragging): cycle through the features under the pointer. Each right-click highlights the next one and the status bar counts them ("2 of 3 · edge V0-V1 of Polygon 2"); a left-click uses the highlighted feature with the current tool; moving the pointer away or Esc stops. Use it where edges or vertices coincide, e.g. to join two panels along a shared edge.',
     'Link tool: click two points; click an existing link end to join with a pin (default joint type is set in the tool options).',
     'Select tool: drag a link to relocate it (joined links follow). Drag a link end to change its length. Click an end for the constraint pop-up.',
     'Ground tool: click a link to fix it. The DOF readout updates live.',
     'Simulation mode: pick which points to display (Properties → Show output path). Drag the green editing points; the mechanism adapts. Constrained points turn red; lock them in Properties.',
     'Preview mode: play the motion through the driver range.',
-    'Sketch tool: click vertices on the sketch plane, close the loop, then Extrude from Properties to make a prism. Edit tool: click a vertex, then its destination, to snap geometry together.',
+    'Panel tool: click vertices on the sketch plane and close the loop. Vertices placed on existing vertices are joined and shared edges become creases, so an origami vertex is built panel by panel; the label at a shared vertex shows the sector-angle sum (green when the last panel closes the ring at 360°, red when the angles cannot lie flat). Extrude a panel from Properties to make a prism. Edit tool: click a vertex, then its destination, to snap geometry together.',
     'Patterning: Ctrl+C / Ctrl+V duplicates the selected link; Mirror reflects across a datum plane; Pattern makes linear or polar arrays.',
-    'Keyboard: Esc cancel, Del delete, Ctrl+Z / Ctrl+Y undo / redo, Ctrl+C / Ctrl+V copy / paste, 1 select, 2 link, 3 polygon, S sketch, E edit, G ground, J joint, F zoom to fit.',
+    'Keyboard: Esc cancel, Del delete, Ctrl+Z / Ctrl+Y undo / redo, Ctrl+C / Ctrl+V copy / paste, 1 select, 2 link, 3 polygon, S panel (sketch), E edit, G ground, J joint, F zoom to fit.',
   ],
 };
 

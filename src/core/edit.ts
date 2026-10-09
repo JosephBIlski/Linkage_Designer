@@ -23,7 +23,7 @@ import {
   serializeModel,
   sketchNormal,
 } from './model';
-import type { Construction, ID, Joint, JointType, Link, Model, Vec3 } from './types';
+import type { Construction, ID, Joint, JointType, Link, Model, Point, Vec3 } from './types';
 import { isConstructionRef } from './types';
 
 export interface MoveVertexOptions {
@@ -136,12 +136,52 @@ export function reframeRigidityAway(m: Model, link: Link, pointId: ID): void {
   rebuildShapeRigidity(m, link.id, [...others, pointId], frame.length === 3 ? frame : undefined);
 }
 
+/**
+ * Distance within which two vertices count as coincident for automatic
+ * joining: one part in a million of the model size, never below 1e-6 units.
+ * Floating-point noise between positions that were computed differently (a
+ * vertex typed as a coordinate, a Polygon-tool vertex placed by centre and
+ * rotation, a point carried through a solve) is ~1e-15 relative, far below
+ * this; a vertex the user placed near, but not on, another one (the snap
+ * tolerance is several screen pixels, ~1e-2 of the view) is far above it, so
+ * only vertices that were snapped, typed or constructed onto an existing
+ * vertex are joined. autoJoinCoincident, the Panel (sketch) tool, the Polygon
+ * tool and the sector-angle preview share this one tolerance.
+ */
+export function coincidenceTolerance(m: Model): number {
+  return 1e-6 * Math.max(1, modelSize(m));
+}
+
+/**
+ * The existing vertex (a point of role vertex or axis, never a helper) that
+ * `pos` coincides with within coincidenceTolerance, nearest first; null when
+ * there is none. `excludeLinkId` ignores the vertices of one link (the link
+ * being built or edited). This is how typed coordinates and grid-snapped
+ * clicks that land exactly on an existing vertex are treated like snapped
+ * ones by the Panel and Polygon tools.
+ */
+export function coincidentVertex(m: Model, pos: Vec3, opts: { excludeLinkId?: ID; tol?: number } = {}): Point | null {
+  const tol = opts.tol ?? coincidenceTolerance(m);
+  let best: Point | null = null;
+  let bestD = Infinity;
+  for (const q of Object.values(m.points)) {
+    if (q.linkId === opts.excludeLinkId || (q.role !== 'vertex' && q.role !== 'axis')) continue;
+    const d = dist(pos, q.pos);
+    if (d <= tol && d < bestD) {
+      best = q;
+      bestD = d;
+    }
+  }
+  return best;
+}
+
 export interface AutoJoinOptions {
   defaultJoint: JointType;
   /** Hinge axis for pins between links that are not on a common sketch plane (the common plane's normal is used otherwise). */
   axis: Vec3;
   /** Extra vertex pairs [vertexOfLink, vertexOfOtherLink] to treat as coincident even if not exactly so. */
   extraPairs?: [ID, ID][];
+  /** Coincidence distance (default coincidenceTolerance). */
   tol?: number;
 }
 
@@ -161,7 +201,7 @@ export interface AutoJoinOptions {
  * pose is never committed) the model is restored as it was and [] is returned.
  */
 export function autoJoinCoincident(m: Model, link: Link, vertexIds: ID[], opts: AutoJoinOptions): Joint[] {
-  const tol = opts.tol ?? 1e-6 * Math.max(1, modelSize(m));
+  const tol = opts.tol ?? coincidenceTolerance(m);
   const snapshot = serializeModel(m);
   const wanted = new Set(vertexIds);
   // vertex of link -> coincident vertices of other links

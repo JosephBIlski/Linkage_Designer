@@ -21,7 +21,7 @@ const state = () => page.evaluate(() => { const { app } = window.linkageDesigner
 await page.evaluate(() => { const { app } = window.linkageDesigner; app.newModel(); app.viewport.setView('top'); app.viewport.fit([[-3, -3, 0], [6, 5, 0]]); });
 await page.waitForTimeout(500);
 // 1. Sketch a pentagon-ish polygon, close by clicking first vertex
-await page.click('button[title^="Sketch polygon"]');
+await page.click('button[title^="Panel"]');
 for (const p of [[0, 0, 0], [2, 0, 0], [2.5, 1.5, 0], [1, 2.5, 0], [-0.5, 1.5, 0]]) await clickWorld(p);
 await clickWorld([0, 0, 0]);
 console.log('after sketch', JSON.stringify(await state()));
@@ -113,7 +113,7 @@ await page.waitForTimeout(300);
 const dofWithout = await page.evaluate(() => window.linkageDesigner.app.sim.mobility?.dof);
 await page.evaluate(() => { const { app } = window.linkageDesigner; app.viewport.setView('iso'); app.viewport.fit([[-3, -3, -2], [4, 4, 2]]); });
 await page.waitForTimeout(300);
-await page.click('button[title^="Sketch polygon"]');
+await page.click('button[title^="Panel"]');
 for (const p of panel4.pts) await clickWorld(p);
 await page.keyboard.press('Enter');
 await page.waitForTimeout(500);
@@ -153,7 +153,7 @@ const post13 = await page.evaluate(() => ({ undo: window.linkageDesigner.app.und
 console.log('escape mid-drag', JSON.stringify({ undoBefore: pre13.undo, undoAfter: post13.undo, links: post13.links, restored: pre13.json === post13.json }), pre13.undo === post13.undo && pre13.json === post13.json ? 'OK' : 'FAIL');
 
 // 14. Double-click closes a sketch without adding a sliver vertex
-await page.click('button[title^="Sketch polygon"]');
+await page.click('button[title^="Panel"]');
 for (const p of [[0, 2, 0], [2, 2, 0], [2, 3.5, 0]]) await clickWorld(p);
 const last = await W([0.5, 3.5, 0]);
 await page.mouse.move(last.x, last.y);
@@ -203,6 +203,8 @@ const typeCoord = async (text) => { await page.fill('.coord__input', text); awai
 const freshTopView = async (box) => { await page.evaluate(() => window.linkageDesigner.app.newModel()); await page.waitForTimeout(400); await page.evaluate((box) => { const { app } = window.linkageDesigner; app.viewport.setView('top'); app.viewport.fit(box); }, box); await page.waitForTimeout(300); };
 /** midpoint of the edge of link #i whose end points are nearest to p and q (world coordinates) */
 const edgeMid = (i, p, q) => page.evaluate(({ i, p, q }) => { const { app } = window.linkageDesigner; const m = app.model; const l = Object.values(m.links)[i]; const near = (x) => l.pointIds.reduce((b, id) => (Math.hypot(...m.points[id].pos.map((v, k) => v - x[k])) < Math.hypot(...m.points[b].pos.map((v, k) => v - x[k])) ? id : b), l.pointIds[0]); const a = m.points[near(p)].pos, b = m.points[near(q)].pos; return [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2]; }, { i, p, q });
+/** the Panel tool's sector-angle labels currently shown in the viewport (text and CSS class, plan 2b) */
+const sectorLabels = () => page.evaluate(() => [...document.querySelectorAll('.viewport-labels [class*="label--sector"]')].map((e) => ({ text: e.textContent, cls: e.className })));
 const workflowState = () => page.evaluate(() => { const { app } = window.linkageDesigner; const m = app.model; return { creases: Object.values(m.joints).filter((j) => j.type === 'revolute' && j.a.kind === 'edge' && j.pairs?.length === 2).length, joints: Object.values(m.joints).filter((j) => j.a.kind !== 'body').length, bodyJoints: Object.values(m.joints).filter((j) => j.a.kind === 'body').length, drivers: m.drivers.length, dof: app.sim.mobility?.dof, violation: app.sim.violation, undo: app.undoStack.length, status: app.status, chip: document.querySelector('.chip')?.textContent ?? '', hints: [...document.querySelectorAll('.mode-panel .hint.warn')].map((e) => e.textContent), foldBtn: !!document.querySelector('button[title^="Drives one crease"]'), creaseLabels: [...document.querySelectorAll('.tree-item__label')].map((e) => e.textContent).filter((t) => /^Crease [MV]? ?\d+°/.test(t)), json: JSON.stringify(m) }; });
 
 // 18. The reported workflow: four regular triangles (Polygon tool, 3 sides, typed coordinates, each placed 1.2 units
@@ -311,25 +313,77 @@ const applied18c = await crank18c();
 const ok18c = refused18c.length === before18c.length && refused18c.undo === before18c.undo && /not applied/.test(refused18c.status) && Math.abs(Number(shown18c) - before18c.length) < 1e-3 && Math.abs(applied18c.length - 1.2) < 1e-9 && applied18c.undo === before18c.undo + 1;
 console.log('refused Length edit: input shows the model value, next edit applies', JSON.stringify({ lengthBefore: +before18c.length.toFixed(4), afterRefusal: +refused18c.length.toFixed(4), shown: shown18c, status: refused18c.status.slice(0, 60), afterEdit: +applied18c.length.toFixed(4), undo: [before18c.undo, refused18c.undo, applied18c.undo] }), ok18c ? 'OK' : 'FAIL');
 
-// 19. A developable vertex (sectors 60°, 60°, 120°, 120°) sketched flat with the Sketch tool, snapping the shared
+// 18d. Polygon tool joins (plan 2b): three regular triangles drawn with the Polygon tool by typed coordinates so that
+//      each new triangle's first vertex lands on O and its second on the previous triangle's corner (the typed
+//      circumcircle point is the first vertex; the next one is 120° round the centre). Two coincident vertices on one
+//      existing edge become a crease at once, with "Joint created (1)" in the status bar, and the model stays
+//      consistent. With the Panel tool a fourth triangle continuing the fan (O, P3, P4) shows the running sum 240°
+//      at the centre in the neutral colour: the ring is still open (in a plane the fourth regular triangle cannot
+//      close it; a closed ring that is not 360° only arises in 3-D, covered by tests/sector.test.ts).
+await freshTopView([[-4, -4, 0], [4, 4, 0]]);
+await page.click('button[title^="Polygon —"]');
+await page.fill('.tool-options input[type="number"]', '3');
+await page.press('.tool-options input[type="number"]', 'Tab');
+const joined18d = [];
+for (let k = 0; k < 3; k++) {
+  const c = centroid18(k), v = k === 0 ? P18(1) : O18;
+  await page.evaluate(() => window.linkageDesigner.app.setStatus(''));
+  await typeCoord(`${c[0]},${c[1]}`);
+  await typeCoord(`${v[0]},${v[1]}`);
+  joined18d.push(k === 0 ? await page.evaluate(() => window.linkageDesigner.app.status) : await waitStatus(/Joint created/));
+  await page.waitForTimeout(150);
+}
+const poly18d = await workflowState();
+await page.click('button[title^="Panel"]');
+await clickWorld(O18);
+await clickWorld(P18(3));
+const open18d = await W(P18(4));
+await page.mouse.move(open18d.x, open18d.y);
+await page.waitForTimeout(250);
+const labels18d = await sectorLabels();
+const running18d = labels18d.find((l) => /label--sector$/.test(l.cls) && /^240\.0° \(\+60\.0°\)/.test(l.text));
+await clickWorld(P18(4));
+await page.keyboard.press('Enter');
+await waitStatus(/Joint created \(1\)/);
+const post18d = await workflowState();
+const links18d = await page.evaluate(() => Object.keys(window.linkageDesigner.app.model.links).length);
+const ok18d = joined18d[1] === 'Joint created (1)' && joined18d[2] === 'Joint created (1)' && poly18d.creases === 2 && poly18d.joints === 2 && poly18d.violation < 1e-8 && !!running18d && links18d === 4 && post18d.creases === 3 && post18d.violation < 1e-8;
+console.log('polygon tool joins coincident vertices into creases; running sector sum on the next panel', JSON.stringify({ joined: joined18d, creasesAfterPolygons: poly18d.creases, joints: poly18d.joints, violation: poly18d.violation, labels: labels18d, links: links18d, creasesAfterPanel: post18d.creases }), ok18d ? 'OK' : 'FAIL');
+await page.screenshot({ path: `${OUT}/10b-polygon-joins.png` });
+
+// 19. A developable vertex (sectors 60°, 60°, 120°, 120°) sketched flat with the Panel (sketch) tool, snapping the shared
 //     vertices so the shared edges become creases; Ground → DOF 0 with the locked-creases and flat-vertex hints and the
 //     Fold button; Fold → DOF 1, 2-D constraints gone, dihedrals (170°, 160°, 170°, 160°) with a 3:1 mountain/valley
 //     split, one fold driver kept; the crease is pickable and has the crease Properties; Preview moves every panel.
 await freshTopView([[-3, -3, 0], [3, 3, 0]]);
 const R19 = (deg) => [2 * Math.cos((Math.PI / 180) * deg), 2 * Math.sin((Math.PI / 180) * deg), 0];
-await page.click('button[title^="Sketch polygon"]');
-for (const pts of [[O18, R19(0), R19(60)], [O18, R19(60), R19(120)], [O18, R19(120), R19(240)], [O18, R19(240), R19(0)]]) {
-  for (const p of pts) await clickWorld(p);
+await page.click('button[title^="Panel"]');
+// Panel tool (plan 2b): while the fourth panel is drawn and the cursor rests on its closing vertex, the sector label at
+// the centre must read 360° (the three panels' 240° plus the 120° this panel adds) in green: the ring closes flat
+let labels19 = [];
+const panels19 = [[O18, R19(0), R19(60)], [O18, R19(60), R19(120)], [O18, R19(120), R19(240)], [O18, R19(240), R19(0)]];
+for (let k = 0; k < panels19.length; k++) {
+  for (let i = 0; i < panels19[k].length; i++) {
+    if (k === 3 && i === 2) {
+      const s = await W(panels19[k][i]);
+      await page.mouse.move(s.x, s.y);
+      await page.waitForTimeout(250);
+      labels19 = await sectorLabels();
+    }
+    await clickWorld(panels19[k][i]);
+  }
   await page.keyboard.press('Enter');
   await page.waitForTimeout(400);
 }
+const label19 = labels19.find((l) => /label--sector-ok/.test(l.cls) && /^360\.0°/.test(l.text));
+console.log('sector label while closing the fourth panel', JSON.stringify(labels19), label19 ? 'OK' : 'FAIL');
 await page.click('button[title^="Ground —"]');
 await clickWorld([1, 0.5, 0]);
 await waitStatus(/Ground/);
 await page.waitForTimeout(300);
 const flat19 = await workflowState();
-const okFlat19 = flat19.creases === 4 && flat19.bodyJoints === 4 && flat19.dof === 0 && flat19.hints.some((h) => /cannot fold/.test(h)) && flat19.hints.some((h) => /flat/.test(h)) && flat19.foldBtn && flat19.creaseLabels.every((t) => /180°/.test(t));
-console.log('developable vertex sketched flat', JSON.stringify({ creases: flat19.creases, bodyJoints: flat19.bodyJoints, dof: flat19.dof, hints: flat19.hints.length, foldBtn: flat19.foldBtn, labels: flat19.creaseLabels }), okFlat19 ? 'OK' : 'FAIL');
+const okFlat19 = flat19.creases === 4 && flat19.bodyJoints === 4 && flat19.dof === 0 && flat19.hints.some((h) => /cannot fold/.test(h)) && flat19.hints.some((h) => /flat/.test(h)) && flat19.foldBtn && flat19.creaseLabels.every((t) => /180°/.test(t)) && !!label19;
+console.log('developable vertex sketched flat', JSON.stringify({ creases: flat19.creases, bodyJoints: flat19.bodyJoints, dof: flat19.dof, hints: flat19.hints.length, foldBtn: flat19.foldBtn, labels: flat19.creaseLabels, sectorLabel: label19 }), okFlat19 ? 'OK' : 'FAIL');
 await page.click('button[title^="Drives one crease"]');
 const folded19 = await waitStatus(/pre-folded|Nothing to fold|already folded|No folded state/);
 await page.waitForTimeout(300);
@@ -353,6 +407,52 @@ console.log('preview after fold moves every panel', JSON.stringify(travel19), tr
 await page.screenshot({ path: `${OUT}/12-developable-preview.png` });
 await page.click('button.mode-tab:has-text("Construction")');
 await page.waitForTimeout(300);
+
+// 20. Query pick (plan 2a): two triangles with exactly coincident edges (the second is sketched 3 units lower by typed
+//     coordinates, which never snap, and carried rigidly onto the first). With the Joint tool a left-click on the
+//     shared edge picks the edge of Polygon 1 (the first drawn); a right-click at the same spot starts the query cycle
+//     on the coincident edge of Polygon 2 ("2 of N"); a left-click then uses it and the two edges become one crease.
+//     A 60 px right-drag must still orbit the camera and must not start a cycle.
+await freshTopView([[-1, -4.5, 0], [3, 3, 0]]);
+await page.click('button[title^="Panel"]');
+for (const c of ['0.5,0.5', '2.5,0.5', '1.5,2']) await typeCoord(c);
+await page.keyboard.press('Enter');
+await page.waitForTimeout(300);
+// same base edge 3 units lower, apex below it: after the +3 translation the triangles share (0.5,0.5)-(2.5,0.5) exactly
+for (const c of ['0.5,-2.5', '2.5,-2.5', '1.5,-4']) await typeCoord(c);
+await page.keyboard.press('Enter');
+await page.waitForTimeout(300);
+await page.evaluate(() => { const { app } = window.linkageDesigner; const m = app.model; const l = Object.values(m.links)[1]; app.beginChange(); for (const id of [...l.pointIds, ...l.helperIds]) m.points[id].pos[1] += 3; app.endChange(); });
+await page.waitForTimeout(300);
+await page.click('button[title^="Select —"]');
+await page.waitForTimeout(100);
+const pre20 = await workflowState();
+await page.click('button[title^="Joint —"]');
+const shared20 = [1.5, 0.5, 0];
+await clickWorld(shared20);
+const first20 = await waitStatus(/Now pick/);
+const s20 = await W(shared20);
+await page.mouse.click(s20.x, s20.y, { button: 'right' });
+const cycled20 = await waitStatus(/^2 of \d+ · /);
+const cycleHover20 = await page.evaluate(() => { const { app, tools } = window.linkageDesigner; return { active: tools.queryActive, hover: app.hover && { type: app.hover.type, link: app.model.links[app.hover.id]?.name } }; });
+await page.mouse.click(s20.x, s20.y);
+const joined20 = await waitStatus(/Joint created|Nothing was moved|different link/);
+await page.waitForTimeout(300);
+const post20 = await workflowState();
+const ok20 = /Polygon 1/.test(first20) && /Polygon 2/.test(cycled20) && /right-click: next/.test(cycled20) && cycleHover20.active && cycleHover20.hover?.type === 'edge' && cycleHover20.hover?.link === 'Polygon 2' && /Joint created/.test(joined20) && pre20.creases === 0 && post20.creases === 1 && post20.joints === 1 && !post20.status.startsWith('2 of');
+console.log('query pick: right-click cycles to the coincident edge of the other panel', JSON.stringify({ first: first20.slice(0, 40), cycled: cycled20.slice(0, 70), hover: cycleHover20, joined: joined20.slice(0, 30), creases: [pre20.creases, post20.creases] }), ok20 ? 'OK' : 'FAIL');
+await page.screenshot({ path: `${OUT}/13-query-pick.png` });
+// right-drag of 60 px orbits (OrbitControls on the same element) and is not a query click
+const camBefore20 = await page.evaluate(() => window.linkageDesigner.app.viewport.camera.position.toArray());
+const o20 = await W([1.5, -1, 0]);
+await page.mouse.move(o20.x, o20.y);
+await page.mouse.down({ button: 'right' });
+for (let i = 1; i <= 6; i++) { await page.mouse.move(o20.x + i * 10, o20.y + i * 2); await page.waitForTimeout(40); }
+await page.mouse.up({ button: 'right' });
+await page.waitForTimeout(300);
+const drag20 = await page.evaluate(() => { const { app, tools } = window.linkageDesigner; return { cam: app.viewport.camera.position.toArray(), status: app.status, cycling: tools.queryActive }; });
+const orbited20 = Math.hypot(...[0, 1, 2].map((i) => drag20.cam[i] - camBefore20[i]));
+console.log('right-drag still orbits, no query cycle', JSON.stringify({ cameraMoved: +orbited20.toFixed(3), cycling: drag20.cycling, status: drag20.status.slice(0, 40) }), orbited20 > 1e-3 && !drag20.cycling && !/^\d+ of \d+ · /.test(drag20.status) ? 'OK' : 'FAIL');
 console.log('errors:', errors.length ? errors.join('\n') : 'none');
 await browser.close();
 server.kill();

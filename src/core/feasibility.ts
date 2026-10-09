@@ -336,26 +336,12 @@ export interface SectorSum {
  * measured in the current pose, which for rigid panels is their design.
  */
 export function sectorSumAt(m: Model, joint: Joint): SectorSum | null {
-  const parent = new Map<ID, ID>();
-  const find = (x: ID): ID => {
-    let r = x;
-    while (parent.has(r) && parent.get(r) !== r) r = parent.get(r)!;
-    return r;
-  };
-  const union = (x: ID, y: ID) => {
-    if (!parent.has(x)) parent.set(x, x);
-    if (!parent.has(y)) parent.set(y, y);
-    const rx = find(x);
-    const ry = find(y);
-    if (rx !== ry) parent.set(ry, rx);
-  };
-  for (const j of Object.values(m.joints)) for (const [x, y] of j.pairs ?? []) if (m.points[x] && m.points[y]) union(x, y);
+  const groups = mergedPointGroups(m);
   const endPoints = [...joint.a.pointIds, ...(isConstructionRef(joint.b) ? [] : joint.b.pointIds)].filter((id) => m.points[id]);
   let best: { members: ID[]; links: Set<ID> } | null = null;
   for (const pid of endPoints) {
-    if (!parent.has(pid)) continue;
-    const root = find(pid);
-    const members = [...parent.keys()].filter((id) => find(id) === root);
+    const members = groups.group(pid);
+    if (!members) continue;
     const links = new Set(members.map((id) => m.points[id].linkId));
     if (!best || links.size > best.links.size) best = { members, links };
   }
@@ -379,6 +365,38 @@ export function sectorSumAt(m: Model, joint: Joint): SectorSum | null {
     sumDeg: Math.round(sum * 10) / 10,
     linkIds,
     constrained2d: linkIds.every((id) => bodyPlaneJoint(m, id) !== null),
+  };
+}
+
+/**
+ * Union-find over the merged point pairs of every joint (creases and pins
+ * merge their end points into one solver variable): `group(id)` lists the
+ * points merged with `id`, itself included, or null when `id` takes part in
+ * no merged pair. Shared by the sector-sum diagnosis and the sector-angle
+ * preview of the Panel tool (sector.ts), which both need "the panels around
+ * this vertex".
+ */
+export function mergedPointGroups(m: Model): { group: (pointId: ID) => ID[] | null } {
+  const parent = new Map<ID, ID>();
+  const find = (x: ID): ID => {
+    let r = x;
+    while (parent.has(r) && parent.get(r) !== r) r = parent.get(r)!;
+    return r;
+  };
+  const union = (x: ID, y: ID) => {
+    if (!parent.has(x)) parent.set(x, x);
+    if (!parent.has(y)) parent.set(y, y);
+    const rx = find(x);
+    const ry = find(y);
+    if (rx !== ry) parent.set(ry, rx);
+  };
+  for (const j of Object.values(m.joints)) for (const [x, y] of j.pairs ?? []) if (m.points[x] && m.points[y]) union(x, y);
+  return {
+    group: (pointId: ID): ID[] | null => {
+      if (!parent.has(pointId)) return null;
+      const root = find(pointId);
+      return [...parent.keys()].filter((id) => find(id) === root);
+    },
   };
 }
 

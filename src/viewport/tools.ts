@@ -30,13 +30,16 @@ import {
   setGround,
   sketchNormal,
 } from '../core/model';
-import type { ConstructionRef, Feature, ID, Target, Vec3 } from '../core/types';
-import { autoJoinCoincident, fitSketchPlane, moveVertex, placeOnFittedPlane, projectToPlane } from '../core/edit';
+import type { ConstructionRef, Feature, ID, JointType, Target, Vec3 } from '../core/types';
+import { autoJoinCoincident, coincidentVertex, fitSketchPlane, moveVertex, placeOnFittedPlane, projectToPlane } from '../core/edit';
+import { sectorPreview, sectorStatus, type SectorStatus } from '../core/sector';
 import { duplicateLink, hasCollinearTriple, linearArray, mirrorAcrossPlane, polarArray } from '../core/patterns';
 import { addPolygonFromPoints } from '../core/model';
 import { isConstructionRef } from '../core/types';
-import { FEATURES, STATUS, TOOLS, CONSTRUCTION_NAMES, jointRefusedMessage } from '../ui/strings';
+import { FEATURES, OVERLAY, STATUS, TOOLS, CONSTRUCTION_NAMES, jointRefusedMessage } from '../ui/strings';
+import type { OverlayLabel, OverlayView } from './render';
 import type { PickResult, ViewportPointerEvent } from './scene';
+import { PickCycle } from './pickCycle';
 
 export function toolHint(tool: ToolName): string {
   const t = (TOOLS as Record<string, unknown>)[tool];
@@ -64,6 +67,9 @@ export function parseTypedPoint(text: string): TypedPoint | null {
 /** Weight of soft drag targets relative to hard constraints: joints stay satisfied while the body follows the pointer. */
 const DRAG_WEIGHT = 0.05;
 
+/** CSS classes of the Panel tool's sector-angle labels (src/style.css). */
+const SECTOR_LABEL_CLASS: Record<SectorStatus, string> = { neutral: 'label label--sector', ok: 'label label--sector-ok', bad: 'label label--sector-bad' };
+
 interface PlacedPoint {
   pos: Vec3;
   snappedPointId?: ID;
@@ -88,6 +94,10 @@ export class ToolManager {
   private pendingLength: number | null = null;
   private drag: DragState = { kind: 'none' };
   private lastPointer: { x: number; y: number } | null = null;
+  /** Query cycle: a right-click steps through everything under the pointer; the current candidate is shown as the hover. */
+  private cycle = new PickCycle();
+  /** True while the pick being dispatched was named through the query cycle (the user chose it explicitly). */
+  private pickFromCycle = false;
   onPopup: ((pointId: ID | null) => void) | null = null;
 
   constructor(private app: App) {
@@ -101,8 +111,14 @@ export class ToolManager {
     this.patternLinkId = null;
     this.pendingLength = null;
     this.drag = { kind: 'none' };
+    this.cycle.cancel();
     this.app.setOverlay({});
     this.app.setHint(toolHint(this.app.tool));
+  }
+
+  /** True while a query cycle (right-click) is stepping through the features under the pointer. */
+  get queryActive(): boolean {
+    return this.cycle.active;
   }
 
   setTool(tool: ToolName): void {
@@ -120,6 +136,11 @@ export class ToolManager {
   }
 
   cancel(): void {
+    if (this.cycle.active) {
+      // Esc first leaves the query cycle (normal hover resumes); a second Esc cancels the tool as before
+      this.endCycle();
+      return;
+    }
     if (this.drag.kind !== 'none' && this.drag.kind !== 'pending') {
       // abort the drag: restore the pre-drag model without touching the undo history
       this.app.abortChange();
@@ -223,11 +244,23 @@ export class ToolManager {
     const app = this.app;
     this.lastPointer = { x: ev.clientX, y: ev.clientY };
     if (ev.kind === 'leave') {
+      this.cycle.cancel();
       app.setHover(null);
       return;
     }
+    if (ev.kind === 'query') return this.queryClick(ev);
     if (ev.kind === 'move') {
       if (this.drag.kind !== 'none') return this.dragMove(ev);
+      if (this.cycle.active) {
+        // within a few pixels of the query position the highlighted candidate stays (normal hover would replace it);
+        // farther away the cycle ends and normal hover resumes
+        if (this.cycle.isSamePlace(ev.clientX, ev.clientY)) {
+          this.updatePreview({ ...ev, pick: this.cycle.current });
+          return;
+        }
+        this.cycle.cancel();
+        if (!ev.pick) app.setStatus('');
+      }
       app.setHover(ev.pick);
       this.updatePreview(ev);
       if (ev.pick) app.setStatus(this.describePick(ev.pick));
@@ -243,6 +276,65 @@ export class ToolManager {
     }
     if (ev.kind !== 'down' || ev.button !== 0) return;
     this.onPopup?.(null);
+    // a left-click while a query cycle is active uses the highlighted candidate as the pick of the active tool (every
+    // tool, and the snap of place(), reads ev.pick); the candidate may be stale when the model changed meanwhile
+    const chosen = this.cycle.active && this.cycle.isSamePlace(ev.clientX, ev.clientY) ? this.cycle.current : null;
+    this.cycle.cancel();
+    const queried = chosen !== null && this.pickExists(chosen);
+    this.pickFromCycle = queried;
+    try {
+      this.dispatchDown(queried ? { ...ev, pick: chosen } : ev);
+    } finally {
+      this.pickFromCycle = false;
+    }
+  }
+
+  /**
+   * Right-click that was not an orbit drag: start the query cycle at this spot
+   * (first candidate that is not the current hover) or step it when it is
+   * already running here. The candidate is shown as the hover (its highlight)
+   * and the status bar reads "2 of 3 · edge V0-V1 of Polygon 2 · right-click:
+   * next …"; a left-click then uses it (handle()).
+   */
+  private queryClick(ev: ViewportPointerEvent): void {
+    const app = this.app;
+    if (this.drag.kind !== 'none') return;
+    const here = { x: ev.clientX, y: ev.clientY };
+    const cand = this.cycle.active && this.cycle.isSamePlace(here.x, here.y) ? this.cycle.next() : this.cycle.start(app.viewport.pickCandidates(here.x, here.y), here, app.hover);
+    if (!cand) {
+      app.setStatus(STATUS.queryNothing);
+      return;
+    }
+    app.setHover(cand);
+    this.updatePreview({ ...ev, pick: cand });
+    app.setStatus(STATUS.queryPick(this.cycle.index + 1, this.cycle.count, this.describePick(cand), this.cycle.count > 1 ? STATUS.queryHint : STATUS.queryHintSingle));
+  }
+
+  /** Leave the query cycle: the normal hover at the pointer position resumes. */
+  private endCycle(): void {
+    this.cycle.cancel();
+    const p = this.lastPointer ? this.app.viewport.pick(this.lastPointer.x, this.lastPointer.y) : null;
+    this.app.setHover(p);
+    this.app.setStatus(p ? this.describePick(p) : '');
+  }
+
+  /** Does the feature a pick names still exist? A cycle candidate may outlive an undo or a deletion. */
+  private pickExists(p: PickResult): boolean {
+    const m = this.app.model;
+    switch (p.type) {
+      case 'joint':
+        return !!m.joints[p.id];
+      case 'construction':
+        return !!m.construction[p.id];
+      case 'editPoint':
+        return !!m.points[p.pointId ?? p.id];
+      default:
+        return !!m.links[p.id] && (p.pointIds ?? []).every((id) => !!m.points[id]);
+    }
+  }
+
+  private dispatchDown(ev: ViewportPointerEvent): void {
+    const app = this.app;
     switch (app.tool) {
       case 'select':
         return this.selectDown(ev);
@@ -346,7 +438,7 @@ export class ToolManager {
     }
     const placed = this.place(ev);
     if (!placed) return;
-    const overlay: import('./render').OverlayView = { snapPoint: placed.snappedPointId || placed.snappedConstructionId ? placed.pos : null, marker: placed.pos };
+    const overlay: OverlayView = { snapPoint: placed.snappedPointId || placed.snappedConstructionId ? placed.pos : null, marker: placed.pos };
     const first = this.points[0]?.pos;
     if (first && (tool === 'bar' || tool === 'caxis' || tool === 'cylinder')) overlay.rubberBand = { a: first, b: placed.pos };
     if (first && (tool === 'polygon' || tool === 'prism')) {
@@ -356,24 +448,70 @@ export class ToolManager {
     }
     if (tool === 'cplane' && this.points.length > 0) overlay.polyline = [...this.points.map((p) => p.pos), placed.pos];
     if (tool === 'sketch' && this.points.length > 0) {
-      const cursor: PlacedPoint = { pos: placed.pos, snappedPointId: placed.snappedPointId, snappedConstructionId: placed.snappedConstructionId, ray: placed.ray };
-      const { pts } = this.sketchPositions([...this.points, cursor]);
+      // the cursor vertex counts as placed on an existing vertex when it is snapped or lands exactly on one
+      const cursor = this.withCoincidence([{ pos: placed.pos, snappedPointId: placed.snappedPointId, snappedConstructionId: placed.snappedConstructionId, ray: placed.ray }])[0];
+      const all = [...this.withCoincidence(this.points), cursor];
+      const { pts } = this.sketchPositions(all);
       overlay.polyline = pts;
       overlay.rubberBand = { a: pts[pts.length - 2], b: pts[pts.length - 1] };
       overlay.marker = pts[pts.length - 1];
+      overlay.labels = this.sectorLabels(all, pts);
     }
     if (tool === 'pattern' && this.patternLinkId && this.points.length === 1 && app.toolOptions.patternKind === 'linear') overlay.rubberBand = { a: this.points[0].pos, b: placed.pos };
     if (tool === 'edit' && this.editSource) overlay.rubberBand = { a: app.model.points[this.editSource.pointId]?.pos ?? placed.pos, b: placed.pos };
     app.setOverlay(overlay);
   }
 
+  /**
+   * Sector-angle labels of the Panel tool: at every sketch vertex that sits on
+   * an existing vertex, the running sum of the corner angles of the panels
+   * around it plus the angle the new panel adds between its two adjacent
+   * sketch edges (sectorPreview). `pts` is the closed polyline including the
+   * cursor, so the cursor closes the open edge; a cursor resting on the first
+   * vertex (about to close the polygon) is left out, since it duplicates it.
+   * Green when the panel closes the ring at 360°, red when the angles cannot
+   * lie flat, neutral otherwise (sectorStatus).
+   */
+  private sectorLabels(points: PlacedPoint[], pts: Vec3[]): OverlayLabel[] {
+    const m = this.app.model;
+    const n = pts.length >= 3 && dist(pts[pts.length - 1], pts[0]) < 1e-9 ? pts.length - 1 : pts.length;
+    if (n < 3) return [];
+    const labels: OverlayLabel[] = [];
+    for (let i = 0; i < n; i++) {
+      const pid = points[i].snappedPointId;
+      if (!pid || !m.points[pid]) continue;
+      const prev = pts[(i + n - 1) % n];
+      const next = pts[(i + 1) % n];
+      if (dist(prev, pts[i]) < 1e-9 || dist(next, pts[i]) < 1e-9) continue;
+      const s = sectorPreview(m, pts[i], prev, next, pid);
+      labels.push({ pos: pts[i], text: OVERLAY.sectorSum(s.sumDeg, s.addedDeg), cls: SECTOR_LABEL_CLASS[sectorStatus(s)] });
+    }
+    return labels;
+  }
+
+  /**
+   * Sketch vertices that coincide with an existing vertex (coincidentVertex:
+   * typed coordinates, grid-snapped clicks) are treated exactly like snapped
+   * ones: they keep the existing vertex's position, take part in the plane
+   * fit and are joined when the panel is closed. Points already snapped to a
+   * vertex or a datum point are returned unchanged.
+   */
+  private withCoincidence(points: PlacedPoint[]): PlacedPoint[] {
+    const m = this.app.model;
+    return points.map((p) => {
+      if (p.snappedPointId || p.snappedConstructionId) return p;
+      const q = coincidentVertex(m, p.pos);
+      return q ? { ...p, pos: [...q.pos] as Vec3, snappedPointId: q.id } : p;
+    });
+  }
+
   // ---------------------------------------------------------------------------
-  // Sketch (free polygon) tool
+  // Panel (sketch polygon) tool
   // ---------------------------------------------------------------------------
 
   private sketchTool(ev: ViewportPointerEvent, forced?: PlacedPoint): void {
     const app = this.app;
-    const placed = forced ?? this.place(ev, true);
+    const placed = forced ? this.withCoincidence([forced])[0] : this.place(ev, true);
     if (!placed) return;
     // clicking near the first vertex closes the polygon
     if (this.points.length >= 3 && !forced) {
@@ -422,7 +560,10 @@ export class ToolManager {
       app.setStatus(STATUS.sketchNeedsThree);
       return;
     }
-    const { pts, onSketchPlane } = this.sketchPositions(this.points);
+    // every vertex that sits on an existing vertex, snapped or typed, is joined (plan 2b): shared edges become creases,
+    // single vertices get pins; a refused re-solve leaves the panel unjoined (autoJoinCoincident restores the model)
+    const points = this.withCoincidence(this.points);
+    const { pts, onSketchPlane } = this.sketchPositions(points);
     if (hasCollinearTriple(pts)) {
       app.setStatus(STATUS.sketchDegenerate);
       return;
@@ -430,11 +571,10 @@ export class ToolManager {
     const m = app.model;
     app.beginChange();
     const link = addPolygonFromPoints(m, pts, { name: app.nextLinkName('polygon'), onPlaneId: onSketchPlane ? m.settings.sketchPlaneId : null });
-    // vertices snapped onto existing geometry are joined: shared edges become creases, single vertices get pins
-    const snapped = link.pointIds.filter((_, i) => this.points[i].snappedPointId);
+    const snapped = link.pointIds.filter((_, i) => points[i].snappedPointId);
     const joints = snapped.length ? autoJoinCoincident(m, link, snapped, { defaultJoint: m.settings.defaultJoint, axis: sketchNormal(m) }) : [];
-    for (let i = 0; i < this.points.length; i++) {
-      const cid = this.points[i].snappedConstructionId;
+    for (let i = 0; i < points.length; i++) {
+      const cid = points[i].snappedConstructionId;
       if (cid && m.construction[cid]?.kind === 'point') addJoint(m, 'spherical', { linkId: link.id, kind: 'vertex', pointIds: [link.pointIds[i]] }, { constructionId: cid });
     }
     app.select({ type: 'link', id: link.id });
@@ -638,13 +778,14 @@ export class ToolManager {
       app.tool === 'prism'
         ? addPrism(m, c, n, r, Math.max(3, opts.sides), opts.height, { name: app.nextLinkName('prism'), xDir })
         : addPolygon(m, c, n, r, Math.max(3, opts.sides), { name: app.nextLinkName('polygon'), xDir, onPlaneId: opts.mode2d ? m.settings.sketchPlaneId : null });
-    // join first vertex to a snapped vertex if any
-    if (placed.snappedPointId && m.points[placed.snappedPointId] && m.points[placed.snappedPointId].linkId !== link.id) {
-      const other = m.points[placed.snappedPointId];
-      addJoint(m, m.settings.defaultJoint, { linkId: link.id, kind: 'vertex', pointIds: [link.pointIds[0]] }, { linkId: other.linkId, kind: 'vertex', pointIds: [other.id] }, { axis: n });
-    }
+    // every vertex of the new polygon / prism that lands on an existing vertex is joined (plan 2b): shared edges become
+    // creases, single vertices get pins; the first vertex is the clicked circumcircle point, so a snap there is kept
+    // as a pair even when the polygon's plane leaves it slightly off the snapped vertex (the pin was always made)
+    const snappedFirst = placed.snappedPointId && m.points[placed.snappedPointId] ? placed.snappedPointId : null;
+    const joints = autoJoinCoincident(m, link, link.pointIds, { defaultJoint: m.settings.defaultJoint, axis: n, extraPairs: snappedFirst ? [[link.pointIds[0], snappedFirst]] : [] });
     app.select({ type: 'link', id: link.id });
     app.endChange();
+    if (joints.length) app.setStatus(`${STATUS.jointCreated} (${joints.length})`);
     this.points = [];
     app.setOverlay({});
   }
@@ -710,7 +851,7 @@ export class ToolManager {
     const app = this.app;
     const m = app.model;
     if (!ev.pick) return;
-    const f = this.featureFromPick(ev.pick);
+    let f = this.featureFromPick(ev.pick);
     if (!f) return;
     if (!this.featureA) {
       if (isConstructionRef(f)) {
@@ -721,11 +862,20 @@ export class ToolManager {
       app.setStatus(`${this.describeFeature(f)} — ${STATUS.pickSecondFeature}`);
       return;
     }
-    if (!isConstructionRef(f) && f.linkId === this.featureA.linkId) {
-      app.setStatus(STATUS.jointSameLink);
-      return;
-    }
     const type = app.toolOptions.jointType;
+    let prefix = '';
+    if (!isConstructionRef(f) && f.linkId === this.featureA.linkId) {
+      // the hover found the first link again (coincident edges, a shared vertex): use the best-ranked compatible feature
+      // of another link under the pointer instead, unless the user named this very feature through the query cycle
+      const alt = this.pickFromCycle ? null : this.otherLinkCandidate(ev, type, this.featureA);
+      if (!alt) {
+        app.setStatus(STATUS.jointSameLink);
+        return;
+      }
+      f = alt;
+      prefix = STATUS.pickedOtherLink(this.describeFeature(alt));
+    }
+    const withPrefix = (text: string): string => (prefix ? `${prefix} · ${text}` : text);
     if (!jointCompatible(m, type, this.featureA, f)) {
       app.setStatus(STATUS.jointIncompatible);
       return;
@@ -738,15 +888,33 @@ export class ToolManager {
     if (!r.ok || !r.joint) {
       app.abortChange();
       // kept in the Mechanism panel as well: the diagnosis is long and the status bar is replaced on the next hover
-      app.report(jointRefusedMessage(r.diagnosis ?? { kind: 'infeasible', residual: r.residual }));
+      const message = jointRefusedMessage(r.diagnosis ?? { kind: 'infeasible', residual: r.residual });
+      app.report(message);
+      if (prefix) app.setStatus(withPrefix(message));
     } else {
       app.select({ type: 'joint', id: r.joint.id });
       // a crease that closes a flat loop of panels leaves the vertex in its singular flat state: point at Fold
       const flat = this.inFlatLoop(r.joint.id);
-      app.setStatus(flat ? `${STATUS.jointCreated} · ${STATUS.vertexFlatHint}` : STATUS.jointCreated);
+      app.setStatus(withPrefix(flat ? `${STATUS.jointCreated} · ${STATUS.vertexFlatHint}` : STATUS.jointCreated));
       app.endChange();
     }
     this.featureA = null;
+  }
+
+  /**
+   * The best-ranked feature under the pointer that lies on a link other than
+   * `a`'s and that the joint type accepts with `a` (datum geometry is never
+   * substituted: joining to the X axis because two panel edges coincide would
+   * surprise). The query cycle still lets the user override the choice.
+   */
+  private otherLinkCandidate(ev: { clientX: number; clientY: number }, type: JointType, a: Feature): Feature | null {
+    const m = this.app.model;
+    for (const c of this.app.viewport.pickCandidates(ev.clientX, ev.clientY)) {
+      const f = this.featureFromPick(c);
+      if (!f || isConstructionRef(f) || f.linkId === a.linkId) continue;
+      if (jointCompatible(m, type, a, f)) return f;
+    }
+    return null;
   }
 
   /** Is the joint a crease of a flat crease loop (a vertex whose creases are all unfolded)? */

@@ -40,12 +40,20 @@ export interface DesignSpaceView {
   center: Vec3;
   radius: number;
 }
+/** A text label the active tool pins to a world position (CSS2D, like the model labels); `cls` is its CSS class list. */
+export interface OverlayLabel {
+  pos: Vec3;
+  text: string;
+  cls: string;
+}
 export interface OverlayView {
   rubberBand?: { a: Vec3; b: Vec3 } | null;
   circle?: { center: Vec3; normal: Vec3; radius: number } | null;
   snapPoint?: Vec3 | null;
   marker?: Vec3 | null;
   polyline?: Vec3[] | null;
+  /** Tool feedback labels (e.g. the Panel tool's sector-angle sums); shown whatever the "Show labels" setting says. */
+  labels?: OverlayLabel[] | null;
 }
 export interface SelectionView {
   type: PickType | 'link';
@@ -128,12 +136,12 @@ export class ModelRenderer {
 
   // ---------------------------------------------------------------------------
 
-  private material(color: string, opts: { opacity?: number; emissive?: string; flat?: boolean } = {}): THREE.Material {
+  private material(color: string, opts: { opacity?: number; emissive?: string; emissiveIntensity?: number; flat?: boolean } = {}): THREE.Material {
     const m = opts.flat
       ? new THREE.MeshBasicMaterial({ color, transparent: (opts.opacity ?? 1) < 1, opacity: opts.opacity ?? 1, depthWrite: (opts.opacity ?? 1) >= 1 })
       : new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0.05, transparent: (opts.opacity ?? 1) < 1, opacity: opts.opacity ?? 1, side: THREE.DoubleSide });
     if (!opts.flat && opts.emissive) (m as THREE.MeshStandardMaterial).emissive = new THREE.Color(opts.emissive);
-    if (!opts.flat && opts.emissive) (m as THREE.MeshStandardMaterial).emissiveIntensity = 0.55;
+    if (!opts.flat && opts.emissive) (m as THREE.MeshStandardMaterial).emissiveIntensity = opts.emissiveIntensity ?? 0.55;
     return this.track(m);
   }
 
@@ -234,7 +242,8 @@ export class ModelRenderer {
         const half = c.size ?? 10;
         const a = add(c.origin, scale(c.dir, -half));
         const b = add(c.origin, scale(c.dir, half));
-        const mat = this.track(new THREE.LineDashedMaterial({ color, dashSize: 0.35, gapSize: 0.18, transparent: true, opacity: c.builtin ? 0.45 : 0.9 }));
+        // a dashed line has no emissive term: the hover highlight (query cycle) is the selection colour at full opacity
+        const mat = this.track(new THREE.LineDashedMaterial({ color: hovered ? settings.colors.selection : color, dashSize: 0.35, gapSize: 0.18, transparent: true, opacity: hovered || selected ? 1 : c.builtin ? 0.45 : 0.9 }));
         const geo = this.track(new THREE.BufferGeometry().setFromPoints([v(a), v(b)]));
         const line = new THREE.Line(geo, mat);
         line.computeLineDistances();
@@ -246,7 +255,8 @@ export class ModelRenderer {
       } else if (c.kind === 'plane' && c.dir) {
         const s = c.size ?? 6;
         const geo = this.track(new THREE.PlaneGeometry(2 * s, 2 * s));
-        const mat = this.track(new THREE.MeshBasicMaterial({ color, transparent: true, opacity: c.builtin ? 0.04 : 0.12, side: THREE.DoubleSide, depthWrite: false }));
+        // hovered (query cycle): selection colour and a denser fill, since the translucent plane has no emissive term
+        const mat = this.track(new THREE.MeshBasicMaterial({ color: hovered ? settings.colors.selection : color, transparent: true, opacity: hovered ? 0.3 : selected ? 0.2 : c.builtin ? 0.04 : 0.12, side: THREE.DoubleSide, depthWrite: false }));
         const mesh = new THREE.Mesh(geo, mat);
         mesh.position.copy(v(c.origin));
         mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), v(c.dir));
@@ -255,7 +265,7 @@ export class ModelRenderer {
         this.pickables.push(mesh);
         g.add(mesh);
         const edges = this.track(new THREE.EdgesGeometry(geo));
-        const lmat = this.track(new THREE.LineBasicMaterial({ color, transparent: true, opacity: c.builtin ? 0.35 : 0.9 }));
+        const lmat = this.track(new THREE.LineBasicMaterial({ color: hovered ? settings.colors.selection : color, transparent: true, opacity: hovered || selected ? 1 : c.builtin ? 0.35 : 0.9 }));
         const border = new THREE.LineSegments(edges, lmat);
         border.position.copy(mesh.position);
         border.quaternion.copy(mesh.quaternion);
@@ -290,6 +300,12 @@ export class ModelRenderer {
       const opacity = ghost ? 0.28 : link.kind === 'polygon' || link.kind === 'prism' ? 0.85 : 1;
       const bodyMat = this.material(selected ? settings.colors.selection : baseColor, { opacity, emissive: hovered && !selected ? settings.colors.selection : undefined });
       const edgeMat = this.material(selected ? settings.colors.selection : ghost ? '#888888' : darkenHex(baseColor, 0.25), { opacity: ghost ? 0.28 : 1 });
+      // the hovered edge / face itself is lit more strongly than the rest of the link, so the query cycle can tell the
+      // edges and faces of one polygon or prism apart (the whole link keeps its emissive tint as before)
+      const hoverEdge = hovered && state.hover?.type === 'edge' ? (state.hover.pointIds ?? null) : null;
+      const hoverFace = hovered && state.hover?.type === 'face' ? (state.hover.faceIndex ?? -1) : -1;
+      const edgeHotMat = hoverEdge ? this.material(settings.colors.selection, { emissive: settings.colors.selection, emissiveIntensity: 0.8 }) : null;
+      const faceHotMat = hoverFace >= 0 ? this.material(selected ? settings.colors.selection : baseColor, { opacity, emissive: settings.colors.selection, emissiveIntensity: 1 }) : null;
       const pickBase = (type: PickType, pointIds: ID[], faceIndex?: number): Partial<PickResult> | undefined => (ghost ? undefined : { type, id: link.id, linkId: link.id, pointIds, faceIndex });
 
       if (link.kind === 'bar') {
@@ -300,14 +316,14 @@ export class ModelRenderer {
         faces.forEach((face, fi) => {
           const pts = face.map(P);
           const geo = this.track(polygonGeometry(pts));
-          const mesh = new THREE.Mesh(geo, bodyMat);
+          const mesh = new THREE.Mesh(geo, faceHotMat && fi === hoverFace ? faceHotMat : bodyMat);
           if (!ghost) {
             mesh.userData = pickBase('face', face, fi)!;
             this.pickables.push(mesh);
           }
           group.add(mesh);
         });
-        for (const [a, b] of linkEdges(model, link)) this.pickableCylinder(group, P(a), P(b), r * 0.55, edgeMat, pickBase('edge', [a, b]));
+        for (const [a, b] of linkEdges(model, link)) this.pickableCylinder(group, P(a), P(b), r * 0.55, edgeHotMat && sameEdge(hoverEdge, [a, b]) ? edgeHotMat : edgeMat, pickBase('edge', [a, b]));
       } else if (link.kind === 'cylinder') {
         const [a, b] = link.pointIds;
         const radius = link.params.radius ?? 0.5;
@@ -616,7 +632,14 @@ export class ModelRenderer {
     if (o.marker) {
       g.add(this.sphere(o.marker, r * 1.1, this.material(col, { flat: true })));
     }
+    // tool labels sit at their world position; the stylesheet offsets them from the vertex they annotate
+    for (const l of o.labels ?? []) this.label(l.text, l.pos, l.cls);
   }
+}
+
+/** Is `edge` (either orientation) the hovered edge `hover`? */
+function sameEdge(hover: ID[] | null, edge: [ID, ID]): boolean {
+  return !!hover && hover.length === 2 && ((hover[0] === edge[0] && hover[1] === edge[1]) || (hover[0] === edge[1] && hover[1] === edge[0]));
 }
 
 function isConstructionRefLocal(x: Joint['b']): x is { constructionId: ID } {

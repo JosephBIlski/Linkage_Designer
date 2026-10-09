@@ -117,6 +117,11 @@ hr { border: none; border-top: 1px solid var(--border); margin: 6px 0; width: 10
 .label--vertex { font-size: 10px; background: rgba(255,255,255,0.6); }
 .label--construction { color: #6b5323; background: rgba(255,250,235,0.7); font-size: 10.5px; }
 .label--joint { color: #fff; background: rgba(43,47,51,0.85); }
+/* Panel tool: sector-angle sum at a shared vertex (neutral / closes the ring at 360° / cannot lie flat); offset so the vertex marker stays visible */
+.label--sector, .label--sector-ok, .label--sector-bad { font-weight: 600; font-variant-numeric: tabular-nums; margin: -18px 0 0 18px; }
+.label--sector { background: rgba(255,255,255,0.88); }
+.label--sector-ok { color: #fff; background: #0eb062; }
+.label--sector-bad { color: #fff; background: #94140a; }
 
 .dialog-backdrop { position: absolute; inset: 0; background: rgba(0,0,0,0.45); display: flex; align-items: center; justify-content: center; z-index: 100; }
 .dialog { background: var(--bg-2); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; width: 560px; max-height: 85vh; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
