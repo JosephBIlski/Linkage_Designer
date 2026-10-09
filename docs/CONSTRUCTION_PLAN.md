@@ -296,18 +296,70 @@ inverse design and compliant hinges keep working unchanged.
   only the viewport colours the rendered (preview) pose. Tests:
   `tests/crease.test.ts`.
 
-### Phase 2: construction workflow (medium, planned)
+### Phase 2: construction workflow (medium, in progress)
 
-- Promote the Sketch tool to the "Panel" tool: snap every vertex, join all
-  coincident vertices, and show the live sector-angle sum at shared vertices
-  while drawing (red when the loop would not close).
-- The Polygon tool joins all snapped vertices, not only the first.
-- Pick disambiguation for coincident edges (cycle on repeated click; joint
-  glyphs never occlude edges).
-- 3-D mode places clicks on the sketch plane, not the view plane.
-- Crease-pattern validator: for each interior vertex, sector angles sum to
-  360° (developability) and the Kawasaki alternating sum is zero
-  (flat-foldability); reported in the Mechanism panel.
+**2a. Query pick: right-click cycles through everything under the pointer
+(Creo-style).** Picking today returns one feature per pointer position, so two
+coincident edges can never both be reached and the Joint tool picks the same
+link twice.
+- The viewport computes the full candidate list under the pointer (every
+  distinct feature hit by the exact ray and the sampled ring: editing points,
+  vertices, joints and creases, edges, axes, faces, then datum geometry),
+  ordered by pick priority and distance and de-duplicated. The ranking lives
+  in a DOM-free module so it can be unit-tested.
+- A right-click that is not a drag (pointer moved less than 4 px between down
+  and up; right-drag keeps orbiting) starts or advances a *query cycle* at
+  that position: the next candidate becomes the highlighted (hovered) feature
+  and the status bar reads "2 of 3 · edge V0–V1 of Polygon 2 · right-click:
+  next". Each further right-click at the same place advances and wraps.
+  Moving the pointer more than a few pixels, or Esc, ends the cycle and normal
+  hover resumes.
+- A left-click while a cycle is active uses the highlighted candidate as the
+  pick for the active tool (Select, Joint, Edit, Ground, Driver, Delete,
+  Mirror, Pattern all go through the same event), so any feature under the
+  pointer can be chosen.
+- The Joint tool additionally prefers, among candidates at the same spot, one
+  on a link other than the first feature's link, and says so in the status
+  bar; the cycle still allows overriding it.
+- Acceptance: two triangles with exactly coincident edges can be joined with
+  the Joint tool through the UI (headless test); right-drag still orbits; the
+  candidate ranking is unit-tested (priority order, de-duplication, datum
+  geometry last); the help text documents the right-click.
+
+**2b. Panel tool and polygon joins.**
+- The Sketch tool is presented as "Panel (sketch polygon)" and joins *every*
+  vertex that coincides with an existing vertex (snapped or typed) through
+  the existing auto-join, so shared edges become creases.
+- While sketching, each vertex of the sketch that lies on an existing vertex
+  shows an overlay label with the running sector-angle sum at that vertex:
+  the interior angles of the existing panels plus the angle the new panel
+  adds there (its two adjacent sketch edges; the open edge follows the
+  cursor). The label turns red when the sum exceeds 360°, or when the new
+  panel closes the ring of panels around the vertex and the sum is not 360°,
+  and green when it closes the ring at 360°.
+- The Polygon tool joins all vertices of the new polygon that coincide with
+  existing vertices (not only the first), through the same auto-join with
+  rollback.
+- Acceptance: four developable triangles drawn with the Panel tool by
+  snapping onto existing vertices end with four creases, zero violation and
+  the hint to Fold; the sector label at the centre reads 360° in green on the
+  closing panel; four regular triangles show a red label at the centre on the
+  fourth panel and the join is refused with the sector message.
+
+**2c. 3-D placement on the sketch plane.** With "Place on sketch plane (2-D)"
+off, free clicks are placed where the pointer ray meets the active sketch
+plane (the view plane is used only when the ray grazes the sketch plane),
+so geometry in 3-D mode is still built on a predictable plane. Typed
+coordinates and snapped points are unchanged.
+
+**2d. Crease-pattern validator.** For every interior vertex (a merged vertex
+group whose panels form a closed ring of creases) the Mechanism panel reports
+developability (sector angles sum to 360°), the Kawasaki condition
+(alternating sum of the sector angles is zero, flat-foldability) and, when
+mountain/valley classes are assigned, the Maekawa condition (|M − V| = 2),
+each as pass or fail with the measured numbers. The checks live in a pure
+core module with unit tests on the developable, X and regular-triangle
+vertices.
 
 ### Phase 3: crease-pattern-first (large, planned)
 
