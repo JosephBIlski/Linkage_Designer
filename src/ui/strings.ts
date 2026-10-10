@@ -4,9 +4,13 @@
  */
 import type { Diagnosis } from '../core/feasibility';
 import type { FoldReason } from '../core/fold';
+import type { VertexReport } from '../core/validate';
 
 /** Compact number for status messages: up to four significant digits, no trailing zeros ("2", "2.1", "0.6878"). */
 const num = (x: number): string => String(Number(x.toPrecision(4)));
+
+/** Angle with one decimal for the crease-pattern lines ("360.0°"); the magnitude, so a −0.0° never appears. */
+const deg1 = (x: number): string => `${Math.abs(x).toFixed(1)}°`;
 
 export const APP = {
   title: 'Linkage Designer',
@@ -83,6 +87,8 @@ export const TOOL_OPTIONS = {
   radius: 'Radius',
   height: 'Height',
   mode2d: 'Place on sketch plane (2-D)',
+  mode2dHelp:
+    'Ticked: the new link lies on the active sketch plane and is kept there (the 2-D constraint, shown in Properties as "Keep on sketch plane"). Unticked: clicks still land where the pointer ray meets the sketch plane, so the link is built on a predictable plane, but it is free to leave it; only when the plane is seen nearly edge-on is a click placed on the view plane through the previous point. Typed coordinates and snapped vertices are used as given.',
   planeMode: 'Plane definition',
   planeThree: 'Through 3 points',
   planeOffset: 'Offset from a plane',
@@ -255,6 +261,28 @@ export const SIM = {
       : `${n} vertices are flat: all of their creases are unfolded, a singular state in which a simulation would fold only two creases of each.`,
   fold: 'Fold (pre-fold flat vertex)',
   foldHelp: 'Drives one crease of a flat vertex to 160° and re-solves the panels so that every crease leaves the flat state (the generic folding branch). The sketch-plane constraints of the panels involved are removed; a model without a driver keeps the fold driver. Undo restores the flat vertex.',
+  // Crease-pattern validator (docs/CONSTRUCTION_PLAN.md, item 2d): one line per interior vertex in the Mechanism panel
+  creasePattern: 'Crease pattern',
+  creasePatternHelp:
+    'Checks of every interior vertex (a vertex whose panels close a ring of creases): developable when its sector angles sum to 360°; Kawasaki when their alternating sum is zero, which a vertex needs to fold flat (and an even number of creases); Maekawa, once every crease is folded, when mountains and valleys differ by two.',
+  checkPass: '✓',
+  checkFail: '✗',
+  // "D1 V0 · 4 panels · 360.0° developable ✓ · Kawasaki 0.0° ✓ · M/V 3:1 ✓"
+  vertexReport: (r: VertexReport): string => {
+    const mark = (ok: boolean): string => (ok ? SIM.checkPass : SIM.checkFail);
+    const kawasaki = Number.isNaN(r.kawasakiDeg) ? `Kawasaki ${SIM.checkFail} odd degree` : `Kawasaki ${deg1(r.kawasakiDeg)} ${mark(r.flatFoldable)}`;
+    const mv = r.maekawa === null ? 'M/V not assigned' : `M/V ${r.mountains}:${r.valleys} ${mark(r.maekawa)}`;
+    return `${r.vertexName} · ${r.panelCount} panels · ${deg1(r.sumDeg)} developable ${mark(r.developable)} · ${kawasaki} · ${mv}`;
+  },
+  // hint under a failing line, naming every failed check with its measured value
+  vertexFails: (r: VertexReport): string => {
+    const reasons: string[] = [];
+    if (!r.developable) reasons.push(`its sector angles sum to ${deg1(r.sumDeg)}, not 360°, so the panels cannot lie flat`);
+    if (Number.isNaN(r.kawasakiDeg)) reasons.push(`${r.panelCount} creases meet there, an odd number, so it cannot fold flat`);
+    else if (!r.flatFoldable) reasons.push(`the alternating sum of its sector angles is ${deg1(r.kawasakiDeg)}, not 0°, so it cannot fold flat (Kawasaki)`);
+    if (r.maekawa === false) reasons.push(`it has ${r.mountains} mountain and ${r.valleys} valley creases; a flat-folded vertex needs them to differ by two (Maekawa)`);
+    return `${r.vertexName}: ${reasons.join('; ')}.`;
+  },
 };
 
 export const PREVIEW = {

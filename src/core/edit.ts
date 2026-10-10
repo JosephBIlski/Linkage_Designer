@@ -355,17 +355,43 @@ export function rayPlane(o: Vec3, d: Vec3, origin: Vec3, normal: Vec3): Vec3 | n
   return add(o, scale(dd, t));
 }
 
+/** Rays whose direction makes an angle of less than acos(0.15) ≈ 81° with a plane are placed on it; flatter ones are "grazing". */
+export const PLACEMENT_MIN_COS = 0.15;
+
+/**
+ * Where a pointer ray places a point on a plane: the ray–plane hit when the ray
+ * meets the plane at a reasonable angle (|cos| ≥ minCos) in front of its origin,
+ * otherwise `fallback`. A grazing ray would fling the point far along the plane
+ * (a pixel of pointer movement becomes a large sweep across it), and a ray that
+ * misses the plane (parallel, or the hit behind the camera) has no point on it
+ * at all; the caller supplies the position to use then, e.g. the view-plane hit
+ * through the previous point (3-D placement, plan 2c) or the orthogonal
+ * projection (free sketch vertices on a fitted plane). A hit at the ray's own
+ * origin counts as a miss too: in the Front or Right view the camera sits on
+ * the TOP plane, so every off-centre ray meets it at depth 0, at the camera,
+ * which is not where the user points; "at the camera" is a depth below a
+ * thousandth of the fallback's depth, the distance the user is working at.
+ */
+export function placementOnPlane(ray: { o: Vec3; d: Vec3 }, origin: Vec3, normal: Vec3, fallback: Vec3, minCos = PLACEMENT_MIN_COS): Vec3 {
+  const d = normalize(ray.d);
+  const grazing = Math.abs(dot(d, normalize(normal))) < minCos;
+  if (grazing) return fallback;
+  const hit = rayPlane(ray.o, d, origin, normal);
+  if (!hit) return fallback;
+  const depth = dot(sub(hit, ray.o), d);
+  const working = Math.abs(dot(sub(fallback, ray.o), d));
+  return depth > 1e-3 * working ? hit : fallback;
+}
+
 /**
  * Place a free sketch vertex on a fitted plane: along its pointer ray when the
  * ray meets the plane at a reasonable angle in front of the camera, otherwise
  * by orthogonal projection (grazing rays would fling the vertex far away).
  */
-export function placeOnFittedPlane(p: Vec3, ray: { o: Vec3; d: Vec3 } | undefined, origin: Vec3, normal: Vec3, minCos = 0.15): Vec3 {
+export function placeOnFittedPlane(p: Vec3, ray: { o: Vec3; d: Vec3 } | undefined, origin: Vec3, normal: Vec3, minCos = PLACEMENT_MIN_COS): Vec3 {
   const proj = projectToPlane(p, origin, normal);
   if (!ray) return proj;
-  const grazing = Math.abs(dot(normalize(ray.d), normalize(normal))) < minCos;
-  if (grazing) return proj;
-  return rayPlane(ray.o, ray.d, origin, normal) ?? proj;
+  return placementOnPlane(ray, origin, normal, proj, minCos);
 }
 
 export { cross };

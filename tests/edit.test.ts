@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { addBar, addJoint, addPolygon, addPolygonFromPoints, bodyPlaneJoint, createModel, serializeModel, setGround } from '../src/core/model';
-import { autoJoinCoincident, fitSketchPlane, moveVertex, placeOnFittedPlane, projectToPlane, rayPlane } from '../src/core/edit';
+import { PLACEMENT_MIN_COS, autoJoinCoincident, fitSketchPlane, moveVertex, placeOnFittedPlane, placementOnPlane, projectToPlane, rayPlane } from '../src/core/edit';
 import { addConstructionAxis, addConstructionPoint } from '../src/core/model';
 import { commitSketch, solveSketch } from '../src/core/kinematics';
 import { computeMobility, currentViolation } from '../src/core/kinematics';
@@ -280,6 +280,67 @@ describe('re-verification follow-ups', () => {
     // hits behind the ray origin are rejected
     expect(rayPlane([0, 0, 1], [0, 0, 1], origin, normal)).toBeNull();
     expect(rayPlane([0, 0, 1], [0, 0, -1], origin, normal)).toEqual([0, 0, 0]);
+  });
+});
+
+describe('3-D placement on the sketch plane (plan 2c: placementOnPlane)', () => {
+  const origin: Vec3 = [0, 0, 0];
+  const normal: Vec3 = [0, 0, 1];
+  const fallback: Vec3 = [5, 5, 5];
+
+  it('places a ray that meets the plane squarely at the hit, not at the fallback', () => {
+    // the default isometric-ish view: direction (1, -1, 0.9) reversed, 15 units from the origin
+    const o: Vec3 = [7, -7, 6.3];
+    const d: Vec3 = [-0.4, 0.6, -0.9]; // not normalised: the helper normalises
+    const hit = placementOnPlane({ o, d }, origin, normal, fallback);
+    expect(hit[2]).toBeCloseTo(0, 12);
+    expect(dist(hit, [4.2, -2.8, 0])).toBeLessThan(1e-9); // o + 7·d
+    // an off-origin plane with an unnormalised normal
+    const hit2 = placementOnPlane({ o: [0, 0, 5], d: [1, 0, -1] }, [9, 9, 2], [0, 0, 4], fallback);
+    expect(dist(hit2, [3, 0, 2])).toBeLessThan(1e-9);
+  });
+
+  it('returns the fallback for a grazing ray (|cos| below 0.15) and places at exactly the threshold', () => {
+    const grazing = { o: [0, 0, 1] as Vec3, d: [1, 0, -0.1] as Vec3 }; // cos ≈ 0.0995
+    expect(placementOnPlane(grazing, origin, normal, fallback)).toEqual(fallback);
+    const c = PLACEMENT_MIN_COS;
+    const atThreshold = { o: [0, 0, 1] as Vec3, d: [Math.sqrt(1 - c * c), 0, -c] as Vec3 }; // |cos| = minCos: not grazing
+    expect(placementOnPlane(atThreshold, origin, normal, fallback)[2]).toBeCloseTo(0, 12);
+    // the threshold is a parameter
+    expect(placementOnPlane(atThreshold, origin, normal, fallback, 0.2)).toEqual(fallback);
+  });
+
+  it('returns the fallback for a ray parallel to the plane', () => {
+    expect(placementOnPlane({ o: [0, 0, 1], d: [1, 0, 0] }, origin, normal, fallback)).toEqual(fallback);
+    // the TOP plane seen exactly edge-on from the Front view (orthographic rays), its origin on the plane
+    expect(placementOnPlane({ o: [0, -15, 0], d: [0, 1, 0] }, origin, normal, fallback)).toEqual(fallback);
+  });
+
+  it('returns the fallback when the plane lies behind the ray origin', () => {
+    expect(placementOnPlane({ o: [0, 0, 1], d: [0, 0, 1] }, origin, normal, fallback)).toEqual(fallback); // straight up: cos = 1
+    expect(placementOnPlane({ o: [0, 0, 1], d: [1, 0, 0.5] }, origin, normal, fallback)).toEqual(fallback);
+  });
+
+  it('treats a hit at the camera as a miss (Front view: the camera sits on the TOP plane, off-centre rays are not grazing)', () => {
+    const view: Vec3 = [0, 0, 0]; // the view plane through the origin, 15 units ahead
+    const up = { o: [0, -15, 0] as Vec3, d: [0, 1, 0.3] as Vec3 }; // cos ≈ 0.29 with the TOP normal: not grazing, meets the plane at t = 0
+    expect(rayPlane(up.o, up.d, origin, normal)).toEqual(up.o);
+    expect(placementOnPlane(up, origin, normal, view)).toEqual(view);
+    // a camera a hair below the plane: the hit is a few millimetres in front of it, still "at the camera"
+    expect(placementOnPlane({ o: [0, -15, -0.001], d: [0, 1, 0.3] }, origin, normal, view)).toEqual(view);
+    // a low view from height 1 clicking below the horizon hits the plane 3.5 units ahead: a real placement
+    const low = placementOnPlane({ o: [0, -15, 1], d: [0, 1, -0.3] }, origin, normal, view);
+    expect(low[2]).toBeCloseTo(0, 12);
+    expect(low[1]).toBeCloseTo(-15 + 1 / 0.3, 9);
+  });
+
+  it('keeps placeOnFittedPlane as the same rule with the orthogonal projection as the fallback', () => {
+    const p: Vec3 = [0.3, 0.2, 1];
+    const grazing = { o: [0, 0, 1] as Vec3, d: [1, 0, -0.01] as Vec3 };
+    expect(placeOnFittedPlane(p, grazing, origin, normal)).toEqual(placementOnPlane(grazing, origin, normal, projectToPlane(p, origin, normal)));
+    const good = { o: [0, 0, 1] as Vec3, d: [1, 0, -1] as Vec3 };
+    expect(placeOnFittedPlane([9, 9, 9], good, origin, normal)).toEqual(placementOnPlane(good, origin, normal, [9, 9, 0]));
+    expect(placeOnFittedPlane(p, undefined, origin, normal)).toEqual([0.3, 0.2, 0]);
   });
 });
 

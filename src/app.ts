@@ -25,6 +25,7 @@ import { EXAMPLE_BUILDERS } from './core/examples';
 import { addAngleDriver, candidateAngleDrivers, cloneModel, createModel, creasesLockedByPlane, parseModel, serializeModel, groundLink } from './core/model';
 import { solidifyRestGeometry } from './core/feasibility';
 import { findCreaseLoops, type CreaseLoop } from './core/fold';
+import { validateCreasePattern, type VertexReport } from './core/validate';
 import { analyseDesign, applyDesign, solveDesign, symmetricEigen3, type DesignAnalysis, type DesignResult, type PointDesignSpace } from './core/synthesis';
 import { normalize, sub } from './core/geometry';
 import type { ID, JointType, Model, Target, Vec3 } from './core/types';
@@ -66,6 +67,8 @@ export interface SimState {
   lockedCreaseIds: ID[];
   /** Crease loops around shared vertices (findCreaseLoops); a flat one offers the Fold command in the Mechanism panel. */
   creaseLoops: CreaseLoop[];
+  /** Crease-pattern checks of every interior vertex (validateCreasePattern); the Mechanism panel lists them. */
+  vertexReports: VertexReport[];
   assembled: boolean;
   showDesignSpace: boolean;
   showEditPoints: boolean;
@@ -102,7 +105,7 @@ export class App {
   notice = '';
   viewport: Viewport;
   renderer: ModelRenderer;
-  sim: SimState = { activeDriver: 0, sweep: null, surface: null, poseValues: [], poses: [], design: null, analysis: null, mobility: null, violation: 0, lockedCreaseIds: [], creaseLoops: [], assembled: true, showDesignSpace: true, showEditPoints: true, showPaths: true, message: '' };
+  sim: SimState = { activeDriver: 0, sweep: null, surface: null, poseValues: [], poses: [], design: null, analysis: null, mobility: null, violation: 0, lockedCreaseIds: [], creaseLoops: [], vertexReports: [], assembled: true, showDesignSpace: true, showEditPoints: true, showPaths: true, message: '' };
   preview: PreviewState = { value: 0, playing: false, speed: 60, direction: 1, positions: null, trace: true };
   fileName = '';
 
@@ -384,11 +387,13 @@ export class App {
     sim.lockedCreaseIds = creasesLockedByPlane(m);
     try {
       sim.creaseLoops = findCreaseLoops(m);
+      sim.vertexReports = validateCreasePattern(m);
       sim.mobility = Object.keys(m.links).length ? computeMobility(m) : null;
       sim.violation = Object.keys(m.links).length ? currentViolation(m) : 0;
     } catch (e) {
       console.error(e);
       sim.creaseLoops = [];
+      sim.vertexReports = [];
       sim.mobility = null;
     }
     const needMotion = this.mode !== 'construction' || m.settings.displayPointIds.length > 0;

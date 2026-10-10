@@ -31,7 +31,7 @@ import {
   sketchNormal,
 } from '../core/model';
 import type { ConstructionRef, Feature, ID, JointType, Target, Vec3 } from '../core/types';
-import { autoJoinCoincident, coincidentVertex, fitSketchPlane, moveVertex, placeOnFittedPlane, projectToPlane } from '../core/edit';
+import { autoJoinCoincident, coincidentVertex, fitSketchPlane, moveVertex, placeOnFittedPlane, placementOnPlane, projectToPlane } from '../core/edit';
 import { sectorPreview, sectorStatus, type SectorStatus } from '../core/sector';
 import { duplicateLink, hasCollinearTriple, linearArray, mirrorAcrossPlane, polarArray } from '../core/patterns';
 import { addPolygonFromPoints } from '../core/model';
@@ -165,7 +165,11 @@ export class ToolManager {
     return [Math.round(p[0] / step) * step, Math.round(p[1] / step) * step, Math.round(p[2] / step) * step];
   }
 
-  /** Where would a click at this pointer position place a point? */
+  /**
+   * Where would a click at this pointer position place a point? A hovered vertex or datum point snaps; otherwise the
+   * pointer ray is cast onto the active sketch plane (always for the datum and Panel tools and in 2-D mode; in 3-D mode
+   * unless the ray grazes or misses the plane, plan 2c) and the view plane through the previous point is the fallback.
+   */
   private place(ev: { clientX: number; clientY: number; pick: PickResult | null }, allowSnap = true): PlacedPoint | null {
     const m = this.app.model;
     if (allowSnap && ev.pick) {
@@ -178,11 +182,16 @@ export class ToolManager {
     const vp = this.app.viewport;
     let pos: Vec3 | null = null;
     const last = this.points[this.points.length - 1]?.pos;
-    if (this.app.toolOptions.mode2d || this.app.tool === 'cpoint' || this.app.tool === 'caxis' || this.app.tool === 'cplane' || this.app.tool === 'sketch') {
-      const pl = this.sketchPlane();
-      pos = vp.projectToPlane(ev.clientX, ev.clientY, pl.o, pl.n);
+    const pl = this.sketchPlane();
+    const ray = vp.pointerRay(ev.clientX, ev.clientY);
+    const onSketchPlane = this.app.toolOptions.mode2d || this.app.tool === 'cpoint' || this.app.tool === 'caxis' || this.app.tool === 'cplane' || this.app.tool === 'sketch';
+    if (onSketchPlane) pos = vp.projectToPlane(ev.clientX, ev.clientY, pl.o, pl.n);
+    if (!pos) {
+      const view = vp.projectToViewPlane(ev.clientX, ev.clientY, last ?? [0, 0, 0]);
+      // 3-D mode (plan 2c): a free click still lands where the pointer ray meets the sketch plane, so geometry is built
+      // on a predictable plane; the view plane through the previous point serves only when the ray grazes or misses it
+      pos = onSketchPlane || !view ? view : placementOnPlane(ray, pl.o, pl.n, view);
     }
-    if (!pos) pos = vp.projectToViewPlane(ev.clientX, ev.clientY, last ?? [0, 0, 0]);
     if (!pos) return null;
     pos = this.gridSnap(pos);
     if (this.pendingLength !== null && last) {
@@ -190,7 +199,7 @@ export class ToolManager {
       const L = len(d);
       if (L > 1e-9) pos = add(last, scale(d, this.pendingLength / L));
     }
-    return { pos, ray: vp.pointerRay(ev.clientX, ev.clientY) };
+    return { pos, ray };
   }
 
   /**

@@ -20,7 +20,7 @@ import { add, cross, dot, len, newellNormal, normalize, scale, sub } from './geo
 import { jointDihedralDeg } from './jointMeasure';
 import { applyPositions, computeMobility, feasibilityTolerance, isAccepted, measureDriver, positionsFromModel, solveForward, syncDriverValues, type Positions } from './kinematics';
 import { addFoldDriver, bodyPlaneJoint, jointAxisPoints, linkFaces, offAxisPoint, removeJoint, serializeModel, sketchNormal } from './model';
-import { restore } from './feasibility';
+import { mergedPointGroups, restore } from './feasibility';
 import type { Driver, FeatureKind, ID, Joint, Model, Vec3 } from './types';
 import { isConstructionRef } from './types';
 
@@ -213,29 +213,17 @@ export interface CreaseLoop {
 }
 
 /**
- * Crease loops of the model: for every merged vertex (union-find over the
- * point pairs of all joints) the creases ending there are collected, and they
+ * Crease loops of the model: for every merged vertex (mergedPointGroups, the
+ * union-find over the point pairs of all joints) the creases ending there are
+ * collected, and they
  * form a loop when there are at least three of them and their panels form one
  * closed cycle around the vertex (every panel carries exactly two of the
  * creases and the cycle is connected). An open fan of panels is not a loop:
  * it folds freely without a pre-fold. The Miura example is one non-flat loop.
  */
 export function findCreaseLoops(m: Model): CreaseLoop[] {
-  const parent = new Map<ID, ID>();
-  const find = (x: ID): ID => {
-    let r = x;
-    while (parent.has(r) && parent.get(r) !== r) r = parent.get(r)!;
-    return r;
-  };
-  const union = (x: ID, y: ID): void => {
-    if (!parent.has(x)) parent.set(x, x);
-    if (!parent.has(y)) parent.set(y, y);
-    const rx = find(x);
-    const ry = find(y);
-    if (rx !== ry) parent.set(ry, rx);
-  };
-  for (const j of Object.values(m.joints)) for (const [x, y] of j.pairs ?? []) if (m.points[x] && m.points[y]) union(x, y);
-  const rootOf = (id: ID): ID => (parent.has(id) ? find(id) : id);
+  const groups = mergedPointGroups(m);
+  const rootOf = groups.root;
 
   const creases = Object.values(m.joints).filter((j) => isCrease(m, j));
   const byVertex = new Map<ID, Joint[]>();
@@ -268,7 +256,7 @@ export function findCreaseLoops(m: Model): CreaseLoop[] {
       link = linksOf(next)[0] === link ? linksOf(next)[1] : linksOf(next)[0];
     }
     if (order.length !== js.length) continue; // more than one cycle shares the vertex
-    const members = [...parent.keys()].filter((id) => find(id) === root && m.points[id]);
+    const members = (groups.group(root) ?? []).filter((id) => m.points[id]);
     const vertexPointId = members.find((id) => m.links[m.points[id].linkId]?.ground) ?? members[0] ?? js[0].a.pointIds[0];
     const dihedrals = order.map((j) => creaseDihedralDeg(m, j));
     const flat = dihedrals.every((d) => d !== null && isFlatDihedral(d));

@@ -205,7 +205,7 @@ const freshTopView = async (box) => { await page.evaluate(() => window.linkageDe
 const edgeMid = (i, p, q) => page.evaluate(({ i, p, q }) => { const { app } = window.linkageDesigner; const m = app.model; const l = Object.values(m.links)[i]; const near = (x) => l.pointIds.reduce((b, id) => (Math.hypot(...m.points[id].pos.map((v, k) => v - x[k])) < Math.hypot(...m.points[b].pos.map((v, k) => v - x[k])) ? id : b), l.pointIds[0]); const a = m.points[near(p)].pos, b = m.points[near(q)].pos; return [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2]; }, { i, p, q });
 /** the Panel tool's sector-angle labels currently shown in the viewport (text and CSS class, plan 2b) */
 const sectorLabels = () => page.evaluate(() => [...document.querySelectorAll('.viewport-labels [class*="label--sector"]')].map((e) => ({ text: e.textContent, cls: e.className })));
-const workflowState = () => page.evaluate(() => { const { app } = window.linkageDesigner; const m = app.model; return { creases: Object.values(m.joints).filter((j) => j.type === 'revolute' && j.a.kind === 'edge' && j.pairs?.length === 2).length, joints: Object.values(m.joints).filter((j) => j.a.kind !== 'body').length, bodyJoints: Object.values(m.joints).filter((j) => j.a.kind === 'body').length, drivers: m.drivers.length, dof: app.sim.mobility?.dof, violation: app.sim.violation, undo: app.undoStack.length, status: app.status, chip: document.querySelector('.chip')?.textContent ?? '', hints: [...document.querySelectorAll('.mode-panel .hint.warn')].map((e) => e.textContent), foldBtn: !!document.querySelector('button[title^="Drives one crease"]'), creaseLabels: [...document.querySelectorAll('.tree-item__label')].map((e) => e.textContent).filter((t) => /^Crease [MV]? ?\d+°/.test(t)), json: JSON.stringify(m) }; });
+const workflowState = () => page.evaluate(() => { const { app } = window.linkageDesigner; const m = app.model; return { creases: Object.values(m.joints).filter((j) => j.type === 'revolute' && j.a.kind === 'edge' && j.pairs?.length === 2).length, joints: Object.values(m.joints).filter((j) => j.a.kind !== 'body').length, bodyJoints: Object.values(m.joints).filter((j) => j.a.kind === 'body').length, drivers: m.drivers.length, dof: app.sim.mobility?.dof, violation: app.sim.violation, undo: app.undoStack.length, status: app.status, chip: document.querySelector('.chip')?.textContent ?? '', hints: [...document.querySelectorAll('.mode-panel .hint.warn')].map((e) => e.textContent), foldBtn: !!document.querySelector('button[title^="Drives one crease"]'), creasePattern: document.querySelector('.mode-panel .crease-pattern')?.textContent ?? '', creaseLabels: [...document.querySelectorAll('.tree-item__label')].map((e) => e.textContent).filter((t) => /^Crease [MV]? ?\d+°/.test(t)), json: JSON.stringify(m) }; });
 
 // 18. The reported workflow: four regular triangles (Polygon tool, 3 sides, typed coordinates, each placed 1.2 units
 //     outside its final place) joined edge to edge with the Joint tool. Joints 1–3 are exact creases that pull the
@@ -382,16 +382,20 @@ await clickWorld([1, 0.5, 0]);
 await waitStatus(/Ground/);
 await page.waitForTimeout(300);
 const flat19 = await workflowState();
-const okFlat19 = flat19.creases === 4 && flat19.bodyJoints === 4 && flat19.dof === 0 && flat19.hints.some((h) => /cannot fold/.test(h)) && flat19.hints.some((h) => /flat/.test(h)) && flat19.foldBtn && flat19.creaseLabels.every((t) => /180°/.test(t)) && !!label19;
-console.log('developable vertex sketched flat', JSON.stringify({ creases: flat19.creases, bodyJoints: flat19.bodyJoints, dof: flat19.dof, hints: flat19.hints.length, foldBtn: flat19.foldBtn, labels: flat19.creaseLabels, sectorLabel: label19 }), okFlat19 ? 'OK' : 'FAIL');
+// Crease-pattern validator (plan 2d): the Mechanism panel lists the interior vertex as developable (360.0° ✓) with
+// Kawasaki 0.0° ✓ and, while flat, no mountain / valley assignment
+const okPattern19 = /Crease pattern/.test(flat19.creasePattern) && /4 panels/.test(flat19.creasePattern) && /360\.0° developable ✓/.test(flat19.creasePattern) && /Kawasaki 0\.0° ✓/.test(flat19.creasePattern) && /M\/V not assigned/.test(flat19.creasePattern) && !/✗/.test(flat19.creasePattern);
+const okFlat19 = flat19.creases === 4 && flat19.bodyJoints === 4 && flat19.dof === 0 && flat19.hints.some((h) => /cannot fold/.test(h)) && flat19.hints.some((h) => /flat/.test(h)) && flat19.foldBtn && flat19.creaseLabels.every((t) => /180°/.test(t)) && !!label19 && okPattern19;
+console.log('developable vertex sketched flat', JSON.stringify({ creases: flat19.creases, bodyJoints: flat19.bodyJoints, dof: flat19.dof, hints: flat19.hints.length, foldBtn: flat19.foldBtn, labels: flat19.creaseLabels, sectorLabel: label19, creasePattern: flat19.creasePattern }), okFlat19 ? 'OK' : 'FAIL');
 await page.click('button[title^="Drives one crease"]');
 const folded19 = await waitStatus(/pre-folded|Nothing to fold|already folded|No folded state/);
 await page.waitForTimeout(300);
 const post19 = await workflowState();
 const angles19 = post19.creaseLabels.map((t) => t.match(/Crease ([MV]) (\d+)°/)).map((x) => x && { mv: x[1], deg: +x[2] });
 const pattern19 = angles19.length === 4 && angles19.every(Boolean) && angles19.map((a) => a.deg).sort((a, b) => a - b).join() === '160,160,170,170' && [1, 3].includes(angles19.filter((a) => a.mv === 'M').length);
-const okFold19 = /pre-folded/.test(folded19) && post19.dof === 1 && post19.bodyJoints === 0 && post19.drivers === 1 && post19.undo === flat19.undo + 1 && pattern19 && !post19.foldBtn;
-console.log('fold', JSON.stringify({ status: folded19.slice(0, 80), dof: post19.dof, bodyJoints: post19.bodyJoints, drivers: post19.drivers, labels: post19.creaseLabels }), okFold19 ? 'OK' : 'FAIL');
+// after the fold the validator reports the Maekawa 3:1 split as a pass
+const okFold19 = /pre-folded/.test(folded19) && post19.dof === 1 && post19.bodyJoints === 0 && post19.drivers === 1 && post19.undo === flat19.undo + 1 && pattern19 && !post19.foldBtn && /M\/V [13]:[13] ✓/.test(post19.creasePattern) && !/✗/.test(post19.creasePattern);
+console.log('fold', JSON.stringify({ status: folded19.slice(0, 80), dof: post19.dof, bodyJoints: post19.bodyJoints, drivers: post19.drivers, labels: post19.creaseLabels, creasePattern: post19.creasePattern }), okFold19 ? 'OK' : 'FAIL');
 await page.click('button[title^="Select —"]');
 const creaseMid19 = await page.evaluate(() => { const { app } = window.linkageDesigner; const m = app.model; const j = Object.values(m.joints).find((x) => x.type === 'revolute' && x.a.kind === 'edge'); const [a, b] = j.a.pointIds.map((id) => m.points[id].pos); return [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2]; });
 await clickWorld(creaseMid19);
@@ -414,14 +418,15 @@ await page.waitForTimeout(300);
 //     on the coincident edge of Polygon 2 ("2 of N"); a left-click then uses it and the two edges become one crease.
 //     A 60 px right-drag must still orbit the camera and must not start a cycle.
 await freshTopView([[-1, -4.5, 0], [3, 3, 0]]);
+// Enter inside the coordinate box only submits a coordinate (its keydown handler stops propagation), so the box is blurred
+// before the Enter that closes the panel reaches the document
+const closeSketch = async () => { await page.evaluate(() => document.activeElement?.blur()); await page.keyboard.press('Enter'); await page.waitForTimeout(300); };
 await page.click('button[title^="Panel"]');
 for (const c of ['0.5,0.5', '2.5,0.5', '1.5,2']) await typeCoord(c);
-await page.keyboard.press('Enter');
-await page.waitForTimeout(300);
+await closeSketch();
 // same base edge 3 units lower, apex below it: after the +3 translation the triangles share (0.5,0.5)-(2.5,0.5) exactly
 for (const c of ['0.5,-2.5', '2.5,-2.5', '1.5,-4']) await typeCoord(c);
-await page.keyboard.press('Enter');
-await page.waitForTimeout(300);
+await closeSketch();
 await page.evaluate(() => { const { app } = window.linkageDesigner; const m = app.model; const l = Object.values(m.links)[1]; app.beginChange(); for (const id of [...l.pointIds, ...l.helperIds]) m.points[id].pos[1] += 3; app.endChange(); });
 await page.waitForTimeout(300);
 await page.click('button[title^="Select —"]');
@@ -442,7 +447,11 @@ const post20 = await workflowState();
 const ok20 = /Polygon 1/.test(first20) && /Polygon 2/.test(cycled20) && /right-click: next/.test(cycled20) && cycleHover20.active && cycleHover20.hover?.type === 'edge' && cycleHover20.hover?.link === 'Polygon 2' && /Joint created/.test(joined20) && pre20.creases === 0 && post20.creases === 1 && post20.joints === 1 && !post20.status.startsWith('2 of');
 console.log('query pick: right-click cycles to the coincident edge of the other panel', JSON.stringify({ first: first20.slice(0, 40), cycled: cycled20.slice(0, 70), hover: cycleHover20, joined: joined20.slice(0, 30), creases: [pre20.creases, post20.creases] }), ok20 ? 'OK' : 'FAIL');
 await page.screenshot({ path: `${OUT}/13-query-pick.png` });
-// right-drag of 60 px orbits (OrbitControls on the same element) and is not a query click
+// right-drag of 60 px orbits (OrbitControls on the same element) and is not a query click. In the top view the camera
+// sits at the pole of OrbitControls' spherical frame (its up quaternion is fixed at construction), where a rightward /
+// downward drag does not move it, so the drag is made in the iso view.
+await page.evaluate(() => { const { app } = window.linkageDesigner; app.viewport.setView('iso'); app.viewport.fit([[-1, -4.5, 0], [3, 3, 0]]); });
+await page.waitForTimeout(300);
 const camBefore20 = await page.evaluate(() => window.linkageDesigner.app.viewport.camera.position.toArray());
 const o20 = await W([1.5, -1, 0]);
 await page.mouse.move(o20.x, o20.y);
@@ -453,6 +462,27 @@ await page.waitForTimeout(300);
 const drag20 = await page.evaluate(() => { const { app, tools } = window.linkageDesigner; return { cam: app.viewport.camera.position.toArray(), status: app.status, cycling: tools.queryActive }; });
 const orbited20 = Math.hypot(...[0, 1, 2].map((i) => drag20.cam[i] - camBefore20[i]));
 console.log('right-drag still orbits, no query cycle', JSON.stringify({ cameraMoved: +orbited20.toFixed(3), cycling: drag20.cycling, status: drag20.status.slice(0, 40) }), orbited20 > 1e-3 && !drag20.cycling && !/^\d+ of \d+ · /.test(drag20.status) ? 'OK' : 'FAIL');
+// 21. 3-D placement (plan 2c): with "Place on sketch plane (2-D)" unticked, a bar clicked at two screen points in the
+//     default (isometric-ish) view still gets both ends on the sketch plane TOP (z = 0), under the clicked points, but
+//     carries no 2-D constraint (previously the ends landed on the view plane through the origin / previous point,
+//     off the sketch plane). The option is ticked again afterwards.
+const waitFor = async (fn, ms = 8000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { const v = await page.evaluate(fn); if (v) return v; await page.waitForTimeout(50); } return null; };
+await page.evaluate(() => window.linkageDesigner.app.newModel());
+await page.waitForTimeout(400);
+await page.click('button[title^="Link —"]');
+const mode2d21 = '.tool-options label.prop-row:has-text("Place on sketch plane") input';
+await page.uncheck(mode2d21);
+const ends21 = [[0.8, 0.6, 0], [2.6, 1.4, 0]];
+const view21 = await page.evaluate(() => { const { app } = window.linkageDesigner; return { dir: app.viewport.viewDirection(), mode2d: app.toolOptions.mode2d }; });
+for (const p of ends21) await clickWorld(p);
+const bar21 = await waitFor(() => { const { app } = window.linkageDesigner; const m = app.model; const l = Object.values(m.links).find((x) => x.kind === 'bar'); return l ? { ends: l.pointIds.map((id) => [...m.points[id].pos]), bodyJoints: Object.values(m.joints).filter((j) => j.a.kind === 'body').length, links: Object.keys(m.links).length } : null; });
+await page.check(mode2d21);
+const restored21 = await page.evaluate(() => window.linkageDesigner.app.toolOptions.mode2d);
+const onPlane21 = !!bar21 && bar21.ends.every((e) => Math.abs(e[2]) < 1e-9);
+const underPointer21 = !!bar21 && bar21.ends.every((e, i) => Math.hypot(e[0] - ends21[i][0], e[1] - ends21[i][1]) < 0.1);
+const ok21 = !view21.mode2d && Math.abs(view21.dir[2]) > 0.15 && onPlane21 && underPointer21 && bar21.bodyJoints === 0 && bar21.links === 1 && restored21;
+console.log('3-D mode: a clicked bar lies on the sketch plane without the 2-D constraint', JSON.stringify({ mode2d: view21.mode2d, viewDirZ: +view21.dir[2].toFixed(3), ends: bar21?.ends.map((e) => e.map((v) => +v.toFixed(4))), onPlane: onPlane21, underPointer: underPointer21, bodyJoints: bar21?.bodyJoints, restored: restored21 }), ok21 ? 'OK' : 'FAIL');
+await page.screenshot({ path: `${OUT}/14-3d-placement.png` });
 console.log('errors:', errors.length ? errors.join('\n') : 'none');
 await browser.close();
 server.kill();

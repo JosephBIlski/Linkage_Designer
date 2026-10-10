@@ -481,7 +481,11 @@ export class UI {
     if (app.mode !== 'construction') return;
     box.appendChild(el('h3', 'panel__title', TOOLS[t].label));
     box.appendChild(el('p', 'hint', TOOLS[t].hint));
-    if (t === 'bar' || t === 'polygon') box.appendChild(row(TOOL_OPTIONS.mode2d, checkbox(o.mode2d, (v) => (o.mode2d = v))));
+    if (t === 'bar' || t === 'polygon') {
+      const planeRow = row(TOOL_OPTIONS.mode2d, checkbox(o.mode2d, (v) => (o.mode2d = v)));
+      planeRow.title = TOOL_OPTIONS.mode2dHelp;
+      box.appendChild(planeRow);
+    }
     if (t === 'polygon' || t === 'prism') box.appendChild(row(TOOL_OPTIONS.sides, numberInput(o.sides, (v) => (o.sides = Math.max(3, Math.round(v))), { step: 1, min: 3 })));
     if (t === 'prism') box.appendChild(row(TOOL_OPTIONS.height, numberInput(o.height, (v) => (o.height = v), { step: 0.1 })));
     if (t === 'cylinder') box.appendChild(row(TOOL_OPTIONS.radius, numberInput(o.radius, (v) => (o.radius = v), { step: 0.1, min: 0.01 })));
@@ -539,6 +543,18 @@ export class UI {
       const actions = el('div', 'actions');
       actions.appendChild(button(SIM.fold, () => this.foldFlatVertex(), { title: SIM.foldHelp }));
       summary.appendChild(actions);
+    }
+    // crease-pattern validator (plan 2d): cached by recomputeKinematics, one line per interior vertex
+    if (sim.vertexReports.length) {
+      const block = el('div', 'crease-pattern');
+      block.title = SIM.creasePatternHelp;
+      block.appendChild(el('p', 'hint', SIM.creasePattern));
+      for (const r of sim.vertexReports) {
+        const ok = r.developable && r.flatFoldable && r.maekawa !== false;
+        block.appendChild(el('p', ok ? 'readout' : 'readout warn', SIM.vertexReport(r)));
+        if (!ok) block.appendChild(el('p', 'hint warn', SIM.vertexFails(r)));
+      }
+      summary.appendChild(block);
     }
     box.appendChild(summary);
     if (app.mode === 'construction') return;

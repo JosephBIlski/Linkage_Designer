@@ -368,15 +368,26 @@ export function sectorSumAt(m: Model, joint: Joint): SectorSum | null {
   };
 }
 
+/** Union-find over the merged point pairs of every joint (mergedPointGroups). */
+export interface MergedPointGroups {
+  /** The points merged with `pointId`, itself included, or null when it takes part in no merged pair. */
+  group: (pointId: ID) => ID[] | null;
+  /** Representative of the merged group of `pointId` (the point itself when it is merged with nothing): equal for two points exactly when they are merged. */
+  root: (pointId: ID) => ID;
+}
+
 /**
  * Union-find over the merged point pairs of every joint (creases and pins
  * merge their end points into one solver variable): `group(id)` lists the
  * points merged with `id`, itself included, or null when `id` takes part in
- * no merged pair. Shared by the sector-sum diagnosis and the sector-angle
- * preview of the Panel tool (sector.ts), which both need "the panels around
- * this vertex".
+ * no merged pair; `root(id)` is a representative shared by all points merged
+ * with `id`, so "the same vertex" is `root(a) === root(b)`. Pairs naming a
+ * deleted point are ignored. Shared by the sector-sum diagnosis, the
+ * sector-angle preview of the Panel tool (sector.ts), the crease-loop
+ * detection (fold.ts) and the crease-pattern validator (validate.ts), which
+ * all need "the panels around this vertex".
  */
-export function mergedPointGroups(m: Model): { group: (pointId: ID) => ID[] | null } {
+export function mergedPointGroups(m: Model): MergedPointGroups {
   const parent = new Map<ID, ID>();
   const find = (x: ID): ID => {
     let r = x;
@@ -397,6 +408,7 @@ export function mergedPointGroups(m: Model): { group: (pointId: ID) => ID[] | nu
       const root = find(pointId);
       return [...parent.keys()].filter((id) => find(id) === root);
     },
+    root: (pointId: ID): ID => (parent.has(pointId) ? find(pointId) : pointId),
   };
 }
 
