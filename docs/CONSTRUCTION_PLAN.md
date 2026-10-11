@@ -502,13 +502,95 @@ vertices.
   (90°, 90°, 100°, 80°) (off by 20°). Tests: `tests/validate.test.ts`;
   smoke step 19. Specified in SPEC.md §18.4.
 
-### Phase 3: crease-pattern-first (large, planned)
+### Phase 3: crease-pattern-first (large, in progress)
 
-- Draw vertices and crease lines on a plane with mountain/valley marks; faces
-  are detected (half-edge face tracing of the planar straight-line graph) and
-  generated as polygon links with edge–edge creases through the existing
-  core; the pattern entity is kept for regeneration; Fold selects the branch
-  from the M/V assignment.
+The user draws the crease pattern; the panels and creases are generated from
+it. A drawn pattern lies in one plane, so developability (sector angles sum
+to 360°) holds by construction; the meaningful checks are Kawasaki
+(flat-foldability) and Maekawa (mountain/valley counts), plus structural
+checks (dangling creases, unassigned interior creases).
+
+**3a. Core: pattern model, face detection, generation**
+(`src/core/creasePattern.ts`, pure).
+- `Model.patterns?: Record<ID, CreasePattern>` (optional; old files load
+  unchanged). A `CreasePattern` has a name, the id of the plane it lies on,
+  vertices (id, 3-D position on that plane), creases (id, two vertex ids,
+  class `'M' | 'V' | 'B' | 'U'` for mountain, valley, border, unassigned, and
+  an optional target fold angle) and, once generated, the ids of the links
+  and joints it produced.
+- Editing operations with tolerance: adding a vertex merges it with an
+  existing vertex within tolerance or splits a crease it lies on; adding a
+  crease between two vertices splits it, and the creases it crosses, at
+  every intersection (new vertices inserted), rejects a duplicate or a
+  zero-length crease, and ignores overlapping collinear creases with a
+  reason; removing a vertex removes its creases; crease class and target
+  are settable.
+- Face detection: half-edge tracing of the planar straight-line graph in the
+  plane's 2-D basis, returning the bounded faces as counter-clockwise vertex
+  cycles, the outer boundary, the border creases (one bounded face), the
+  interior creases (two bounded faces) and the dangling creases (the same
+  face on both sides).
+- Validation per interior vertex: even degree, Kawasaki alternating sum of
+  the sector angles between consecutive creases equal to zero, Maekawa
+  |M − V| = 2 when all its creases are assigned; pattern-level: dangling
+  creases, unassigned interior creases, isolated vertices. Reported as a
+  list of messages with ids.
+- Generation: one polygon link per bounded face (`addPolygonFromPoints`,
+  no 2-D constraint), one edge–edge revolute per interior crease with the
+  pattern's class and target stored in `joint.fold`, a ground link when
+  none exists, and the generated ids recorded so that regeneration removes
+  the previous links and joints first. Returns the links, joints and
+  warnings.
+- A `miuraPattern(rows, cols, alpha, width, height)` builder produces the
+  classic Miura-ori tessellation with its M/V assignment.
+- Acceptance (unit tests): a square with one diagonal gives 2 faces, 1
+  interior and 4 border creases; two crossing creases give 4 creases and 1
+  new vertex; a dangling crease is reported; the Miura unit (four quads
+  around one vertex) gives 4 faces and 4 interior creases, Kawasaki 0 and
+  Maekawa 3:1; a 2×2 Miura pattern generates 9 panels and 12 interior
+  creases with zero violation; regeneration leaves the same counts and no
+  stale links or joints; the crease-pattern validator of Phase 2 reports the
+  generated vertices as developable with Kawasaki 0.
+
+**3b. Crease-pattern tool and presentation.**
+- Tool "Crease pattern" (shortcut C): clicks place pattern vertices on the
+  active sketch plane (snapping to pattern vertices, datum points, the grid
+  and onto existing creases, which are split); consecutive clicks draw a
+  polyline of creases; Enter, Esc or a double-click ends the polyline;
+  Backspace removes the last crease. The tool options choose the class of
+  new creases (mountain, valley, border, unassigned).
+- Rendering on the plane: vertices as small discs; creases as lines coloured
+  mountain red, valley blue, border dark grey, unassigned amber; all
+  pickable (`pvertex`, `pcrease` pick types carrying the pattern id).
+- Properties: a selected crease offers M / V / Border, the target fold angle
+  and Delete; a selected pattern (or vertex) shows the name, the plane, the
+  validation messages, "Generate panels" (or "Regenerate" once generated)
+  and the counts. The model tree gains a "Crease patterns" group listing
+  patterns with their crease count, with show/hide.
+- After generation the pattern stays (hidden by default, re-shown from the
+  tree) and the generated creases are presented by the Phase 1 crease
+  rendering; the panels are joined exactly (equal lengths), so no
+  adaptation is needed.
+- Acceptance (headless): draw a square with a diagonal by clicking, set the
+  diagonal to valley, generate: 2 panels and 1 valley crease with zero
+  violation; Fold to target 120° on that crease succeeds and Preview moves
+  the free panel; a pattern with an unassigned interior crease shows the
+  warning and still generates.
+
+**3c. Pattern-wide pre-fold and the Miura sheet example.**
+- `prefoldVertex` is generalised so that the acceptance test covers a
+  chosen set of creases (all creases of a pattern): the driven crease is
+  chosen from a flat loop as today, both signs are tried, and a pose is
+  accepted only when every crease in the set leaves the flat state and
+  every assigned mountain/valley class is honoured; when no pose honours
+  the assignment the result says which creases conflict.
+- The Mechanism-panel Fold button passes the stored class of every crease
+  (today it passes nothing); generated patterns therefore fold on the
+  branch the user drew.
+- Example "Miura-ori sheet (3×3 vertices)" built from `miuraPattern`, the
+  generator and the pre-fold, with a fold driver, added to the Examples
+  menu; a test asserts DOF 1 after the pre-fold, all creases folded with
+  the drawn classes, and a sweep that moves every panel.
 
 ## 6. Data-model changes
 
