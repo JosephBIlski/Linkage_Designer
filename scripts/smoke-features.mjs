@@ -574,6 +574,113 @@ const tilted23 = !!poly23 && Math.abs(centroidZ23) < 1e-6 && Math.max(...poly23.
 const ok23 = /Joint created \(1\)/.test(status23) && /no 2-D constraint/.test(status23) && onVertex23 && tilted23 && poly23.bodyJoints === 0 && poly23.joints.length === 1 && poly23.violation < 1e-8;
 console.log('polygon snapped to an off-plane vertex in 2-D mode: tilted to meet it, joined, no 2-D constraint', JSON.stringify({ status: status23.slice(0, 120), onVertex: onVertex23, tilted: tilted23, sides: poly23?.pts.length, centroidZ: +centroidZ23.toFixed(6), bodyJoints: poly23?.bodyJoints, joints: poly23?.joints, violation: poly23?.violation }), ok23 ? 'OK' : 'FAIL');
 await page.screenshot({ path: `${OUT}/15-polygon-off-plane.png` });
+// ---------------------------------------------------------------------------------------------------------------
+// Crease-pattern-first construction (docs/CONSTRUCTION_PLAN.md §5, Phase 3b)
+// ---------------------------------------------------------------------------------------------------------------
+// 24. Crease pattern tool: a square of border creases drawn by clicking its four corners and closing on the first
+//     vertex (which snaps to the pattern vertex), then a valley diagonal between two corners, each polyline ended with
+//     Enter. The pattern is selected from the model tree and "Generate panels" turns it into 2 panels joined by one
+//     crease with fold.mv 'V', zero violation, the pattern hidden and the status text. Then the crease is selected,
+//     its target set to 120° and "Fold to target" pressed: the fold-angle readout reads 120.0° · Valley (V).
+await freshTopView([[-1, -1, 0], [4, 4, 0]]);
+await page.click('button[title^="Crease pattern"]');
+await page.selectOption('.tool-options select', 'B');
+for (const q of [[0, 0, 0], [3, 0, 0], [3, 3, 0], [0, 3, 0], [0, 0, 0]]) {
+  await clickWorld(q);
+  await waitStatus(/Vertex placed|added|nothing was added/);
+}
+await page.keyboard.press('Enter');
+await waitStatus(/Polyline ended/);
+const square24 = await page.evaluate(() => { const { app } = window.linkageDesigner; const ps = Object.values(app.model.patterns ?? {}); const p = ps[0]; return p ? { patterns: ps.length, name: p.name, vertices: Object.keys(p.vertices).length, creases: Object.keys(p.creases).length, classes: Object.values(p.creases).map((c) => c.cls), selection: app.selection?.type } : null; });
+await page.selectOption('.tool-options select', 'V');
+await clickWorld([0, 0, 0]);
+await waitStatus(/Vertex placed/);
+await clickWorld([3, 3, 0]);
+await waitStatus(/Crease \(valley\) added/);
+await page.keyboard.press('Enter');
+await waitStatus(/Polyline ended/);
+const drawn24 = await page.evaluate(() => { const { app } = window.linkageDesigner; const ps = Object.values(app.model.patterns ?? {}); const p = ps[0]; return p ? { patterns: ps.length, vertices: Object.keys(p.vertices).length, creases: Object.keys(p.creases).length, valleys: Object.values(p.creases).filter((c) => c.cls === 'V').length, borders: Object.values(p.creases).filter((c) => c.cls === 'B').length, links: Object.keys(app.model.links).length } : null; });
+const okDrawn24 = !!square24 && square24.patterns === 1 && square24.vertices === 4 && square24.creases === 4 && square24.classes.every((c) => c === 'B') && square24.selection === 'pattern' && !!drawn24 && drawn24.patterns === 1 && drawn24.vertices === 4 && drawn24.creases === 5 && drawn24.valleys === 1 && drawn24.borders === 4 && drawn24.links === 0;
+console.log('crease pattern tool: square of borders closed on its first vertex, valley diagonal', JSON.stringify({ square: square24, drawn: drawn24 }), okDrawn24 ? 'OK' : 'FAIL');
+await page.screenshot({ path: `${OUT}/16-crease-pattern-drawn.png` });
+// select the pattern through its model-tree row and generate
+await page.click('button[title^="Select —"]');
+await page.evaluate(() => window.linkageDesigner.app.select(null));
+await page.waitForTimeout(200);
+const treeRow24 = await page.evaluate(() => { const row = [...document.querySelectorAll('.tree-item')].find((r) => r.querySelector('.tree-item__label')?.textContent === 'Pattern 1'); return row ? { badges: [...row.querySelectorAll('.tree-badge')].map((b) => b.textContent), group: row.closest('.tree-group')?.querySelector('.tree-group__summary')?.textContent ?? '' } : null; });
+await page.click('.tree-item:has-text("Pattern 1")');
+await page.waitForTimeout(300);
+const props24 = await page.evaluate(() => ({ selection: window.linkageDesigner.app.selection, subtitle: document.querySelector('.props-panel .panel__subtitle')?.textContent ?? '', rows: [...document.querySelectorAll('.props-panel .prop-row')].map((r) => r.textContent.trim()), checks: [...document.querySelectorAll('.props-panel .crease-pattern p')].map((e) => e.textContent), buttons: [...document.querySelectorAll('.props-panel button')].map((b) => b.textContent.trim()) }));
+await page.click('.props-panel button:has-text("Generate panels")');
+const generated24 = await waitStatus(/Generated|Nothing to generate/);
+await page.waitForTimeout(400);
+const after24 = await page.evaluate(() => { const { app } = window.linkageDesigner; const m = app.model; const p = Object.values(m.patterns ?? {})[0]; const creases = Object.values(m.joints).filter((j) => j.type === 'revolute' && j.a.kind === 'edge' && j.pairs?.length === 2); return { links: Object.values(m.links).map((l) => [l.name, l.kind, l.pointIds.length, l.ground]), creases: creases.map((j) => ({ id: j.id, mv: j.fold?.mv ?? null, target: j.fold?.target ?? null })), bodyJoints: Object.values(m.joints).filter((j) => j.a.kind === 'body').length, dof: app.sim.mobility?.dof, violation: app.sim.violation, hidden: !!p?.hidden, generated: p?.generated ? { links: p.generated.linkIds.length, joints: p.generated.jointIds.length } : null, selection: app.selection?.type, treeBadges: [...document.querySelectorAll('.tree-item')].find((r) => r.querySelector('.tree-item__label')?.textContent === 'Pattern 1') ? [...[...document.querySelectorAll('.tree-item')].find((r) => r.querySelector('.tree-item__label')?.textContent === 'Pattern 1').querySelectorAll('.tree-badge')].map((b) => b.textContent) : null }; });
+const okGen24 = !!treeRow24 && /Crease patterns/.test(treeRow24.group) && treeRow24.badges.includes('5 creases') && props24.selection?.type === 'pattern' && /Crease pattern · Pattern 1/.test(props24.subtitle) && props24.rows.some((r) => /4 · 5 · 2/.test(r)) && props24.checks.some((t) => /No problems found/.test(t)) && props24.buttons.includes('Generate panels') && /Generated 2 panels and 1 crease\./.test(generated24) && !/warning/.test(generated24) && after24.links.length === 2 && after24.links.every((l) => l[1] === 'polygon' && l[2] === 3) && after24.links.filter((l) => l[3]).length === 1 && after24.creases.length === 1 && after24.creases[0].mv === 'V' && after24.bodyJoints === 0 && after24.violation < 1e-8 && after24.dof === 1 && after24.hidden && after24.generated?.links === 2 && after24.generated?.joints === 1 && after24.selection === 'link' && !!after24.treeBadges && after24.treeBadges.includes('hidden');
+console.log('generate panels from the pattern: 2 panels, 1 valley crease, zero violation, pattern hidden', JSON.stringify({ treeRow: treeRow24, subtitle: props24.subtitle, counts: props24.rows.find((r) => /faces/.test(r)), checks: props24.checks, status: generated24, after: { ...after24, links: after24.links.map((l) => l[0]) } }), okGen24 ? 'OK' : 'FAIL');
+await page.screenshot({ path: `${OUT}/17-crease-pattern-generated.png` });
+// the generated crease: target 120°, Fold to target, readout 120.0° · Valley (V)
+await page.evaluate((id) => window.linkageDesigner.app.select({ type: 'joint', id }), after24.creases[0].id);
+await page.waitForTimeout(300);
+const targetInput24 = '.props-panel label.prop-row:has-text("Target fold angle") input';
+await page.fill(targetInput24, '120');
+await page.press(targetInput24, 'Tab');
+await page.waitForTimeout(100);
+await page.click('.props-panel button:has-text("Fold to target")');
+const folded24 = await waitStatus(/Folded to target|No pose was found|Nothing to fold|locked/);
+await page.waitForTimeout(400);
+const readout24 = await page.evaluate(() => { const { app } = window.linkageDesigner; const row = [...document.querySelectorAll('.props-panel .prop-row')].find((r) => /Fold angle \(current\)/.test(r.textContent)); const j = Object.values(app.model.joints).find((x) => x.type === 'revolute' && x.a.kind === 'edge'); return { row: row?.textContent.trim() ?? '', target: j?.fold?.target ?? null, mv: j?.fold?.mv ?? null, dof: app.sim.mobility?.dof, violation: app.sim.violation, selection: app.selection?.type }; });
+const angle24 = Number((readout24.row.match(/(\d+(?:\.\d+)?)°/) ?? [])[1]);
+const okFold24 = /Folded to target/.test(folded24) && Math.abs(angle24 - 120) < 0.5 && /Valley/.test(readout24.row) && readout24.target === 120 && readout24.mv === 'V' && readout24.violation < 1e-6 && readout24.selection === 'joint';
+console.log('fold the generated crease to its target of 120°', JSON.stringify({ status: folded24.slice(0, 80), readout: readout24.row, angle: angle24, target: readout24.target, mv: readout24.mv, dof: readout24.dof, violation: readout24.violation }), okFold24 ? 'OK' : 'FAIL');
+await page.screenshot({ path: `${OUT}/18-crease-pattern-folded.png` });
+// 25. The Miura-ori sheet example (plan 3c) and the Fold command on a generated crease pattern. The example loads
+//     pre-folded on its drawn branch: 16 panels, 24 creases, DOF 1, one fold driver at 160°, every crease label in the
+//     tree with a class and an angle below 180°, the pattern kept hidden. "Regenerate panels" on that pattern (selected
+//     from the tree) rebuilds the flat sheet: DOF above 1, nine flat vertices, the hint and the Fold button, no driver.
+//     Fold then folds the whole sheet at once: the status reads "pre-folded as one sheet … 24 creases folded", DOF 1,
+//     every crease off flat, the class read out in the Properties of four sampled creases equal to the class stored on
+//     them (the drawn branch), one driver kept, one undo entry. Preview moves every panel.
+await page.evaluate(() => { const { app } = window.linkageDesigner; app.setMode('construction'); app.loadExample('miuraSheet'); });
+await page.waitForTimeout(1000);
+const sheetState = () => page.evaluate(() => { const { app } = window.linkageDesigner; const m = app.model; const creases = Object.values(m.joints).filter((j) => j.type === 'revolute' && j.a.kind === 'edge' && j.pairs?.length === 2); const p = Object.values(m.patterns ?? {})[0]; const labels = [...document.querySelectorAll('.tree-item__label')].map((e) => e.textContent).filter((t) => /^Crease/.test(t)); return { links: Object.keys(m.links).length, creases: creases.length, creaseIds: creases.map((j) => j.id), stored: creases.map((j) => j.fold?.mv ?? null), drivers: m.drivers.map((d) => [d.kind, +Math.abs(d.value).toFixed(1)]), dof: app.sim.mobility?.dof, violation: app.sim.violation, ground: Object.values(m.links).find((l) => l.ground)?.name ?? null, pattern: p ? { name: p.name, hidden: !!p.hidden, generated: p.generated ? p.generated.jointIds.length : 0 } : null, labels: labels.length, folded: labels.filter((t) => /^Crease [MV] \d+°/.test(t) && !/ 180°/.test(t)).length, flatLoops: app.sim.creaseLoops.filter((l) => l.flat).length, hints: [...document.querySelectorAll('.mode-panel .hint.warn')].map((e) => e.textContent), foldBtn: !!document.querySelector('button[title^="Drives one crease"]'), undo: app.undoStack.length, status: app.status }; });
+const loaded25 = await sheetState();
+const okLoaded25 = loaded25.links === 16 && loaded25.creases === 24 && loaded25.dof === 1 && loaded25.violation < 1e-6 && loaded25.drivers.length === 1 && loaded25.drivers[0][0] === 'fold' && Math.abs(loaded25.drivers[0][1] - 160) < 0.1 && loaded25.folded === 24 && loaded25.flatLoops === 0 && !loaded25.foldBtn && !!loaded25.pattern?.hidden && loaded25.pattern.generated === 24 && loaded25.stored.every((c) => c === 'M' || c === 'V');
+console.log('Miura-ori sheet example loads pre-folded', JSON.stringify({ ...loaded25, creaseIds: undefined, stored: undefined }), okLoaded25 ? 'OK' : 'FAIL');
+await page.screenshot({ path: `${OUT}/19-miura-sheet-example.png` });
+// regenerate the sheet from its pattern: flat again, nine flat vertices, the Fold button offered, the driver gone with the joints
+await page.click('button[title^="Select —"]');
+await page.evaluate(() => window.linkageDesigner.app.select(null));
+await page.waitForTimeout(200);
+await page.click('.tree-item:has-text("Miura-ori")');
+await page.waitForTimeout(300);
+await page.click('.props-panel button:has-text("Regenerate panels")');
+const regenerated25 = await waitStatus(/Generated|Nothing to generate/);
+await page.waitForTimeout(500);
+const flat25 = await sheetState();
+const okFlat25 = /Generated 16 panels and 24 creases\./.test(regenerated25) && flat25.links === 16 && flat25.creases === 24 && flat25.drivers.length === 0 && flat25.dof > 1 && flat25.flatLoops === 9 && flat25.foldBtn && flat25.folded === 0 && flat25.labels === 24 && flat25.hints.some((h) => /9 vertices are flat/.test(h)) && !!flat25.pattern?.hidden;
+console.log('regenerate the sheet flat from its pattern', JSON.stringify({ status: regenerated25.slice(0, 80), links: flat25.links, creases: flat25.creases, drivers: flat25.drivers, dof: flat25.dof, flatLoops: flat25.flatLoops, foldBtn: flat25.foldBtn, hints: flat25.hints }), okFlat25 ? 'OK' : 'FAIL');
+// Fold: the whole generated pattern leaves the flat state on its drawn branch
+await page.click('button[title^="Drives one crease"]');
+const folded25 = await waitStatus(/pre-folded|No folded state|Nothing to fold|already folded|locked/);
+await page.waitForTimeout(500);
+const post25 = await sheetState();
+const sampled25 = [];
+for (const i of [0, 7, 13, 23]) {
+  const id = post25.creaseIds[i];
+  await page.evaluate((id) => window.linkageDesigner.app.select({ type: 'joint', id }), id);
+  await page.waitForTimeout(200);
+  sampled25.push(await page.evaluate((id) => { const { app } = window.linkageDesigner; const row = [...document.querySelectorAll('.props-panel .prop-row')].find((r) => /Fold angle \(current\)/.test(r.textContent)); const text = row?.textContent ?? ''; return { stored: app.model.joints[id]?.fold?.mv ?? null, shown: /Mountain/.test(text) ? 'M' : /Valley/.test(text) ? 'V' : null, angle: Number((text.match(/(\d+(?:\.\d+)?)°/) ?? [])[1]) }; }, id));
+}
+const okFold25 = /pre-folded as one sheet/.test(folded25) && /24 creases folded/.test(folded25) && /DOF: 1\./.test(folded25) && post25.dof === 1 && post25.violation < 1e-6 && post25.drivers.length === 1 && post25.drivers[0][0] === 'fold' && post25.folded === 24 && post25.flatLoops === 0 && !post25.foldBtn && post25.undo === flat25.undo + 1 && sampled25.length === 4 && sampled25.every((s) => !!s.stored && s.shown === s.stored && s.angle < 179.5);
+console.log('Fold folds the regenerated sheet as one pattern on the drawn branch', JSON.stringify({ status: folded25.slice(0, 140), dof: post25.dof, drivers: post25.drivers, folded: post25.folded, flatLoops: post25.flatLoops, undo: [flat25.undo, post25.undo], sampled: sampled25 }), okFold25 ? 'OK' : 'FAIL');
+await page.screenshot({ path: `${OUT}/20-miura-sheet-folded.png` });
+await page.click('button.mode-tab:has-text("Preview")');
+await page.waitForTimeout(3000);
+const travel25 = await page.evaluate(() => { const { app } = window.linkageDesigner; const m = app.model; const sw = app.sim.sweep; if (!sw) return null; const ground = Object.values(m.links).find((l) => l.ground); const gp = ground.pointIds.map((id) => m.points[id].pos); const farFromGround = (id) => Math.min(...gp.map((g) => Math.hypot(...g.map((v, k) => v - m.points[id].pos[k])))); return Object.values(m.links).filter((l) => !l.ground).map((l) => { const id = l.pointIds.reduce((b, x) => (farFromGround(x) > farFromGround(b) ? x : b), l.pointIds[0]); const a = sw.poses.map((p) => p.positions.get(id)); let mx = 0; for (const q of a) mx = Math.max(mx, Math.hypot(...q.map((v, k) => v - a[0][k]))); return +mx.toFixed(2); }); });
+console.log('preview after the sheet fold moves every panel', JSON.stringify(travel25), travel25 && travel25.length === 15 && travel25.every((d) => d > 0.5) ? 'OK' : 'FAIL');
+await page.screenshot({ path: `${OUT}/21-miura-sheet-preview.png` });
+await page.click('button.mode-tab:has-text("Construction")');
+await page.waitForTimeout(300);
 console.log('errors:', errors.length ? errors.join('\n') : 'none');
 await browser.close();
 server.kill();

@@ -9,10 +9,11 @@ import type { Positions } from '../core/kinematics';
 import { modelSize } from '../core/kinematics';
 import { linkEdges, linkFaces } from '../core/model';
 import { creaseDihedralDeg, creaseMV, isCrease } from '../core/fold';
-import type { ID, Joint, Link, Model, Vec3 } from '../core/types';
+import { patternBasis } from '../core/creasePattern';
+import type { CreaseClass, ID, Joint, Link, Model, Vec3 } from '../core/types';
 import { add, centroid, cross, dist, len, normalize, scale, sub } from '../core/geometry';
 import type { AppSettings } from '../ui/settings';
-import { JOINTS, creaseLabel } from '../ui/strings';
+import { JOINTS, PATTERN, creaseLabel } from '../ui/strings';
 import type { PickResult, PickType, Viewport } from './scene';
 
 export interface EditPointView {
@@ -55,10 +56,15 @@ export interface OverlayView {
   /** Tool feedback labels (e.g. the Panel tool's sector-angle sums); shown whatever the "Show labels" setting says. */
   labels?: OverlayLabel[] | null;
 }
+/**
+ * What is selected: a pickable feature, a whole link, or a crease pattern (`pattern`: id = the pattern; `pvertex` /
+ * `pcrease`: id = the pattern, `pointId` / `creaseId` the element).
+ */
 export interface SelectionView {
-  type: PickType | 'link';
+  type: PickType | 'link' | 'pattern';
   id: ID;
   pointId?: ID;
+  creaseId?: ID;
   pose?: number;
 }
 export interface RenderState {
@@ -83,9 +89,12 @@ const unitTorus = new THREE.TorusGeometry(1, 0.18, 10, 32);
 const unitBox = new THREE.BoxGeometry(1, 1, 1);
 const unitOcta = new THREE.OctahedronGeometry(1, 0);
 const unitCone = new THREE.ConeGeometry(1, 1, 16);
+const unitDisc = new THREE.CircleGeometry(1, 24);
 const Y = new THREE.Vector3(0, 1, 0);
 /** Colour of a crease whose panels are coplanar (no mountain / valley class yet). */
 const CREASE_FLAT_COLOR = '#8d949c';
+/** Colour of the vertex discs of a crease pattern. */
+const PATTERN_VERTEX_COLOR = '#2b2f33';
 /** Crease lines are drawn this much thicker than the panel edges they lie on (edge radius = 0.55 · r). */
 const CREASE_RADIUS_FACTOR = 1.6;
 
@@ -126,6 +135,7 @@ export class ModelRenderer {
     this.buildModel(state, state.positions, this.vp.groups.model, false);
     if (state.ghost) this.buildModel(state, state.ghost, this.vp.groups.ghost, true);
     this.buildJoints(state);
+    this.buildPatterns(state);
     this.buildPaths(state);
     this.buildSurfaces(state);
     this.buildDesignSpaces(state);
@@ -483,6 +493,64 @@ export class ModelRenderer {
   }
 
   // ---------------------------------------------------------------------------
+  // Crease patterns
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Every visible crease pattern (plan 3b): its vertices as small discs in
+   * the pattern's plane and its creases as lines coloured by class — mountain
+   * and valley in the crease colours of Settings, border in the pattern
+   * border colour (dark grey), unassigned in the pattern unassigned colour
+   * (amber) — all pickable as `pvertex` / `pcrease` carrying the pattern's
+   * id. A selected crease or vertex takes the selection colour; a selected
+   * pattern colours its vertices only, so that the classes of its creases
+   * stay readable; a hovered element gets the emissive highlight. With labels
+   * on, a selected or hovered crease reads "Crease (mountain)", a hovered or
+   * selected vertex "Pattern vertex", and the pattern's name sits at the
+   * centroid of its vertices. Hidden patterns are not drawn and not pickable.
+   */
+  private buildPatterns(state: RenderState): void {
+    const { model, settings } = state;
+    const g = this.vp.groups.joints;
+    const r = this.r;
+    const sel = state.selection;
+    const hov = state.hover;
+    for (const p of Object.values(model.patterns ?? {})) {
+      if (p.hidden) continue;
+      const basis = patternBasis(model, p);
+      const up = scale(basis.normal, r * 3);
+      const discQ = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), v(basis.normal));
+      const patternSelected = sel?.type === 'pattern' && sel.id === p.id;
+      for (const c of Object.values(p.creases)) {
+        const a = p.vertices[c.a]?.pos;
+        const b = p.vertices[c.b]?.pos;
+        if (!a || !b) continue;
+        const selected = sel?.type === 'pcrease' && sel.id === p.id && sel.creaseId === c.id;
+        const hovered = hov?.type === 'pcrease' && hov.id === p.id && hov.creaseId === c.id;
+        const mat = this.material(selected ? settings.colors.selection : patternCreaseColor(c.cls, settings), { emissive: hovered ? settings.colors.selection : undefined });
+        this.pickableCylinder(g, a, b, r * 0.55 * CREASE_RADIUS_FACTOR, mat, { type: 'pcrease', id: p.id, creaseId: c.id });
+        if (settings.showLabels && (selected || hovered)) this.label(PATTERN.creaseLabel(c.cls), add(centroid([a, b]), up), 'label label--joint');
+      }
+      for (const vtx of Object.values(p.vertices)) {
+        const selectedAlone = sel?.type === 'pvertex' && sel.id === p.id && sel.pointId === vtx.id;
+        const hovered = hov?.type === 'pvertex' && hov.id === p.id && hov.pointId === vtx.id;
+        const mat = this.material(patternSelected || selectedAlone ? settings.colors.selection : PATTERN_VERTEX_COLOR, { emissive: hovered ? settings.colors.selection : undefined });
+        const disc = new THREE.Mesh(unitDisc, mat);
+        disc.position.copy(v(vtx.pos));
+        disc.scale.setScalar(r * 1.3);
+        disc.quaternion.copy(discQ);
+        g.add(disc);
+        // invisible pick proxy of at least ~5 px radius (pattern vertices must beat the crease proxies around them)
+        const proxyMat = this.track(new THREE.MeshBasicMaterial({ visible: false }));
+        g.add(this.sphere(vtx.pos, Math.max(r * 1.3, this.vp.worldPerPixel(vtx.pos) * 5), proxyMat, { type: 'pvertex', id: p.id, pointId: vtx.id }));
+        if (settings.showLabels && (selectedAlone || hovered)) this.label(PATTERN.vertexLabel, add(vtx.pos, up), 'label label--vertex');
+      }
+      const vs = Object.values(p.vertices);
+      if (settings.showLabels && vs.length) this.label(p.name, add(centroid(vs.map((x) => x.pos)), up), 'label label--pattern');
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Paths, design space, editing points
   // ---------------------------------------------------------------------------
 
@@ -645,6 +713,20 @@ export class ModelRenderer {
     // tool labels sit at their world position (the stylesheet offsets them from the vertex they annotate) and are
     // stacked above the model labels, so a sector sum is never hidden under a datum or link name
     for (const l of o.labels ?? []) this.label(l.text, l.pos, l.cls, 1);
+  }
+}
+
+/** Colour of a pattern crease by class: mountain / valley as the creases of the mechanism, border and unassigned their own settings colours. */
+function patternCreaseColor(cls: CreaseClass, settings: AppSettings): string {
+  switch (cls) {
+    case 'M':
+      return settings.colors.mountain;
+    case 'V':
+      return settings.colors.valley;
+    case 'B':
+      return settings.colors.patternBorder;
+    default:
+      return settings.colors.patternUnassigned;
   }
 }
 

@@ -30,17 +30,19 @@ import {
   setGround,
   sketchNormal,
 } from '../core/model';
-import type { ConstructionRef, Feature, ID, JointType, Model, Target, Vec3 } from '../core/types';
+import type { ConstructionRef, CreasePattern, Feature, ID, JointType, Model, Target, Vec3 } from '../core/types';
 import { PLACEMENT_MIN_COS, autoJoinCoincident, coincidenceTolerance, coincidentVertex, fitSketchPlane, moveVertex, placeOnFittedPlane, placementOnPlane, projectToPlane } from '../core/edit';
 import { sketchSectors, type SectorStatus } from '../core/sector';
 import { duplicateLink, hasCollinearTriple, linearArray, mirrorAcrossPlane, polarArray } from '../core/patterns';
-import { addPolygonFromPoints } from '../core/model';
+import { addPolygonFromPoints, parseModel, serializeModel } from '../core/model';
+import { addPattern, removePattern, removePatternCrease, removePatternVertex } from '../core/creasePattern';
 import { isConstructionRef } from '../core/types';
-import { FEATURES, OVERLAY, STATUS, TOOLS, CONSTRUCTION_NAMES, jointRefusedMessage } from '../ui/strings';
+import { FEATURES, OVERLAY, PATTERN, STATUS, TOOLS, CONSTRUCTION_NAMES, jointRefusedMessage } from '../ui/strings';
 import { jointDescription } from '../ui/labels';
 import type { OverlayLabel, OverlayView } from './render';
 import type { PickResult, ViewportPointerEvent } from './scene';
 import { PickCycle } from './pickCycle';
+import { PatternPolyline, choosePattern, nextPatternName, snapToCrease } from './patternPolyline';
 
 export function toolHint(tool: ToolName): string {
   const t = (TOOLS as Record<string, unknown>)[tool];
@@ -75,6 +77,10 @@ interface PlacedPoint {
   pos: Vec3;
   snappedPointId?: ID;
   snappedConstructionId?: ID;
+  /** Snapped to a crease pattern's vertex or onto one of its creases (the pattern's id with the element's). */
+  snappedPatternId?: ID;
+  snappedPatternVertexId?: ID;
+  snappedPatternCreaseId?: ID;
   /** Pointer ray at placement (free sketch vertices are re-placed on the fitted plane along it). */
   ray?: { o: Vec3; d: Vec3 };
 }
@@ -101,6 +107,8 @@ export class ToolManager {
   private cycleModel: Model | null = null;
   /** True while the pick being dispatched was named through the query cycle (the user chose it explicitly). */
   private pickFromCycle = false;
+  /** Crease pattern tool: the polyline of creases being drawn. */
+  private polyline = new PatternPolyline();
   onPopup: ((pointId: ID | null) => void) | null = null;
 
   constructor(private app: App) {
@@ -115,6 +123,7 @@ export class ToolManager {
     this.patternLinkId = null;
     this.pendingLength = null;
     this.drag = { kind: 'none' };
+    this.polyline.end();
     this.app.setOverlay({});
     this.app.setHint(toolHint(this.app.tool));
     // a tool switch during a query cycle: the normal hover, status and the new tool's preview replace the candidate
@@ -166,6 +175,11 @@ export class ToolManager {
       // abort the drag: restore the pre-drag model without touching the undo history
       this.app.abortChange();
     }
+    if (this.polyline.active) {
+      // Esc ends the crease polyline (its creases stay); a second Esc cancels the tool
+      this.endPolyline();
+      return;
+    }
     if (this.points.length === 0 && !this.featureA && !this.editSource && !this.patternLinkId && this.drag.kind === 'none') this.app.setTool('select');
     this.reset();
   }
@@ -187,12 +201,13 @@ export class ToolManager {
   }
 
   /**
-   * Where would a click at this pointer position place a point? A hovered vertex or datum point snaps; otherwise the
-   * pointer ray is cast onto the active sketch plane (always for the datum and Panel tools and in 2-D mode; in 3-D mode
-   * unless the ray grazes or misses the plane, plan 2c) and the view plane through the previous point is the fallback.
-   * In 2-D mode a grazing ray still lands on the sketch plane, but a ray that misses it, or meets it at the camera
-   * (the Front and Right views look along the TOP plane, so every off-centre ray hits it at depth 0), falls back to
-   * the view plane too, instead of placing the point at the camera.
+   * Where would a click at this pointer position place a point? A hovered vertex, datum point or crease-pattern vertex
+   * snaps, and a hovered pattern crease snaps the point onto the crease (its foot point, where the Crease pattern tool
+   * splits it); otherwise the pointer ray is cast onto the active sketch plane (always for the datum, Panel and Crease
+   * pattern tools and in 2-D mode; in 3-D mode unless the ray grazes or misses the plane, plan 2c) and the view plane
+   * through the previous point is the fallback. In 2-D mode a grazing ray still lands on the sketch plane, but a ray
+   * that misses it, or meets it at the camera (the Front and Right views look along the TOP plane, so every off-centre
+   * ray hits it at depth 0), falls back to the view plane too, instead of placing the point at the camera.
    */
   private place(ev: { clientX: number; clientY: number; pick: PickResult | null }, allowSnap = true): PlacedPoint | null {
     const m = this.app.model;
@@ -202,13 +217,21 @@ export class ToolManager {
         const c = m.construction[ev.pick.id];
         if (c?.kind === 'point') return { pos: [...c.origin] as Vec3, snappedConstructionId: c.id };
       }
+      if (ev.pick.type === 'pvertex' || ev.pick.type === 'pcrease') {
+        const p = m.patterns?.[ev.pick.id];
+        const v = p && ev.pick.pointId ? p.vertices[ev.pick.pointId] : undefined;
+        if (p && v) return { pos: [...v.pos] as Vec3, snappedPatternId: p.id, snappedPatternVertexId: v.id };
+        const c = p && ev.pick.creaseId ? p.creases[ev.pick.creaseId] : undefined;
+        const foot = p && c ? snapToCrease(p, c, ev.pick.point) : null;
+        if (p && c && foot) return { pos: foot, snappedPatternId: p.id, snappedPatternCreaseId: c.id };
+      }
     }
     const vp = this.app.viewport;
     let pos: Vec3 | null = null;
-    const last = this.points[this.points.length - 1]?.pos;
+    const last = this.points[this.points.length - 1]?.pos ?? this.polylineAnchor()?.pos;
     const pl = this.sketchPlane();
     const ray = vp.pointerRay(ev.clientX, ev.clientY);
-    const onSketchPlane = this.app.toolOptions.mode2d || this.app.tool === 'cpoint' || this.app.tool === 'caxis' || this.app.tool === 'cplane' || this.app.tool === 'sketch';
+    const onSketchPlane = this.app.toolOptions.mode2d || this.app.tool === 'cpoint' || this.app.tool === 'caxis' || this.app.tool === 'cplane' || this.app.tool === 'sketch' || this.app.tool === 'cpattern';
     const view = vp.projectToViewPlane(ev.clientX, ev.clientY, last ?? [0, 0, 0]);
     if (!view) return null;
     // 3-D mode (plan 2c): a free click still lands where the pointer ray meets the sketch plane, so geometry is built
@@ -307,7 +330,7 @@ export class ToolManager {
       return;
     }
     if (ev.kind === 'dblclick') {
-      if (app.tool === 'sketch') this.finishSketch();
+      this.finish();
       return;
     }
     if (ev.kind !== 'down' || ev.button !== 0) return;
@@ -377,6 +400,10 @@ export class ToolManager {
         return !!m.construction[p.id];
       case 'editPoint':
         return !!m.points[p.pointId ?? p.id];
+      case 'pvertex':
+        return !!m.patterns?.[p.id]?.vertices[p.pointId ?? ''];
+      case 'pcrease':
+        return !!m.patterns?.[p.id]?.creases[p.creaseId ?? ''];
       default:
         return !!m.links[p.id] && (p.pointIds ?? []).every((id) => !!m.points[id]);
     }
@@ -389,6 +416,8 @@ export class ToolManager {
         return this.selectDown(ev);
       case 'sketch':
         return this.sketchTool(ev);
+      case 'cpattern':
+        return this.cpatternTool(ev);
       case 'edit':
         return this.editTool(ev);
       case 'mirror':
@@ -426,6 +455,12 @@ export class ToolManager {
       return j ? jointDescription(m, j) : '';
     }
     if (p.type === 'construction') return m.construction[p.id]?.name ?? '';
+    if (p.type === 'pvertex' || p.type === 'pcrease') {
+      const pat = m.patterns?.[p.id];
+      const c = pat && p.creaseId ? pat.creases[p.creaseId] : undefined;
+      if (!pat) return '';
+      return c ? PATTERN.describeCrease(c.cls, pat.name) : PATTERN.describeVertex(pat.name);
+    }
     const f = this.featureFromPick(p);
     return f ? this.describeFeature(f) : '';
   }
@@ -439,7 +474,7 @@ export class ToolManager {
       app.setStatus(`${STATUS.coordHelp} (L = ${tp.L})`);
       return;
     }
-    const last = this.points[this.points.length - 1]?.pos ?? [0, 0, 0];
+    const last = this.points[this.points.length - 1]?.pos ?? this.polylineAnchor()?.pos ?? [0, 0, 0];
     let pos: Vec3;
     if (tp.kind === 'abs') pos = tp.p;
     else if (tp.kind === 'rel') pos = add(last, tp.d);
@@ -452,7 +487,7 @@ export class ToolManager {
       const a = (tp.angleDeg * Math.PI) / 180;
       pos = add(last, add(scale(uu, tp.L * Math.cos(a)), scale(v, tp.L * Math.sin(a))));
     }
-    const fake = { kind: 'down' as const, button: 0, clientX: 0, clientY: 0, shiftKey: false, ctrlKey: false, altKey: false, pick: null, original: new MouseEvent('click') };
+    const fake = { kind: 'down' as const, button: 0, clientX: 0, clientY: 0, shiftKey: false, ctrlKey: false, altKey: false, pick: null, original: null as unknown as MouseEvent };
     switch (tool) {
       case 'bar':
       case 'caxis':
@@ -468,6 +503,8 @@ export class ToolManager {
         return this.planeTool(fake, { pos });
       case 'sketch':
         return this.sketchTool(fake, { pos });
+      case 'cpattern':
+        return this.cpatternTool(fake, { pos });
       case 'edit':
         return this.editTool(fake, { pos });
       case 'pattern':
@@ -490,8 +527,10 @@ export class ToolManager {
     }
     const placed = this.place(ev);
     if (!placed) return;
-    const overlay: OverlayView = { snapPoint: placed.snappedPointId || placed.snappedConstructionId ? placed.pos : null, marker: placed.pos };
+    const overlay: OverlayView = { snapPoint: placed.snappedPointId || placed.snappedConstructionId || placed.snappedPatternId ? placed.pos : null, marker: placed.pos };
     const first = this.points[0]?.pos;
+    const anchor = tool === 'cpattern' ? this.polylineAnchor() : null;
+    if (anchor) overlay.rubberBand = { a: anchor.pos, b: placed.pos };
     if (first && (tool === 'bar' || tool === 'caxis' || tool === 'cylinder')) overlay.rubberBand = { a: first, b: placed.pos };
     if (first && (tool === 'polygon' || tool === 'prism')) {
       const r = dist(first, placed.pos);
@@ -582,19 +621,26 @@ export class ToolManager {
     app.setHint(TOOLS.sketch.hint);
   }
 
-  /** True while the sketch tool has vertices that Backspace can remove. */
+  /** True while the Panel tool has vertices, or the Crease pattern tool creases, that Backspace can remove. */
   popSketchSupported(): boolean {
-    return this.app.tool === 'sketch' && this.points.length > 0;
+    return (this.app.tool === 'sketch' && this.points.length > 0) || (this.app.tool === 'cpattern' && this.polyline.length > 0);
   }
 
-  /** Backspace while sketching removes the last vertex. Returns false when nothing was removed. */
+  /** Backspace while sketching removes the last vertex (the last crease of a crease polyline). Returns false when nothing was removed. */
   popSketchPoint(): boolean {
+    if (this.app.tool === 'cpattern') return this.popPolylineSegment();
     if (this.app.tool !== 'sketch' || this.points.length === 0) return false;
     this.points.pop();
     const lp = this.lastPointer;
     if (this.points.length === 0) this.app.setOverlay({});
     else if (lp) this.updatePreview(this.syntheticMove(lp, this.app.viewport.pick(lp.x, lp.y))); // the polyline and labels drop the vertex at once
     return true;
+  }
+
+  /** Enter or a double-click: close the sketched panel or end the crease polyline (a no-op for every other tool). */
+  finish(): void {
+    if (this.app.tool === 'sketch') this.finishSketch();
+    else if (this.app.tool === 'cpattern') this.endPolyline();
   }
 
   /** Close the sketched polygon (Enter / double-click / click on the first vertex). */
@@ -641,6 +687,100 @@ export class ToolManager {
     else if (notes.length) app.setStatus(notes.join(' · '));
     this.points = [];
     app.setOverlay({});
+  }
+
+  // ---------------------------------------------------------------------------
+  // Crease pattern tool (plan 3b): polylines of creases on the sketch plane
+  // ---------------------------------------------------------------------------
+
+  /** The pattern the current polyline draws into, while it exists. */
+  private polylinePattern(): CreasePattern | null {
+    const id = this.polyline.patternId;
+    return id ? (this.app.model.patterns?.[id] ?? null) : null;
+  }
+
+  /** The last vertex of the polyline being drawn: the rubber band's anchor and the origin of relative typed coordinates. */
+  private polylineAnchor(): { id: ID; pos: Vec3 } | null {
+    const p = this.polylinePattern();
+    const v = p && this.polyline.last ? p.vertices[this.polyline.last] : undefined;
+    return v ? { id: v.id, pos: v.pos } : null;
+  }
+
+  /**
+   * A click of the Crease pattern tool. The first click of a polyline chooses
+   * its pattern — the selected one on the active sketch plane (shown again
+   * when it was hidden), else the single visible one there, else a new
+   * pattern — and places its first vertex; every further click places a
+   * vertex and a crease from the previous one in the class of the tool
+   * options (PatternPolyline; the core merges a vertex within tolerance,
+   * splits the crease a vertex lands on and every crease the new crease
+   * crosses, and refuses duplicates and overlaps with a reason, which the
+   * status bar reports). Each click is one undoable change, and the pattern
+   * is selected so that its Properties (counts, checks, Generate) follow the
+   * drawing. A typed coordinate (`forced`) places a vertex the same way; the
+   * second click of a double-click, landing on the last vertex, is ignored.
+   */
+  private cpatternTool(ev: ViewportPointerEvent, forced?: PlacedPoint): void {
+    const app = this.app;
+    const m = app.model;
+    const placed = forced ?? this.place(ev);
+    if (!placed) return;
+    const anchor = this.polylineAnchor();
+    if (anchor && !forced) {
+      const sl = app.viewport.worldToScreen(anchor.pos);
+      if (Math.hypot(sl.x - ev.clientX, sl.y - ev.clientY) < 12) return;
+    }
+    app.beginChange();
+    const before = serializeModel(m); // what Backspace restores: taken before the pattern may be created
+    let p = this.polylinePattern();
+    if (!p) {
+      p = choosePattern(m, app.selection, m.settings.sketchPlaneId) ?? addPattern(m, m.settings.sketchPlaneId, nextPatternName(m, PATTERN.name));
+      if (p.hidden) p.hidden = false; // the drawing must be visible
+      this.polyline.begin(p.id);
+    }
+    const cls = app.toolOptions.creaseClass;
+    const r = this.polyline.addPoint(m, p, placed.pos, cls, before);
+    app.select({ type: 'pattern', id: p.id });
+    app.endChange();
+    if (r.same) return;
+    if (!r.crease) app.setStatus(STATUS.patternVertexPlaced(p.name));
+    else if (r.crease.ok) app.setStatus(STATUS.patternCreaseAdded(cls, r.crease.creaseIds.length));
+    else app.setStatus(STATUS.patternCreaseRefused(r.crease.reason));
+    // the rubber band now starts at the new vertex
+    const lp = this.lastPointer;
+    if (lp && !forced) this.updatePreview(this.syntheticMove(lp, ev.pick));
+  }
+
+  /** Enter, Esc or a double-click: end the crease polyline (its creases stay); the next click starts a new one. */
+  endPolyline(): void {
+    if (!this.polyline.active) return;
+    this.polyline.end();
+    this.app.setOverlay({});
+    this.app.setStatus(STATUS.patternPolylineEnded);
+  }
+
+  /**
+   * Backspace: take back the last click of the polyline by restoring the
+   * model as it was before it — the vertex, its crease and every split or
+   * merge that click caused — as one undoable change. The polyline continues
+   * from the previous vertex, or ends when its first vertex was taken back
+   * (a pattern that click created disappears with it).
+   */
+  private popPolylineSegment(): boolean {
+    const app = this.app;
+    const patternId = this.polyline.patternId;
+    const seg = this.polyline.pop();
+    if (!seg) return false;
+    app.beginChange();
+    app.model = parseModel(seg.snapshot); // as App restores an aborted change: a fresh model object, the ids unchanged
+    app.endChange();
+    const m = app.model;
+    app.select(patternId && m.patterns?.[patternId] ? { type: 'pattern', id: patternId } : null);
+    app.setStatus(seg.from === null ? STATUS.patternVertexRemoved : STATUS.patternCreaseRemoved);
+    const lp = this.lastPointer;
+    if (!this.polyline.active) app.setOverlay({});
+    else if (lp) this.updatePreview(this.syntheticMove(lp, app.viewport.pick(lp.x, lp.y)));
+    return true;
   }
 
   // ---------------------------------------------------------------------------
@@ -1047,8 +1187,8 @@ export class ToolManager {
     this.deletePick(ev.pick);
   }
 
-  /** Delete the entity behind a pick / selection. */
-  deletePick(pick: { type: string; id: ID; pointId?: ID; pose?: number }): void {
+  /** Delete the entity behind a pick / selection (a pattern goes with the panels it generated; a pattern vertex with its creases). */
+  deletePick(pick: { type: string; id: ID; pointId?: ID; pose?: number; creaseId?: ID }): void {
     const app = this.app;
     const m = app.model;
     app.beginChange();
@@ -1059,6 +1199,23 @@ export class ToolManager {
       case 'construction':
         removeConstruction(m, pick.id);
         break;
+      case 'pattern':
+        if (this.polyline.patternId === pick.id) this.polyline.end();
+        removePattern(m, pick.id);
+        break;
+      case 'pcrease': {
+        const p = m.patterns?.[pick.id];
+        if (p && pick.creaseId) removePatternCrease(m, p, pick.creaseId);
+        break;
+      }
+      case 'pvertex': {
+        const p = m.patterns?.[pick.id];
+        if (p && pick.pointId) {
+          if (this.polyline.last === pick.pointId) this.polyline.end();
+          removePatternVertex(m, p, pick.pointId);
+        }
+        break;
+      }
       case 'editPoint': {
         if (pick.pointId !== undefined && pick.pose !== undefined) m.targets = m.targets.filter((t) => !(t.pointId === pick.pointId && t.pose === pick.pose));
         break;
@@ -1267,6 +1424,10 @@ export class ToolManager {
         app.select({ type: 'editPoint', id: pick.pointId, pointId: pick.pointId, pose: pick.pose });
       } else if (pick.type === 'edge' || pick.type === 'face' || pick.type === 'axis') {
         app.select({ type: 'link', id: pick.linkId ?? pick.id });
+      } else if (pick.type === 'pvertex' && pick.pointId) {
+        app.select({ type: 'pvertex', id: pick.id, pointId: pick.pointId });
+      } else if (pick.type === 'pcrease' && pick.creaseId) {
+        app.select({ type: 'pcrease', id: pick.id, creaseId: pick.creaseId });
       } else app.select({ type: pick.type, id: pick.id });
       return;
     }

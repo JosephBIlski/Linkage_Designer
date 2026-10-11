@@ -283,7 +283,12 @@ describe('prefoldVertex', () => {
     expect(okBoth.ok).toBe(true);
     const contradictory = fresh();
     const before = serializeModel(contradictory);
-    expect(prefoldVertex(contradictory, { mountainValley: { [bent[0]]: 'M', [bent[1]]: 'V' } })).toEqual({ ok: false, reason: 'noBranch' });
+    // the generic poses exist, but each gives one of the two the other class: a conflict naming that crease
+    const refused = prefoldVertex(contradictory, { mountainValley: { [bent[0]]: 'M', [bent[1]]: 'V' } });
+    expect(refused.ok).toBe(false);
+    expect(refused.reason).toBe('mvConflict');
+    expect(refused.conflicts?.length).toBe(1);
+    expect(bent).toContain(refused.conflicts![0]);
     expect(serializeModel(contradictory)).toBe(before);
   });
 

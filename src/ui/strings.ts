@@ -2,8 +2,10 @@
  * ALL user-visible text lives in this file so wording can be edited in one place.
  * Keys are grouped by UI area. Keep values short; tooltips may be longer.
  */
+import type { AddCreaseReason, PatternIssue } from '../core/creasePattern';
 import type { Diagnosis } from '../core/feasibility';
 import type { FoldReason } from '../core/fold';
+import type { CreaseClass } from '../core/types';
 import type { VertexReport } from '../core/validate';
 
 /** Compact number for status messages: up to four significant digits, no trailing zeros ("2", "2.1", "0.6878"). */
@@ -60,6 +62,10 @@ export const EXAMPLES: Record<string, { label: string; description: string }> = 
   sliderCrank: { label: 'Slider-crank', description: 'Crank, connecting rod and a slider on a prismatic joint to a construction axis.' },
   sphericalPendulum: { label: 'Spherical pendulum', description: 'A bar on a spherical joint: output path is a sphere, design space is a ball.' },
   miuraVertex: { label: 'Rigid origami vertex (Miura)', description: 'Four rigid panels around a degree-4 Miura vertex (sector angles α, α, π−α, π−α); one folding degree of freedom driven by a crease angle.' },
+  miuraSheet: {
+    label: 'Miura-ori sheet (3×3 vertices)',
+    description: 'A 4 × 4-panel Miura-ori sheet generated from its crease pattern (α = 60°) and pre-folded on the drawn mountain / valley branch around a middle panel; one folding degree of freedom driven by a crease angle.',
+  },
 };
 
 export const TOOLS = {
@@ -76,6 +82,10 @@ export const TOOLS = {
   driver: { label: 'Driver', hint: 'Click a link with a grounded pivot to drive its angle, or a revolute/prismatic joint to drive its fold angle / slide.' },
   delete: { label: 'Delete', hint: 'Click an item to delete it (Del key deletes the selection).' },
   sketch: { label: 'Panel (sketch polygon)', hint: 'Click the vertices of a panel on the sketch plane. Vertices placed on existing vertices (snapped or typed) are joined when the panel is closed and shared edges become creases; the label at a shared vertex shows the sector-angle sum there. Click the first vertex again, double-click or press Enter to close it. Extrude it later from its Properties.' },
+  cpattern: {
+    label: 'Crease pattern',
+    hint: 'Click the vertices of a crease polyline on the sketch plane: every click adds a vertex and a crease from the previous one, in the class chosen in the tool options. Clicks snap to pattern vertices, onto creases (which are split there), to datum points and to the grid; crossing creases are split automatically. Enter, Esc or a double-click ends the polyline, Backspace removes its last crease. Then select the pattern and press "Generate panels" in its Properties.',
+  },
   edit: { label: 'Edit points', hint: 'Click a vertex of existing geometry, then click where it should go: another link\'s vertex (joins them), a datum point, or type coordinates below.' },
   mirror: { label: 'Mirror', hint: 'Click a link, then click a datum plane to create its mirror image.' },
   pattern: { label: 'Pattern', hint: 'Click a link, then two points for the spacing (linear) or a datum axis / centre point (polar). Count and angle are in the tool options.' },
@@ -104,6 +114,44 @@ export const TOOL_OPTIONS = {
   patternCount: 'Copies',
   patternAngle: 'Total angle (°)',
   extrudeHeight: 'Extrude height',
+  // Crease pattern tool: the class given to the creases it draws
+  creaseClass: 'Class of new creases',
+  creaseClassHelp: 'Mountain and valley set the fold direction of the generated hinge (seen from the sketch plane\'s normal side); Border marks an outer edge of the sheet; Unassigned leaves the choice for later (set it in the crease\'s Properties).',
+};
+
+/** Crease patterns (docs/CONSTRUCTION_PLAN.md, Phase 3): element names, descriptions and the validation messages. */
+export const PATTERN = {
+  /** Default base of a pattern's name ("Pattern 1") and of the panels it generates ("Panel 1"). */
+  name: 'Pattern',
+  panelName: 'Panel',
+  classes: { M: 'Mountain', V: 'Valley', B: 'Border', U: 'Unassigned' } as Record<CreaseClass, string>,
+  /** "Crease (mountain)": the viewport label and the Properties title of a pattern crease. */
+  creaseLabel: (cls: CreaseClass): string => `Crease (${PATTERN.classes[cls].toLowerCase()})`,
+  vertexLabel: 'Pattern vertex',
+  /** Status-bar descriptions of a hovered pattern element: "pattern vertex of Pattern 1", "Crease (valley) of Pattern 1". */
+  describeVertex: (patternName: string): string => `${PATTERN.vertexLabel.toLowerCase()} ${FEATURES.of} ${patternName}`,
+  describeCrease: (cls: CreaseClass, patternName: string): string => `${PATTERN.creaseLabel(cls)} ${FEATURES.of} ${patternName}`,
+  /** A vertex named by its coordinates in the plane of its pattern: "(1.00, 2.50)". */
+  vertexAt: (u: number, v: number): string => `(${u.toFixed(2)}, ${v.toFixed(2)})`,
+  /** One line per validation issue (validatePattern); `vertex` is the vertexAt label of the issue's vertex, when it has one. */
+  issue: (issue: PatternIssue, vertex: string): string => {
+    switch (issue.kind) {
+      case 'oddDegree':
+        return `Vertex ${vertex}: ${issue.creaseIds?.length ?? 0} creases meet there, an odd number, so it cannot fold flat.`;
+      case 'kawasaki':
+        return `Vertex ${vertex}: the alternating sum of its sector angles is ${deg1(issue.valueDeg ?? 0)}, not 0°, so it cannot fold flat (Kawasaki).`;
+      case 'maekawa':
+        return `Vertex ${vertex}: it has ${issue.mountains ?? 0} mountain and ${issue.valleys ?? 0} valley creases; a flat-folded vertex needs them to differ by two (Maekawa).`;
+      case 'dangling':
+        return 'A crease has no panel on one side or the same panel on both sides (dangling): it generates no hinge.';
+      case 'unassigned':
+        return 'An interior crease is unassigned: its hinge gets no mountain / valley direction. Select the crease and choose a class.';
+      case 'isolated':
+        return `Vertex ${vertex} has no crease.`;
+      case 'noFaces':
+        return 'The pattern encloses no face, so nothing would be generated. Close a loop of creases.';
+    }
+  },
 };
 
 export const JOINTS: Record<string, { label: string; short: string; dof: string; description: string }> = {
@@ -206,6 +254,26 @@ export const PANEL = {
   editPointRelease: 'Release (remove constraint)',
   constrainTo: 'Constrain to construction geometry',
   constrainToNone: '— choose —',
+  // Crease pattern Properties (a pattern, one of its vertices or one of its creases)
+  patternTitle: (name: string): string => `Crease pattern · ${name}`,
+  patternPlane: 'Plane',
+  patternCounts: 'Vertices · creases · faces',
+  patternCountsValue: (vertices: number, creases: number, faces: number): string => `${vertices} · ${creases} · ${faces}`,
+  patternHidden: 'Hidden (not drawn, not pickable)',
+  patternChecks: 'Checks',
+  patternValid: 'No problems found: every interior vertex passes the Kawasaki and Maekawa conditions and every interior crease has a class.',
+  patternIssueHelp: 'Click to select the vertex or crease concerned.',
+  patternGenerate: 'Generate panels',
+  patternRegenerate: 'Regenerate panels',
+  patternGenerateHelp: 'Creates one polygon panel per face of the pattern and one crease (edge–edge revolute) per interior crease, with the drawn mountain / valley class and target angle. The first panel becomes the ground link when there is none. The pattern is then hidden (show it again from the model tree); regenerating replaces the previous panels and creases.',
+  patternVertex: 'Pattern vertex',
+  patternVertexPosition: 'Position',
+  patternDeleteVertex: 'Delete vertex (and its creases)',
+  patternClass: 'Class',
+  patternTarget: 'Target fold angle (°)',
+  patternTargetHelp: 'Fold angle the generated crease should reach: 180° = flat, 0° = fully closed. Leave the field empty for none. Copied to the hinge\'s target by "Generate panels".',
+  patternDeleteCrease: 'Delete crease',
+  patternDelete: 'Delete pattern (and its generated panels)',
   mechanism: 'Mechanism',
   // a refusal (joint, fold, edit, solidify) is kept in the Mechanism panel until dismissed or the next change, since the status bar is replaced on the next hover
   noticeDismiss: 'Dismiss',
@@ -260,7 +328,8 @@ export const SIM = {
       ? 'A vertex is flat: all of its creases are unfolded, a singular state in which a simulation would fold only two of them.'
       : `${n} vertices are flat: all of their creases are unfolded, a singular state in which a simulation would fold only two creases of each.`,
   fold: 'Fold (pre-fold flat vertex)',
-  foldHelp: 'Drives one crease of a flat vertex to 160° and re-solves the panels so that every crease leaves the flat state (the generic folding branch). The sketch-plane constraints of the panels involved are removed; a model without a driver keeps the fold driver. Undo restores the flat vertex.',
+  foldHelp:
+    'Drives one crease of a flat vertex to 160° and re-solves the panels so that every crease leaves the flat state (the generic folding branch), on the side the stored mountain / valley classes ask for. The panels generated from a crease pattern are folded as one sheet, vertex by vertex, so that every crease follows the drawn assignment; an inconsistent assignment is refused with the creases named. The sketch-plane constraints of the panels involved are removed; a model without a driver keeps the fold driver. Undo restores the flat vertex.',
   // Crease-pattern validator (docs/CONSTRUCTION_PLAN.md, item 2d): one line per interior vertex in the Mechanism panel
   creasePattern: 'Crease pattern',
   creasePatternHelp:
@@ -300,6 +369,8 @@ export const TREE = {
   links: 'Links',
   joints: 'Joints',
   construction: 'Construction geometry',
+  patterns: 'Crease patterns',
+  creaseCount: (n: number): string => `${n} crease${n === 1 ? '' : 's'}`,
   drivers: 'Drivers',
   targets: 'Editing-point constraints',
   empty: '— none —',
@@ -347,8 +418,14 @@ export const STATUS = {
   editRefused: 'The constraints cannot all be satisfied with this change, so it was not applied.',
   // Fold (pre-fold) command and the flat-vertex hints around it
   folded: (creaseName: string, dof: number): string => `Vertex pre-folded about crease ${creaseName}. Mechanism DOF: ${dof}.`,
+  // the Fold command on the panels generated from a crease pattern (prefoldPattern): the whole sheet leaves the flat state
+  patternFolded: (patternName: string, creases: number, creaseName: string, dof: number): string =>
+    `${patternName} pre-folded as one sheet on its drawn mountain / valley branch: ${creases} creases folded, driven at crease ${creaseName}. Mechanism DOF: ${dof}.`,
   foldedDriverKept: 'A fold driver was kept on that crease so the vertex can be previewed; the Driver tool moves it to another crease.',
-  foldFailed: (reason: FoldReason): string => {
+  /** "Panel 1 ↔ Panel 2 (mountain)": a crease named in a mountain / valley conflict, with its stored class when it has one. */
+  conflictCrease: (ends: string, mv: 'M' | 'V' | undefined): string => (mv ? `${ends} (${PATTERN.classes[mv].toLowerCase()})` : ends),
+  /** `conflicts`: the conflictCrease names of the creases a mvConflict result lists, comma-separated (empty when unknown). */
+  foldFailed: (reason: FoldReason, conflicts = ''): string => {
     switch (reason) {
       case 'noLoop':
         return 'Nothing to fold: creases must close a loop of at least three panels around one vertex.';
@@ -360,6 +437,11 @@ export const STATUS = {
         return 'No folded state was found for this vertex: every crease is collinear with another one (an "X" vertex folds only as a straight hinge), or the panels cannot all leave the plane. Nothing was changed.';
       case 'unreachable':
         return 'No pose was found in which this crease has that fold angle: a joint, a driver on another crease of the vertex or a locked panel holds it. Nothing was changed.';
+      case 'mvConflict':
+        return (
+          `No folded state honours the mountain / valley assignment of every crease${conflicts ? `: the assigned class of ${conflicts} cannot be met together with the others` : ''}. ` +
+          'At a folded vertex three creases take one class and one the other (Maekawa): change or clear the classes that are wrong in the crease Properties (or in the crease pattern, then regenerate) and fold again. Nothing was changed.'
+        );
     }
   },
   creaseFolded: (creaseName: string, dof: number): string => `Folded to target: ${creaseName}. Mechanism DOF: ${dof}.`,
@@ -399,6 +481,29 @@ export const STATUS = {
   pasted: 'Pasted',
   nothingToCopy: 'Select a link to copy.',
   extruded: 'Polygon extruded to a prism',
+  // Crease pattern tool (plan 3b): the polyline of creases and the generation
+  patternNext: 'click the next vertex · Enter ends the polyline · Backspace removes the last crease',
+  patternVertexPlaced: (patternName: string): string => `Vertex placed in ${patternName} — ${STATUS.patternNext}`,
+  patternCreaseAdded: (cls: CreaseClass, pieces: number): string => `${PATTERN.creaseLabel(cls)} added${pieces > 1 ? ` (split into ${pieces} at crossings)` : ''} — ${STATUS.patternNext}`,
+  patternCreaseRefused: (reason: AddCreaseReason): string => {
+    switch (reason) {
+      case 'duplicate':
+        return 'A crease already joins these two vertices; nothing was added.';
+      case 'overlap':
+        return 'The new crease would overlap an existing crease along its line; nothing was added. Draw it between the vertices of that crease instead.';
+      case 'zeroLength':
+      case 'sameVertex':
+        return 'The two vertices coincide; nothing was added.';
+      case 'missingVertex':
+        return 'The previous vertex no longer exists; the polyline starts again here.';
+    }
+  },
+  patternPolylineEnded: 'Polyline ended. Click to start the next one.',
+  patternCreaseRemoved: 'Last crease removed.',
+  patternVertexRemoved: 'Vertex removed.',
+  patternGenerated: (links: number, creases: number): string => `Generated ${links} panel${links === 1 ? '' : 's'} and ${creases} crease${creases === 1 ? '' : 's'}.`,
+  patternGeneratedWarnings: (n: number): string => `${n} warning${n === 1 ? '' : 's'}: select the pattern in the model tree to read them.`,
+  patternNothingToGenerate: 'Nothing to generate: the pattern encloses no face. Close a loop of creases first.',
 };
 
 /** Labels drawn in the viewport by the tools (overlay), not in the status bar. */
@@ -455,6 +560,8 @@ export const SETTINGS = {
   selection: 'Selection highlight',
   mountain: 'Mountain crease',
   valley: 'Valley crease',
+  patternBorder: 'Pattern border crease',
+  patternUnassigned: 'Pattern unassigned crease',
   display: 'Display',
   showLabels: 'Show labels',
   showConstruction: 'Show construction geometry',
@@ -482,7 +589,8 @@ export const HELP = {
     'Preview mode: play the motion through the driver range.',
     'Panel tool: click vertices on the sketch plane and close the loop. Vertices placed on existing vertices are joined and shared edges become creases, so an origami vertex is built panel by panel; the label at a shared vertex shows the sector-angle sum (green when the last panel closes the ring at 360°, red when the angles cannot lie flat). Extrude a panel from Properties to make a prism. Edit tool: click a vertex, then its destination, to snap geometry together.',
     'Patterning: Ctrl+C / Ctrl+V duplicates the selected link; Mirror reflects across a datum plane; Pattern makes linear or polar arrays.',
-    'Keyboard: Esc cancel, Del delete, Ctrl+Z / Ctrl+Y undo / redo, Ctrl+C / Ctrl+V copy / paste, 1 select, 2 link, 3 polygon, S panel (sketch), E edit, G ground, J joint, F zoom to fit.',
+    'Crease pattern tool (C): draw the crease pattern of an origami sheet on the sketch plane as polylines of creases (mountain red, valley blue, border dark grey, unassigned amber; choose the class in the tool options or in a crease\'s Properties). Clicks snap to pattern vertices and onto creases, and crossings are split. Then select the pattern (viewport or model tree) and press "Generate panels": every face becomes a panel and every interior crease a hinge with its class; the Properties list the Kawasaki / Maekawa checks of each interior vertex first.',
+    'Keyboard: Esc cancel, Del delete, Ctrl+Z / Ctrl+Y undo / redo, Ctrl+C / Ctrl+V copy / paste, 1 select, 2 link, 3 polygon, S panel (sketch), C crease pattern, E edit, G ground, J joint, F zoom to fit.',
   ],
 };
 

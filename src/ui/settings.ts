@@ -19,6 +19,9 @@ export interface ColorSettings {
   /** Origami creases: mountain / valley colours (Lang / Origami Simulator convention: red / blue). */
   mountain: string;
   valley: string;
+  /** Crease-pattern creases of class border (dark grey) and unassigned (amber); mountain / valley share the colours above. */
+  patternBorder: string;
+  patternUnassigned: string;
 }
 
 export interface AppSettings {
@@ -48,6 +51,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
     selection: '#ffb300',
     mountain: '#d9342b', // origami convention: mountain creases red
     valley: '#2f6fd6', // valley creases blue
+    patternBorder: '#3b3f44', // crease pattern: border (sheet outline) creases dark grey
+    patternUnassigned: '#e0a400', // crease pattern: creases without a class amber
   },
   designSpaceOpacity: 0.3,
   outputPathOpacity: 0.9,

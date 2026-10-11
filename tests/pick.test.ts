@@ -14,7 +14,7 @@ describe('rankPickCandidates', () => {
     const rs = [hit('face', 'P1'), hit('axis', 'C1'), hit('edge', 'P1', { pointIds: ['a', 'b'] }), hit('joint', 'J1'), hit('vertex', 'P1', { pointId: 'a', pointIds: ['a'] }), hit('editPoint', 'a', { pointId: 'a', pose: 0 })];
     const ranked = rankPickCandidates(rs, 0.1);
     expect(ranked.map((r) => r.type)).toEqual(['editPoint', 'vertex', 'joint', 'edge', 'axis', 'face']);
-    expect(ranked.map((r) => PICK_PRIORITY[r.type])).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(ranked.map((r) => PICK_PRIORITY[r.type])).toEqual([0, 1, 4, 5, 6, 7]);
   });
 
   it('orders the closest first within a priority', () => {

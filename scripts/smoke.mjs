@@ -128,7 +128,7 @@ console.log('sim on built', JSON.stringify(simBuilt));
 await page.screenshot({ path: `${OUT}/07-built-simulation.png` });
 if (process.env.EXPORT_EXAMPLES) {
   const fs = await import('node:fs');
-  for (const ex of ['fourBar', 'sliderCrank', 'sphericalPendulum', 'miuraVertex']) {
+  for (const ex of ['fourBar', 'sliderCrank', 'sphericalPendulum', 'miuraVertex', 'miuraSheet']) {
     const json = await page.evaluate((k) => { const { app } = window.linkageDesigner; app.setMode('construction'); app.loadExample(k); return app.saveToJson(); }, ex);
     fs.writeFileSync(`examples/${ex}.linkage.json`, json);
   }

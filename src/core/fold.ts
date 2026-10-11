@@ -363,26 +363,32 @@ export function foldCreaseTo(m: Model, jointId: ID, targetDeg: number, opts: { i
 
 /**
  * Why a fold did nothing:
- *  noLoop: the model has no crease loop at all;
+ *  noLoop: the model has no crease loop at all (prefoldPattern: none of the pattern's generated creases closes a loop);
  *  notFlat: the chosen loop (or every loop, when none was chosen) is already folded;
- *  locked: a panel of the loop other than the ground is locked (its pose may not be edited);
- *  noBranch: no candidate crease and sign produced a converged, fully folded pose with fewer DOF;
+ *  locked: a panel of a crease to fold, other than the ground, is locked (its pose may not be edited);
+ *  noBranch: no candidate crease and sign produced a converged pose with fewer DOF in which every crease of the set
+ *    has left the flat state;
+ *  mvConflict: such poses were found, but each gives some crease the opposite of its requested or stored mountain /
+ *    valley class, so the assignment is inconsistent (two mountains and two valleys at a degree-4 vertex, say);
+ *    `conflicts` names the creases of the pose that came closest;
  *  unreachable: (foldCreaseToTarget) no pose with the requested fold angle and class was found from the current
  *    pose (a constraint, a driver or a locked panel holds the crease), or the joint is not a crease.
  */
-export type FoldReason = 'noLoop' | 'notFlat' | 'noBranch' | 'locked' | 'unreachable';
+export type FoldReason = 'noLoop' | 'notFlat' | 'noBranch' | 'locked' | 'unreachable' | 'mvConflict';
 
 export interface FoldResult {
   ok: boolean;
   reason?: FoldReason;
-  /** The crease whose dihedral was prescribed (ok only). */
+  /** The crease whose dihedral was prescribed first (ok only). */
   creaseId?: ID;
-  /** Dihedral of every crease of the loop after the fold, by joint id (ok only). */
+  /** Dihedral of every crease of the set (the loop's creases, plus PrefoldOptions.creaseIds) after the fold, by joint id (ok only). */
   dihedrals?: Record<ID, number>;
   /** Mechanism DOF after the fold (ok only). */
   dof?: number;
-  /** Ids of the body planar (sketch-plane) joints removed from the loop's panels (ok only; undo restores them). */
+  /** Ids of the body planar (sketch-plane) joints removed from the panels of the set (ok only; undo restores them). */
   removedPlanes?: ID[];
+  /** The creases whose class could not be honoured, the fewest among the otherwise acceptable poses (reason mvConflict only). */
+  conflicts?: ID[];
 }
 
 export interface PrefoldOptions {
@@ -392,35 +398,73 @@ export interface PrefoldOptions {
   preferCreaseId?: ID;
   /** Dihedral prescribed on the driven crease (default DEFAULT_PREFOLD_DEG = 160°). */
   angleDeg?: number;
-  /** Sign of the prescribed dihedral; both are tried when omitted. */
+  /** Sign of the prescribed dihedral on the first crease; both are tried when omitted. */
   sign?: 1 | -1;
   /**
    * Mountain / valley preference per crease (creaseMountainValley seen from loopNormal). Every entry for a crease of
-   * the loop is verified on the folded pose, whichever crease was driven: a pose that gives any named crease the
+   * the set is verified on the folded pose, whichever crease was driven: a pose that gives any named crease the
    * other class is rejected and the other sign tried, so a preference on a collinear crease (which is never driven
-   * first) is honoured as well. When the driven crease has an entry its predicted sign is tried first.
+   * first) is honoured as well. When a driven crease has an entry its predicted sign is tried first. An entry wins
+   * over the stored class of the crease it names.
    */
   mountainValley?: Record<ID, 'M' | 'V'>;
+  /**
+   * Creases that must all leave the flat state together with the chosen loop's (default: the loop's creases alone).
+   * The loops made of these creases are folded one after the other (see prefoldVertex); a crease of the set that
+   * belongs to no such loop must have followed by the end, else the result is noBranch.
+   */
+  creaseIds?: ID[];
+  /**
+   * Honour the stored mountain / valley class (joint.fold.mv, the creaseMV convention) of every crease of the set
+   * that has one (default true): a pose giving such a crease the other class is rejected like a failed
+   * mountainValley entry, so a generated pattern folds on the branch it was drawn with.
+   */
+  honourAssigned?: boolean;
 }
 
 /**
  * Leave the flat (bifurcation) state of a crease loop: the given loop, else
  * the loop containing `preferCreaseId`, else the first flat loop. The sketch-plane
- * constraints of the loop's panels are removed (a flat vertex drawn in 2-D is
+ * constraints of the panels involved are removed (a flat vertex drawn in 2-D is
  * held flat by them), then for each candidate crease, non-collinear creases
  * first because driving a collinear crease lands on the straight-hinge
  * branch, the dihedral ±angleDeg is prescribed (foldCreaseTo) from the flat
  * pose. A result is accepted when the solve converged, no crease of the loop
- * is still within FLAT_TOLERANCE_DEG of flat, the mountain / valley
- * preference (if any) is met and the mechanism DOF is lower than in the flat
- * state without the planar joints (2 → 1 for a degree-4 vertex). The pose is
- * then committed and the driver values re-measured; a model that had no
- * driver keeps the fold driver on the chosen crease so the vertex can be
- * previewed at once (docs/CONSTRUCTION_PLAN.md §8). Drivers acting on the
- * loop itself (fold drivers on its creases, angle drivers on its panels) are
- * released during the search, since holding them at their flat values would
- * forbid the fold; every other driver is held. When no candidate works the
- * model is restored byte for byte (planar joints included).
+ * is still within FLAT_TOLERANCE_DEG of flat, the mountain / valley classes
+ * asked for (the `mountainValley` entries and, with `honourAssigned`, the
+ * stored classes of the creases) are met, and the mechanism DOF is lower than
+ * in the flat state without the planar joints (2 → 1 for a degree-4 vertex).
+ *
+ * A set spanning several loops (`creaseIds`: a generated sheet, see
+ * prefoldPattern) is folded in stages. One prescribed dihedral solved from
+ * the flat sheet lands on a mixed branch for all but the smallest sheets: the
+ * damped Gauss–Newton step away from the singular flat state is the cheapest
+ * motion that changes the driven dihedral, which folds the driven vertex
+ * generically but takes the straight lines of creases through the other
+ * vertices as straight hinges, where their bent creases stay flat (on a 3 × 3
+ * Miura sheet grounded at a middle panel one zigzag folds and every horizontal
+ * line is a hinge). Driving the first crease further cannot carry such a vertex
+ * onto its generic branch, since the two branches meet only in the flat state.
+ * So after the chosen loop every other loop of the set is visited in adjacency
+ * order (loops sharing a crease next) and, when some of its creases are still
+ * flat, one of them (non-collinear first) is prescribed ±angleDeg from the
+ * current pose, both signs tried, under the same acceptance test over every
+ * loop folded so far: within that one solve the vertex passes back through its
+ * flat state and comes out on the generic branch that agrees with the vertices
+ * already folded. Finally the first crease is prescribed ±angleDeg once more,
+ * since the later stages may have moved it (a 2 × 2 sheet needs no stage beyond
+ * the first; 3 × 3 and 4 × 4 sheets need one or two, whichever panel is ground
+ * and whichever loop is first).
+ *
+ * The pose is then committed and the driver values re-measured; a model that
+ * had no driver keeps the fold driver on the chosen crease so the vertex can be
+ * previewed at once (docs/CONSTRUCTION_PLAN.md §8). Drivers acting on the set
+ * (fold drivers on its creases, angle drivers on its panels) are released
+ * during the search, since holding them at their flat values would forbid the
+ * fold; every other driver is held. When no candidate works the model is
+ * restored byte for byte (planar joints included): mvConflict, naming the
+ * creases, when poses were found that failed the class test alone, noBranch
+ * otherwise.
  */
 export function prefoldVertex(m: Model, opts: PrefoldOptions = {}): FoldResult {
   const loops = opts.loop ? [opts.loop] : findCreaseLoops(m);
@@ -428,12 +472,25 @@ export function prefoldVertex(m: Model, opts: PrefoldOptions = {}): FoldResult {
   const preferred = opts.preferCreaseId !== undefined ? loops.find((l) => l.creaseIds.includes(opts.preferCreaseId!)) : undefined;
   const loop = opts.loop ?? preferred ?? loops.find((l) => l.flat) ?? loops[0];
   if (!loop.flat) return { ok: false, reason: 'notFlat' };
-  if (loop.linkIds.some((id) => m.links[id]?.locked && !m.links[id].ground)) return { ok: false, reason: 'locked' };
+
+  // the creases that must leave the flat state (the loop's and the ones asked for) and their panels
+  const set = [...loop.creaseIds];
+  for (const id of opts.creaseIds ?? []) if (!set.includes(id) && m.joints[id] && isCrease(m, m.joints[id])) set.push(id);
+  const panels: ID[] = [];
+  for (const id of set) {
+    const j = m.joints[id];
+    for (const linkId of [j.a.linkId, (j.b as { linkId: ID }).linkId]) if (!panels.includes(linkId)) panels.push(linkId);
+  }
+  if (panels.some((id) => m.links[id]?.locked && !m.links[id].ground)) return { ok: false, reason: 'locked' };
+  // the other loops made of creases of the set, before anything moves (their collinear pairs are measured flat)
+  const sameLoop = (a: CreaseLoop, b: CreaseLoop): boolean => a.creaseIds.length === b.creaseIds.length && a.creaseIds.every((id) => b.creaseIds.includes(id));
+  const others = set.length > loop.creaseIds.length ? findCreaseLoops(m).filter((l) => !sameLoop(l, loop) && l.creaseIds.every((id) => set.includes(id))) : [];
+  const stages = stageOrder(loop, others);
 
   const snapshot = serializeModel(m);
   const up = loopNormal(m, loop);
   const removedPlanes: ID[] = [];
-  for (const id of loop.linkIds) {
+  for (const id of panels) {
     const bp = bodyPlaneJoint(m, id);
     if (bp) {
       removedPlanes.push(bp.id);
@@ -442,9 +499,66 @@ export function prefoldVertex(m: Model, opts: PrefoldOptions = {}): FoldResult {
   }
   const dofBefore = computeMobility(m).dof;
   const originalDrivers = m.drivers;
-  const onLoop = (d: Driver): boolean => (d.jointId !== undefined && loop.creaseIds.includes(d.jointId)) || (d.linkId !== undefined && loop.linkIds.includes(d.linkId));
-  m.drivers = originalDrivers.filter((d) => !onLoop(d));
+  const onSet = (d: Driver): boolean => (d.jointId !== undefined && set.includes(d.jointId)) || (d.linkId !== undefined && panels.includes(d.linkId));
+  m.drivers = originalDrivers.filter((d) => !onSet(d));
 
+  const angle = Math.abs(opts.angleDeg ?? DEFAULT_PREFOLD_DEG);
+  const prefs = opts.mountainValley ?? {};
+  const honour = opts.honourAssigned ?? true;
+  /** The class crease `id` is asked to take, seen from `up`: the hint for the sign to try first when driving it. */
+  const wanted = (id: ID): 'M' | 'V' | undefined => {
+    const j = m.joints[id];
+    return prefs[id] ?? (honour && j.fold?.mv ? mvSeenFrom(m, j, j.fold.mv, up) : undefined);
+  };
+  /** The creases among `ids` still within FLAT_TOLERANCE_DEG of flat (or unmeasurable) in the current pose. */
+  const stillFlat = (ids: ID[]): ID[] =>
+    ids.filter((id) => {
+      const d = creaseDihedralDeg(m, m.joints[id]);
+      return d === null || isFlatDihedral(d);
+    });
+  /** The creases among `ids` whose class in the current pose is not the one asked for: a mountainValley entry (seen from `up`), else the stored class (creaseMV convention). */
+  const mismatched = (ids: ID[]): ID[] =>
+    ids.filter((id) => {
+      const j = m.joints[id];
+      const pref = prefs[id];
+      if (pref !== undefined) return creaseMountainValley(m, j, up) !== pref;
+      return honour && j.fold?.mv !== undefined && creaseMV(m, j) !== j.fold.mv;
+    });
+  let conflicts: ID[] | null = null;
+  const noteConflicts = (ids: ID[]): void => {
+    if (!conflicts || ids.length < conflicts.length) conflicts = ids;
+  };
+  const fail = (): FoldResult => {
+    restore(m, snapshot);
+    return conflicts ? { ok: false, reason: 'mvConflict', conflicts } : { ok: false, reason: 'noBranch' };
+  };
+  /**
+   * Prescribe ±angle on the first candidate crease and sign that gives an acceptable pose: the solve converged, no
+   * crease of `check` is flat, the DOF is lower than before and no crease of `check` has the wrong class (a pose
+   * failing the class test alone is remembered for the conflict report). Returns the crease driven, or null with the
+   * pose unchanged.
+   */
+  const drive = (candidates: ID[], check: ID[], sign?: 1 | -1): ID | null => {
+    for (const cid of candidates) {
+      const pref = wanted(cid);
+      const first = sign ?? (pref ? predictedSign(m, m.joints[cid], up, pref) : 1);
+      const signs: (1 | -1)[] = sign ? [sign] : [first, first === 1 ? -1 : 1];
+      for (const s of signs) {
+        const saved = positionsFromModel(m);
+        if (!foldCreaseTo(m, cid, s * angle).ok) continue;
+        if (stillFlat(check).length === 0 && computeMobility(m).dof < dofBefore) {
+          const bad = mismatched(check);
+          if (bad.length === 0) return cid;
+          noteConflicts(bad);
+        }
+        applyPositions(m, saved);
+        syncDriverValues(m);
+      }
+    }
+    return null;
+  };
+
+  // stage 1: the chosen loop, the preferred crease first, non-collinear creases before collinear ones
   const collinear = new Set(loop.collinearPairs.flat());
   const prefer = opts.preferCreaseId !== undefined && loop.creaseIds.includes(opts.preferCreaseId) ? opts.preferCreaseId : undefined;
   const candidates = [
@@ -453,40 +567,58 @@ export function prefoldVertex(m: Model, opts: PrefoldOptions = {}): FoldResult {
     ...(prefer !== undefined && collinear.has(prefer) ? [prefer] : []),
     ...loop.creaseIds.filter((id) => id !== prefer && collinear.has(id)),
   ];
-  const angle = Math.abs(opts.angleDeg ?? DEFAULT_PREFOLD_DEG);
-
-  const prefs = opts.mountainValley ?? {};
-  for (const cid of candidates) {
-    const j = m.joints[cid];
-    const pref = prefs[cid];
-    const first = opts.sign ?? (pref ? predictedSign(m, j, up, pref) : 1);
-    const signs: (1 | -1)[] = opts.sign ? [opts.sign] : [first, first === 1 ? -1 : 1];
-    for (const s of signs) {
-      const saved = positionsFromModel(m);
-      if (!foldCreaseTo(m, cid, s * angle).ok) continue;
-      const dihedrals: Record<ID, number> = {};
-      let folded = true;
-      for (const id of loop.creaseIds) {
-        const d = creaseDihedralDeg(m, m.joints[id]);
-        if (d === null || isFlatDihedral(d)) folded = false;
-        else dihedrals[id] = d;
-      }
-      // every named preference on the loop is checked, not only the driven crease's (flipping the sign mirrors the
-      // whole vertex, so a preference on a collinear crease selects the sign of whichever crease is driven)
-      const mvOk = Object.entries(prefs).every(([id, p]) => !loop.creaseIds.includes(id) || !m.joints[id] || creaseMountainValley(m, m.joints[id], up) === p);
-      const dof = folded && mvOk ? computeMobility(m).dof : dofBefore;
-      if (folded && mvOk && dof < dofBefore) {
-        m.drivers = originalDrivers;
-        if (originalDrivers.length === 0) addFoldDriver(m, cid);
-        syncDriverValues(m);
-        return { ok: true, creaseId: cid, dihedrals, dof, removedPlanes };
-      }
+  const driven = drive(candidates, loop.creaseIds, opts.sign);
+  if (driven === null) return fail();
+  // further stages: every other loop of the set whose creases did not all follow, in adjacency order
+  const done = [...loop.creaseIds];
+  for (const stage of stages.slice(1)) {
+    const flat = stillFlat(stage.creaseIds);
+    if (flat.length > 0) {
+      const coll = new Set(stage.collinearPairs.flat());
+      if (drive([...flat.filter((id) => !coll.has(id)), ...flat.filter((id) => coll.has(id))], [...done, ...stage.creaseIds]) === null) return fail();
+    }
+    for (const id of stage.creaseIds) if (!done.includes(id)) done.push(id);
+  }
+  // creases of the set outside those loops (loops only partly in the set, free hinges) must have followed
+  if (stillFlat(set).length > 0) return fail();
+  const bad = mismatched(set);
+  if (bad.length > 0) {
+    noteConflicts(bad);
+    return fail();
+  }
+  // the later stages may have moved the first crease: put it back at ±angle (left where it is when that fails)
+  if (stages.length > 1) {
+    const saved = positionsFromModel(m);
+    const current = creaseDihedralDeg(m, m.joints[driven]) ?? angle;
+    if (foldCreaseTo(m, driven, Math.sign(current) * angle).ok && (stillFlat(set).length > 0 || mismatched(set).length > 0)) {
       applyPositions(m, saved);
       syncDriverValues(m);
     }
   }
-  restore(m, snapshot);
-  return { ok: false, reason: 'noBranch' };
+  const dof = computeMobility(m).dof;
+  m.drivers = originalDrivers;
+  if (originalDrivers.length === 0) addFoldDriver(m, driven);
+  syncDriverValues(m);
+  const dihedrals: Record<ID, number> = {};
+  for (const id of set) dihedrals[id] = creaseDihedralDeg(m, m.joints[id])!;
+  return { ok: true, creaseId: driven, dihedrals, dof, removedPlanes };
+}
+
+/**
+ * `first` followed by `others` in adjacency order: a loop that shares a crease
+ * with one already listed comes next (breadth first), loops connected to none
+ * of them last. The order of the stages of a sheet-wide pre-fold.
+ */
+function stageOrder(first: CreaseLoop, others: CreaseLoop[]): CreaseLoop[] {
+  const order = [first];
+  const left = [...others];
+  for (let i = 0; i < order.length; i++) {
+    for (let k = 0; k < left.length; ) {
+      if (left[k].creaseIds.some((id) => order[i].creaseIds.includes(id))) order.push(...left.splice(k, 1));
+      else k++;
+    }
+  }
+  return [...order, ...left];
 }
 
 /**
@@ -506,6 +638,35 @@ function predictedSign(m: Model, j: Joint, up: Vec3, pref: 'M' | 'V'): 1 | -1 {
   const side = dot(cross(e, sub(m.points[offA].pos, a0)), up);
   const mountain = side < 0 ? 1 : -1;
   return pref === 'M' ? mountain : mountain === 1 ? -1 : 1;
+}
+
+/**
+ * Pre-fold the mechanism generated from a crease pattern as a whole, the
+ * Fold command on a generated sheet. The set is made of the pattern's
+ * generated joints that are creases (CreasePattern.generated.jointIds) and
+ * close a crease loop: a generated crease that closes none (the diagonal of a
+ * square, the hinge of a panel hanging off the sheet) is a free hinge with a
+ * DOF of its own that no prescribed dihedral moves, so it is not required to
+ * fold. prefoldVertex starts from the first flat loop among the loops made of
+ * those creases (the loop containing `preferCreaseId` when that one is flat)
+ * and folds the sheet in stages; the stored classes are honoured unless
+ * `honourAssigned` is false, so the sheet folds on the branch the pattern was
+ * drawn with. noLoop when the pattern does not exist, has not been generated
+ * or none of its creases closes a loop; notFlat when every loop of the pattern
+ * is already folded; otherwise prefoldVertex's result (the dihedrals of the
+ * set, the conflicting creases).
+ */
+export function prefoldPattern(m: Model, patternId: ID, opts: Omit<PrefoldOptions, 'loop' | 'creaseIds'> = {}): FoldResult {
+  const p = m.patterns?.[patternId];
+  const generated = (p?.generated?.jointIds ?? []).filter((id) => m.joints[id] && isCrease(m, m.joints[id]));
+  if (generated.length === 0) return { ok: false, reason: 'noLoop' };
+  const loops = findCreaseLoops(m).filter((l) => l.creaseIds.every((id) => generated.includes(id)));
+  if (loops.length === 0) return { ok: false, reason: 'noLoop' };
+  const flat = loops.filter((l) => l.flat);
+  const loop = flat.find((l) => opts.preferCreaseId !== undefined && l.creaseIds.includes(opts.preferCreaseId)) ?? flat[0];
+  if (!loop) return { ok: false, reason: 'notFlat' };
+  const creaseIds = generated.filter((id) => loops.some((l) => l.creaseIds.includes(id)));
+  return prefoldVertex(m, { ...opts, loop, creaseIds });
 }
 
 // ---------------------------------------------------------------------------
@@ -677,20 +838,23 @@ export function foldCreaseToTarget(m: Model, jointId: ID, targetDeg: number, mv?
     const flatSnapshot = serializeModel(m); // every attempt starts from the flat state
     const pref = mv ? mvSeenFrom(m, j, mv, loopNormal(m, start)) : undefined;
     let reason: FoldReason = 'unreachable';
+    let conflicts: ID[] | undefined;
     // the preferred sign of the pre-fold first (prefoldVertex verifies the class when it drives this crease)
     const attempts: (PrefoldOptions['sign'] | undefined)[] = [undefined, 1, -1];
     for (const sign of attempts) {
       const r = prefoldVertex(m, { loop: start, preferCreaseId: jointId, angleDeg: targetDeg, sign, mountainValley: pref && sign === undefined ? { [jointId]: pref } : undefined });
       if (!r.ok) {
         reason = r.reason ?? 'noBranch'; // prefoldVertex restored the flat state itself
+        conflicts = r.conflicts;
         continue;
       }
       if (settle()) return done(r.removedPlanes ?? []);
       restore(m, flatSnapshot);
       reason = 'unreachable';
+      conflicts = undefined;
     }
     restore(m, snapshot);
-    return { ok: false, reason };
+    return conflicts ? { ok: false, reason, conflicts } : { ok: false, reason };
   }
   if (settle()) return done([]);
   restore(m, snapshot);

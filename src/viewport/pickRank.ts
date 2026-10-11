@@ -5,15 +5,19 @@
  */
 import type { ID, Vec3 } from '../core/types';
 
-export type PickType = 'vertex' | 'edge' | 'face' | 'axis' | 'joint' | 'construction' | 'editPoint';
+/** `pvertex` / `pcrease`: a vertex / crease of a crease pattern (id = the pattern, `pointId` / `creaseId` the element). */
+export type PickType = 'vertex' | 'edge' | 'face' | 'axis' | 'joint' | 'construction' | 'editPoint' | 'pvertex' | 'pcrease';
 
 export interface PickResult {
   type: PickType;
-  /** Link id for vertex/edge/face/axis; joint id; construction id; point id for editPoint. */
+  /** Link id for vertex/edge/face/axis; joint id; construction id; point id for editPoint; pattern id for pvertex/pcrease. */
   id: ID;
   linkId?: ID;
   pointIds?: ID[];
+  /** Point id (vertex, editPoint) or pattern vertex id (pvertex). */
   pointId?: ID;
+  /** Pattern crease id (pcrease). */
+  creaseId?: ID;
   faceIndex?: number;
   pose?: number;
   /** Datum geometry only: 0 point, 1 axis, 2 plane (points beat axes beat planes; datums have no occlusion semantics). */
@@ -35,24 +39,32 @@ export interface PickResult {
   distance: number;
 }
 
-/** Lower wins: point-like features beat bodies, model geometry beats datum geometry. */
+/**
+ * Lower wins: point-like features beat bodies, model geometry beats datum
+ * geometry. Pattern vertices and creases sit between link vertices and
+ * joints: a pattern is drawn on the sketch plane where panels may lie, and
+ * its thin elements must stay reachable over a panel's edges and faces.
+ */
 export const PICK_PRIORITY: Record<PickType, number> = {
   editPoint: 0,
   vertex: 1,
-  joint: 2,
-  edge: 3,
-  axis: 4,
-  face: 5,
-  construction: 6,
+  pvertex: 2,
+  pcrease: 3,
+  joint: 4,
+  edge: 5,
+  axis: 6,
+  face: 7,
+  construction: 8,
 };
 
 /**
  * Identity of a pickable feature: the fields that tell one feature from
  * another. The point ids are part of it because every edge and face of a
- * polygon carries the same link id.
+ * polygon carries the same link id, and the crease id because every element
+ * of a pattern carries the pattern's id.
  */
 export function pickKey(r: PickResult): string {
-  return [r.type, r.id, r.pointId ?? '', (r.pointIds ?? []).join(','), r.faceIndex ?? '', r.pose ?? ''].join('|');
+  return [r.type, r.id, r.pointId ?? '', r.creaseId ?? '', (r.pointIds ?? []).join(','), r.faceIndex ?? '', r.pose ?? ''].join('|');
 }
 
 /** Do two pick results name the same feature? */

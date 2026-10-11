@@ -12,22 +12,25 @@ import {
   setGround,
 } from '../core/model';
 import { consistencyTolerance, poseIsConsistent, tryChangeJointType, trySolveCommit } from '../core/feasibility';
-import { DEFAULT_PREFOLD_DEG, creaseDihedralDeg, creaseMV, driveCrease, foldCreaseToTarget, isCrease, prefoldVertex } from '../core/fold';
-import type { Construction, ID, Joint, JointType, Link, Target, Vec3 } from '../core/types';
+import { DEFAULT_PREFOLD_DEG, creaseDihedralDeg, creaseMV, driveCrease, findCreaseLoops, foldCreaseToTarget, isCrease, prefoldPattern, prefoldVertex } from '../core/fold';
+import { generatePanels, patternBasis, patternFaces, patternOfJoint, setCreaseClass, setCreaseTarget, to2d, validatePattern } from '../core/creasePattern';
+import type { Construction, CreaseClass, CreasePattern, ID, Joint, JointType, Link, Target, Vec3 } from '../core/types';
 import { isConstructionRef } from '../core/types';
 import { createColorPicker } from './colorPicker';
 import { icon } from './icons';
 import { DEFAULT_SETTINGS, type AppSettings } from './settings';
-import { APP, EXAMPLES, HELP, JOINTS, MENU, MODES, PANEL, POPUP, PREVIEW, SETTINGS, SIM, STATUS, TOOLS, TOOL_OPTIONS, TREE, jointRefusedMessage } from './strings';
+import { APP, EXAMPLES, HELP, JOINTS, MENU, MODES, PANEL, PATTERN, POPUP, PREVIEW, SETTINGS, SIM, STATUS, TOOLS, TOOL_OPTIONS, TREE, jointRefusedMessage } from './strings';
 import { jointDescription, jointEnds, jointLabel } from './labels';
 import { duplicateLink, extrudePolygon, translation } from '../core/patterns';
 import { currentViolation, modelSize } from '../core/kinematics';
 import { bodyPlaneJoint, setBodyPlane } from '../core/model';
 import { add, cross, scale } from '../core/geometry';
+import type { SelectionView } from '../viewport/render';
 import { ToolManager, parseTypedPoint } from '../viewport/tools';
 
 const JOINT_TYPES: JointType[] = ['spherical', 'revolute', 'planar', 'prismatic', 'cylindrical', 'screw'];
-const TOOL_LIST: ToolName[] = ['select', 'bar', 'sketch', 'polygon', 'prism', 'cylinder', 'edit', 'cpoint', 'caxis', 'cplane', 'joint', 'ground', 'driver', 'mirror', 'pattern', 'delete'];
+const TOOL_LIST: ToolName[] = ['select', 'bar', 'sketch', 'cpattern', 'polygon', 'prism', 'cylinder', 'edit', 'cpoint', 'caxis', 'cplane', 'joint', 'ground', 'driver', 'mirror', 'pattern', 'delete'];
+const CREASE_CLASSES: CreaseClass[] = ['M', 'V', 'B', 'U'];
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: string): HTMLElementTagNameMap[K] {
   const e = document.createElement(tag);
@@ -104,7 +107,7 @@ export class UI {
   private toolOptions!: HTMLElement;
   private props!: HTMLElement;
   private tree!: HTMLElement;
-  private treeOpen: Record<string, boolean> = { links: true, joints: true, construction: false, drivers: true, targets: true };
+  private treeOpen: Record<string, boolean> = { links: true, joints: true, patterns: true, construction: false, drivers: true, targets: true };
   private modePanel!: HTMLElement;
   private statusText!: HTMLElement;
   private dofChip!: HTMLElement;
@@ -224,9 +227,9 @@ export class UI {
           this.tools.applyTyped(tp);
           this.coordInput.value = '';
         } else if (this.coordInput.value.trim() === '' && app.mode === 'construction') {
-          // Enter on the empty box is the "press Enter to close it" of the Panel hint, as Enter on the canvas is
-          // (finishSketch is a no-op for every other tool); unparsable text is simply kept
-          this.tools.finishSketch();
+          // Enter on the empty box is the "press Enter to close it" of the Panel and Crease pattern hints, as Enter on
+          // the canvas is (finish is a no-op for every other tool); unparsable text is simply kept
+          this.tools.finish();
         }
         e.stopPropagation();
       }
@@ -319,11 +322,12 @@ export class UI {
       Object.values(m.joints).map((j) => `${j.id}:${j.type}:${this.jointLabel(j)}`).join(','),
       Object.values(m.construction).map((c) => `${c.id}:${c.name}`).join(','),
       m.settings.sketchPlaneId,
+      Object.values(m.patterns ?? {}).map((p) => `${p.id}:${p.name}:${Object.keys(p.creases).length}:${+!!p.hidden}`).join(','),
       m.drivers.map((d) => d.id).join(','),
       m.targets.map((t) => `${t.id}:${t.kind}:${+t.locked}`).join(','),
       app.mode,
       app.sim.activeDriver,
-      sel ? `${sel.type}:${sel.id}:${sel.pointId ?? ''}:${sel.pose ?? ''}` : '',
+      sel ? `${sel.type}:${sel.id}:${sel.pointId ?? ''}:${sel.creaseId ?? ''}:${sel.pose ?? ''}` : '',
     ].join('|');
     if (sig === this.treeSignature && this.tree.childElementCount > 0) return;
     this.treeSignature = sig;
@@ -431,6 +435,36 @@ export class UI {
         );
       }
     });
+    // crease patterns (plan 3b): name with the crease count, an eye for p.hidden; a row selects the pattern
+    const patterns = Object.values(m.patterns ?? {});
+    group('patterns', TREE.patterns, patterns.length, (list) => {
+      for (const p of patterns) {
+        const badges = [TREE.creaseCount(Object.keys(p.creases).length)];
+        if (p.hidden) badges.push(TREE.hidden);
+        const eye = el('button', `tree-eye ${p.hidden ? 'off' : ''}`);
+        eye.innerHTML = icon('eye');
+        eye.title = p.hidden ? TREE.show : TREE.hide;
+        eye.addEventListener('click', (e) => {
+          e.stopPropagation();
+          app.beginChange();
+          p.hidden = !p.hidden;
+          app.endChange();
+        });
+        const active = !!sel && (sel.type === 'pattern' || sel.type === 'pvertex' || sel.type === 'pcrease') && sel.id === p.id;
+        list.appendChild(
+          item(p.name, active, () => app.select({ type: 'pattern', id: p.id }), {
+            badges,
+            extra: eye,
+            iconName: 'cpattern',
+            rename: (v) => {
+              app.beginChange();
+              p.name = v;
+              app.endChange();
+            },
+          }),
+        );
+      }
+    });
     const cons = Object.values(m.construction);
     group('construction', TREE.construction, cons.length, (list) => {
       for (const c of cons) {
@@ -506,6 +540,11 @@ export class UI {
     }
     if (t === 'bar' || t === 'edit') {
       box.appendChild(row(TOOL_OPTIONS.jointType, select(JOINT_TYPES.filter((j) => j === 'revolute' || j === 'spherical').map((j) => ({ value: j, label: JOINTS[j].label })), app.model.settings.defaultJoint, (v) => (app.model.settings.defaultJoint = v))));
+    }
+    if (t === 'cpattern') {
+      const classRow = row(TOOL_OPTIONS.creaseClass, select(CREASE_CLASSES.map((c) => ({ value: c, label: PATTERN.classes[c] })), o.creaseClass, (v) => (o.creaseClass = v)));
+      classRow.title = TOOL_OPTIONS.creaseClassHelp;
+      box.appendChild(classRow);
     }
     if (t === 'pattern') {
       box.appendChild(row(TOOL_OPTIONS.patternKind, select([{ value: 'linear', label: TOOL_OPTIONS.patternLinear }, { value: 'polar', label: TOOL_OPTIONS.patternPolar }], o.patternKind, (v) => { o.patternKind = v; this.refresh(); })));
@@ -660,24 +699,40 @@ export class UI {
 
   /**
    * Fold command (Mechanism panel): pre-fold the first flat crease loop so that every crease leaves the singular flat
-   * state; one undo entry on success, nothing recorded and the model untouched on failure.
+   * state, on the side the stored mountain / valley classes ask for. When that loop's creases were generated from a
+   * crease pattern the whole pattern is folded as one sheet (prefoldPattern), so every generated crease leaves the
+   * flat state on the drawn branch. One undo entry on success; nothing recorded and the model untouched on failure,
+   * whose reason (naming the conflicting creases of an inconsistent assignment) is reported.
    */
   private foldFlatVertex(): void {
     const app = this.app;
     const m = app.model;
     const hadDrivers = m.drivers.length > 0;
+    const flat = findCreaseLoops(m).find((l) => l.flat);
+    const pattern = flat ? patternOfJoint(m, flat.creaseIds[0]) : null;
     app.beginChange();
-    const r = prefoldVertex(m);
+    const r = pattern ? prefoldPattern(m, pattern.id, { honourAssigned: true }) : prefoldVertex(m, { honourAssigned: true });
     if (!r.ok || !r.creaseId) {
       app.abortChange();
-      app.report(STATUS.foldFailed(r.reason ?? 'noBranch'));
+      app.report(STATUS.foldFailed(r.reason ?? 'noBranch', this.conflictList(r.conflicts)));
       return;
     }
     const crease = m.joints[r.creaseId];
     app.select({ type: 'joint', id: r.creaseId });
-    const folded = STATUS.folded(crease ? this.jointEnds(crease) : '', r.dof ?? 0);
+    const ends = crease ? this.jointEnds(crease) : '';
+    const folded = pattern ? STATUS.patternFolded(pattern.name, Object.keys(r.dihedrals ?? {}).length, ends, r.dof ?? 0) : STATUS.folded(ends, r.dof ?? 0);
     app.setStatus(!hadDrivers && m.drivers.length > 0 ? `${folded} ${STATUS.foldedDriverKept}` : folded);
     app.endChange();
+  }
+
+  /** The creases a mountain / valley conflict names, "Panel 1 ↔ Panel 2 (mountain), …" (empty when there are none). */
+  private conflictList(ids: ID[] | undefined): string {
+    const m = this.app.model;
+    return (ids ?? [])
+      .map((id) => m.joints[id])
+      .filter((j): j is Joint => !!j)
+      .map((j) => STATUS.conflictCrease(this.jointEnds(j), j.fold?.mv))
+      .join(', ');
   }
 
   private driverLabel(d: import('../core/types').Driver): string {
@@ -720,7 +775,142 @@ export class UI {
       if (c) this.constructionProps(box, c);
     } else if (sel.type === 'editPoint' && sel.pointId !== undefined && sel.pose !== undefined) {
       this.editPointProps(box, sel.pointId, sel.pose);
+    } else if (sel.type === 'pattern') {
+      const p = m.patterns?.[sel.id];
+      if (p) this.patternProps(box, p);
+    } else if (sel.type === 'pvertex' && sel.pointId) {
+      const p = m.patterns?.[sel.id];
+      if (p) this.patternVertexProps(box, p, sel.pointId);
+    } else if (sel.type === 'pcrease' && sel.creaseId) {
+      const p = m.patterns?.[sel.id];
+      if (p) this.patternCreaseProps(box, p, sel.creaseId);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Crease pattern properties (plan 3b)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Properties of a crease pattern (also the tail of a pattern vertex's or crease's Properties): name, plane, the
+   * counts of vertices / creases / bounded faces, the hidden flag, the checks of validatePattern as one line per
+   * issue (clicking a line selects the vertex or crease concerned), and the actions: "Generate panels" — or
+   * "Regenerate panels" once the pattern has generated — and Delete.
+   */
+  private patternProps(box: HTMLElement, p: CreasePattern): void {
+    const app = this.app;
+    const m = app.model;
+    const change = (fn: () => void) => {
+      app.beginChange();
+      fn();
+      app.endChange();
+    };
+    box.appendChild(el('h4', 'panel__subtitle', PANEL.patternTitle(p.name)));
+    box.appendChild(row(PANEL.name, textInput(p.name, (v) => change(() => (p.name = v)))));
+    box.appendChild(row(PANEL.patternPlane, el('span', 'value', m.construction[p.planeId]?.name ?? p.planeId)));
+    const faces = patternFaces(m, p);
+    box.appendChild(row(PANEL.patternCounts, el('span', 'value', PANEL.patternCountsValue(Object.keys(p.vertices).length, Object.keys(p.creases).length, faces.faces.length))));
+    box.appendChild(row(PANEL.patternHidden, checkbox(!!p.hidden, (v) => change(() => (p.hidden = v)))));
+    const issues = validatePattern(m, p);
+    const checks = el('div', 'crease-pattern');
+    checks.appendChild(el('p', 'hint', PANEL.patternChecks));
+    if (issues.length === 0) checks.appendChild(el('p', 'hint ok', PANEL.patternValid));
+    const basis = patternBasis(m, p);
+    for (const issue of issues) {
+      const vtx = issue.vertexId ? p.vertices[issue.vertexId] : undefined;
+      const uv = vtx ? to2d(basis, vtx.pos) : null;
+      const line = el('p', 'hint warn', PATTERN.issue(issue, uv ? PATTERN.vertexAt(uv[0], uv[1]) : ''));
+      const target: SelectionView | null = issue.vertexId ? { type: 'pvertex', id: p.id, pointId: issue.vertexId } : issue.creaseIds?.length ? { type: 'pcrease', id: p.id, creaseId: issue.creaseIds[0] } : null;
+      if (target) {
+        line.classList.add('clickable');
+        line.title = PANEL.patternIssueHelp;
+        line.addEventListener('click', () => app.select(target));
+      }
+      checks.appendChild(line);
+    }
+    box.appendChild(checks);
+    const actions = el('div', 'actions');
+    actions.appendChild(button(p.generated ? PANEL.patternRegenerate : PANEL.patternGenerate, () => this.generatePattern(p), { icon: 'polygon', title: PANEL.patternGenerateHelp }));
+    actions.appendChild(button(PANEL.patternDelete, () => this.tools.deletePick({ type: 'pattern', id: p.id }), { icon: 'delete', cls: 'btn--danger btn--small' }));
+    box.appendChild(actions);
+  }
+
+  /**
+   * "Generate panels": generatePanels in one undoable change (a previous generation is replaced), then the pattern
+   * is hidden — the panels take its place; the model tree shows it again — the first panel is selected and the
+   * status bar reports the counts and, when the checks found problems, their number. A pattern that encloses no
+   * face is refused with nothing changed.
+   */
+  private generatePattern(p: CreasePattern): void {
+    const app = this.app;
+    const m = app.model;
+    if (patternFaces(m, p).faces.length === 0) {
+      app.report(STATUS.patternNothingToGenerate);
+      return;
+    }
+    app.beginChange();
+    const r = generatePanels(m, p, { panelName: PATTERN.panelName });
+    p.hidden = true;
+    app.select(r.linkIds.length ? { type: 'link', id: r.linkIds[0] } : null);
+    const text = STATUS.patternGenerated(r.linkIds.length, r.jointIds.length);
+    app.setStatus(r.warnings.length ? `${text} ${STATUS.patternGeneratedWarnings(r.warnings.length)}` : text);
+    app.endChange();
+  }
+
+  /** A pattern vertex: its position (read-only) and Delete, followed by the pattern's Properties. */
+  private patternVertexProps(box: HTMLElement, p: CreasePattern, vertexId: ID): void {
+    const v = p.vertices[vertexId];
+    if (!v) return;
+    box.appendChild(el('h4', 'panel__subtitle', `${PANEL.patternVertex} · ${p.name}`));
+    box.appendChild(row(PANEL.patternVertexPosition, el('span', 'value', v.pos.map((x) => x.toFixed(3)).join(', '))));
+    box.appendChild(button(PANEL.patternDeleteVertex, () => this.tools.deletePick({ type: 'pvertex', id: p.id, pointId: vertexId }), { icon: 'delete', cls: 'btn--danger btn--small' }));
+    box.appendChild(el('hr'));
+    this.patternProps(box, p);
+  }
+
+  /**
+   * A pattern crease: its class as four buttons (the current one active), the target fold angle (0–180°, an empty
+   * field for none; both copied to the generated hinge) and Delete, followed by the pattern's Properties.
+   */
+  private patternCreaseProps(box: HTMLElement, p: CreasePattern, creaseId: ID): void {
+    const app = this.app;
+    const m = app.model;
+    const c = p.creases[creaseId];
+    if (!c) return;
+    box.appendChild(el('h4', 'panel__subtitle', `${PATTERN.creaseLabel(c.cls)} · ${p.name}`));
+    // a div, not a row(): a <label> would forward a click on its caption to the first button
+    const classes = el('div', 'show-points');
+    classes.title = TOOL_OPTIONS.creaseClassHelp;
+    classes.appendChild(el('span', 'prop-row__label', PANEL.patternClass));
+    for (const cls of CREASE_CLASSES) {
+      classes.appendChild(
+        button(PATTERN.classes[cls], () => {
+          app.beginChange();
+          setCreaseClass(m, p, c.id, cls);
+          app.endChange();
+        }, { cls: `btn--small ${c.cls === cls ? 'active' : ''}` }),
+      );
+    }
+    box.appendChild(classes);
+    const target = el('input');
+    target.type = 'number';
+    target.step = '5';
+    target.min = '0';
+    target.max = '180';
+    target.value = c.targetDeg === undefined ? '' : String(c.targetDeg);
+    target.addEventListener('change', () => {
+      const text = target.value.trim();
+      const n = Number(text);
+      app.beginChange();
+      setCreaseTarget(m, p, c.id, text === '' || !Number.isFinite(n) ? undefined : n);
+      app.endChange();
+    });
+    const targetRow = row(PANEL.patternTarget, target);
+    targetRow.title = PANEL.patternTargetHelp;
+    box.appendChild(targetRow);
+    box.appendChild(button(PANEL.patternDeleteCrease, () => this.tools.deletePick({ type: 'pcrease', id: p.id, creaseId: c.id }), { icon: 'delete', cls: 'btn--danger btn--small' }));
+    box.appendChild(el('hr'));
+    this.patternProps(box, p);
   }
 
   private linkProps(box: HTMLElement, link: Link): void {
@@ -1040,7 +1230,7 @@ export class UI {
       if (!r.ok) {
         app.abortChange();
         app.select(sel);
-        app.report(STATUS.foldFailed(r.reason ?? 'unreachable'));
+        app.report(STATUS.foldFailed(r.reason ?? 'unreachable', this.conflictList(r.conflicts)));
         return;
       }
       app.setStatus(STATUS.creaseFolded(`${this.jointLabel(j)} · ${this.jointEnds(j)}`, r.dof ?? 0));
@@ -1232,7 +1422,7 @@ export class UI {
     const box = el('div', 'dialog');
     box.appendChild(el('h2', 'dialog__title', SETTINGS.title));
     box.appendChild(el('h3', 'panel__title', SETTINGS.colors));
-    const colorKeys: (keyof AppSettings['colors'])[] = ['geometry', 'ground', 'construction', 'designSpace', 'outputPath', 'editPointFree', 'editPointConstrained', 'background', 'gridMajor', 'gridMinor', 'selection', 'mountain', 'valley'];
+    const colorKeys: (keyof AppSettings['colors'])[] = ['geometry', 'ground', 'construction', 'designSpace', 'outputPath', 'editPointFree', 'editPointConstrained', 'background', 'gridMajor', 'gridMinor', 'selection', 'mountain', 'valley', 'patternBorder', 'patternUnassigned'];
     const pickers: ReturnType<typeof createColorPicker>[] = [];
     for (const key of colorKeys) {
       const p = createColorPicker(SETTINGS[key as keyof typeof SETTINGS] as string, app.settings.colors[key], (hex) => app.updateSettings({ colors: { [key]: hex } }));
@@ -1325,7 +1515,7 @@ export class UI {
       e.preventDefault();
       this.tools.popSketchPoint();
     } else if (e.key === 'Delete' || e.key === 'Backspace') {
-      if (app.selection) this.tools.deletePick({ type: app.selection.type, id: app.selection.id, pointId: app.selection.pointId, pose: app.selection.pose });
+      if (app.selection) this.tools.deletePick({ type: app.selection.type, id: app.selection.id, pointId: app.selection.pointId, pose: app.selection.pose, creaseId: app.selection.creaseId });
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
       e.preventDefault();
       if (e.shiftKey) this.redo();
@@ -1340,9 +1530,9 @@ export class UI {
       e.preventDefault();
       this.pasteCopied();
     } else if (e.key === 'Enter' && app.mode === 'construction') {
-      this.tools.finishSketch();
+      this.tools.finish();
     } else if (app.mode === 'construction' && !e.ctrlKey && !e.metaKey) {
-      const map: Record<string, ToolName> = { '1': 'select', '2': 'bar', '3': 'polygon', '4': 'prism', '5': 'cylinder', g: 'ground', j: 'joint', d: 'driver', s: 'sketch', e: 'edit', m: 'mirror', p: 'pattern' };
+      const map: Record<string, ToolName> = { '1': 'select', '2': 'bar', '3': 'polygon', '4': 'prism', '5': 'cylinder', g: 'ground', j: 'joint', d: 'driver', s: 'sketch', c: 'cpattern', e: 'edit', m: 'mirror', p: 'pattern' };
       const t = map[e.key.toLowerCase()];
       if (t) this.tools.setTool(t);
       if (e.key.toLowerCase() === 'f') app.zoomToFit();

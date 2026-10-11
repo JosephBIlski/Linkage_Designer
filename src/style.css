@@ -79,6 +79,7 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); }
 .hint { margin: 0; color: var(--fg-dim); font-size: 12px; line-height: 1.35; }
 .hint--small { font-size: 11px; }
 .hint.warn { color: var(--warn); }
+.hint.clickable { cursor: pointer; text-decoration: underline dotted; }
 .notice { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 6px 8px; border: 1px solid var(--warn); border-radius: var(--radius); }
 .notice .hint { white-space: normal; }
 .hint.ok { color: var(--ok); }
@@ -120,6 +121,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: 6px 0; width: 10
 .label--vertex { font-size: 10px; background: rgba(255,255,255,0.6); }
 .label--construction { color: #6b5323; background: rgba(255,250,235,0.7); font-size: 10.5px; }
 .label--joint { color: #fff; background: rgba(43,47,51,0.85); }
+.label--pattern { color: #4a3d12; background: rgba(255,246,214,0.8); font-weight: 600; }
 /* Panel tool: sector-angle sum at a shared vertex (neutral / closes the ring at 360° / cannot lie flat); offset so the vertex marker stays visible */
 .label--sector, .label--sector-ok, .label--sector-bad { font-weight: 600; font-variant-numeric: tabular-nums; margin: -18px 0 0 18px; }
 .label--sector { background: rgba(255,255,255,0.88); }

@@ -974,5 +974,12 @@ export function parseModel(json: string): Model {
     l.helperIds ??= [];
     l.rigidity ??= [];
   }
+  // crease patterns are optional (files written before they existed have none); normalise the ones present
+  if (m.patterns) {
+    for (const p of Object.values(m.patterns)) {
+      p.vertices ??= {};
+      p.creases ??= {};
+    }
+  }
   return m;
 }

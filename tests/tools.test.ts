@@ -89,7 +89,7 @@ function fakeApp(model: Model, view: 'top' | 'front' = 'top'): { app: FakeApp; v
     notice: '',
     overlay: {},
     selection: null,
-    toolOptions: { sides: 4, radius: 1, height: 1, mode2d: true, planeMode: 'three', offset: 1, jointType: 'revolute', pitch: 1, patternKind: 'linear', patternCount: 3, patternAngle: 360 },
+    toolOptions: { sides: 4, radius: 1, height: 1, mode2d: true, planeMode: 'three', offset: 1, jointType: 'revolute', pitch: 1, patternKind: 'linear', patternCount: 3, patternAngle: 360, creaseClass: 'U' },
     settings: { gridSnap: false, gridStep: 0.5 },
     snapshot: null,
     setHover(h: PickResult | null) {

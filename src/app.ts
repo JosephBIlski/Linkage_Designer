@@ -28,7 +28,7 @@ import { findCreaseLoops, type CreaseLoop } from './core/fold';
 import { validateCreasePattern, type VertexReport } from './core/validate';
 import { analyseDesign, applyDesign, solveDesign, symmetricEigen3, type DesignAnalysis, type DesignResult, type PointDesignSpace } from './core/synthesis';
 import { normalize, sub } from './core/geometry';
-import type { ID, JointType, Model, Target, Vec3 } from './core/types';
+import type { CreaseClass, ID, JointType, Model, Target, Vec3 } from './core/types';
 import { loadSettings, saveSettings, type AppSettings } from './ui/settings';
 import { LINK_NAMES, SIM, STATUS } from './ui/strings';
 import { ModelRenderer, type DesignSpaceView, type EditPointView, type OverlayView, type PathView, type RenderState, type SelectionView, type SurfaceView } from './viewport/render';
@@ -36,7 +36,7 @@ import { Viewport, type PickResult } from './viewport/scene';
 import { pickKey } from './viewport/pickRank';
 
 export type Mode = 'construction' | 'simulation' | 'preview';
-export type ToolName = 'select' | 'bar' | 'sketch' | 'polygon' | 'prism' | 'cylinder' | 'edit' | 'cpoint' | 'caxis' | 'cplane' | 'joint' | 'ground' | 'driver' | 'mirror' | 'pattern' | 'delete';
+export type ToolName = 'select' | 'bar' | 'sketch' | 'cpattern' | 'polygon' | 'prism' | 'cylinder' | 'edit' | 'cpoint' | 'caxis' | 'cplane' | 'joint' | 'ground' | 'driver' | 'mirror' | 'pattern' | 'delete';
 
 export interface ToolOptions {
   sides: number;
@@ -50,6 +50,8 @@ export interface ToolOptions {
   patternKind: 'linear' | 'polar';
   patternCount: number;
   patternAngle: number;
+  /** Crease pattern tool: the class of the creases it draws. */
+  creaseClass: CreaseClass;
 }
 
 export interface SimState {
@@ -90,7 +92,7 @@ export class App {
   settings: AppSettings;
   mode: Mode = 'construction';
   tool: ToolName = 'select';
-  toolOptions: ToolOptions = { sides: 4, radius: 1, height: 1, mode2d: true, planeMode: 'three', offset: 1, jointType: 'revolute', pitch: 1, patternKind: 'linear', patternCount: 3, patternAngle: 360 };
+  toolOptions: ToolOptions = { sides: 4, radius: 1, height: 1, mode2d: true, planeMode: 'three', offset: 1, jointType: 'revolute', pitch: 1, patternKind: 'linear', patternCount: 3, patternAngle: 360, creaseClass: 'U' };
   selection: SelectionView | null = null;
   hover: PickResult | null = null;
   overlay: OverlayView = {};

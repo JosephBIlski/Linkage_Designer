@@ -39,6 +39,8 @@ export const ICONS: Record<string, string> = {
   edit: svg('<path d="M4 20l4-1 11-11-3-3L5 16z"/><path d="M14 7l3 3"/><circle cx="19" cy="17" r="2"/>'),
   mirror: svg('<path d="M12 3v18" stroke-dasharray="3 2"/><path d="M9 7L4 12l5 5z"/><path d="M15 7l5 5-5 5z"/>'),
   pattern: svg('<rect x="3" y="3" width="6" height="6"/><rect x="15" y="3" width="6" height="6"/><rect x="3" y="15" width="6" height="6"/><rect x="15" y="15" width="6" height="6"/>'),
+  // crease pattern: a sheet outline with a solid (mountain) and a dashed (valley) crease
+  cpattern: svg('<rect x="3.5" y="3.5" width="17" height="17"/><path d="M3.5 20.5L20.5 3.5"/><path d="M12 3.5v17" stroke-dasharray="2.5 2"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/>'),
 };
 
 export function icon(name: string): string {
