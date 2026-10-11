@@ -11,6 +11,7 @@
  * them directly.
  */
 import { addPatternCrease, addPatternVertex, type AddCreaseResult, type AddVertexResult } from '../core/creasePattern';
+export { nextPatternName } from '../core/creasePattern';
 import { add, dot, scale, sub } from '../core/geometry';
 import { serializeModel } from '../core/model';
 import type { CreaseClass, CreasePattern, ID, Model, PatternCrease, Vec3 } from '../core/types';
@@ -35,14 +36,6 @@ export function choosePattern(m: Model, sel: SelectionView | null, planeId: ID):
   if (selected && selected.planeId === planeId) return selected;
   const visible = Object.values(m.patterns ?? {}).filter((p) => p.planeId === planeId && !p.hidden);
   return visible.length === 1 ? visible[0] : null;
-}
-
-/** "<base> n" with the smallest n ≥ 1 that no pattern uses. */
-export function nextPatternName(m: Model, base: string): string {
-  const used = new Set(Object.values(m.patterns ?? {}).map((p) => p.name));
-  let n = 1;
-  while (used.has(`${base} ${n}`)) n++;
-  return `${base} ${n}`;
 }
 
 /**
@@ -115,12 +108,14 @@ export class PatternPolyline {
    * clicked. A point on the last vertex itself is ignored. `snapshot` is the
    * model serialised before the click (by default: now); the tool passes the
    * one it took before creating the pattern, so that taking back the first
-   * click removes the pattern too.
+   * click removes the pattern too. A last vertex that no longer exists in the
+   * pattern (undone, deleted) is forgotten before the point is added, so the
+   * point starts a new polyline instead of matching a reused vertex id.
    */
   addPoint(m: Model, p: CreasePattern, pos: Vec3, cls: CreaseClass, snapshot: string = serializeModel(m)): AddPointResult {
-    const from = this.last;
+    const from = this.last !== null && p.vertices[this.last] ? this.last : null;
     const vertex = addPatternVertex(m, p, pos);
-    if (from !== null && vertex.vertex.id === from) return { vertex, crease: null, same: true };
+    if (from !== null && vertex.existing && vertex.vertex.id === from) return { vertex, crease: null, same: true };
     const crease = from !== null ? addPatternCrease(m, p, from, vertex.vertex.id, cls) : null;
     this.segments.push({ snapshot, from });
     this.last = vertex.vertex.id;

@@ -12,8 +12,8 @@ import {
   setGround,
 } from '../core/model';
 import { consistencyTolerance, poseIsConsistent, tryChangeJointType, trySolveCommit } from '../core/feasibility';
-import { DEFAULT_PREFOLD_DEG, creaseDihedralDeg, creaseMV, driveCrease, findCreaseLoops, foldCreaseToTarget, isCrease, prefoldPattern, prefoldVertex } from '../core/fold';
-import { generatePanels, patternBasis, patternFaces, patternOfJoint, setCreaseClass, setCreaseTarget, to2d, validatePattern } from '../core/creasePattern';
+import { DEFAULT_PREFOLD_DEG, creaseDihedralDeg, creaseMV, driveCrease, foldCreaseToTarget, isCrease, prefoldFlat } from '../core/fold';
+import { generatePanels, patternBasis, patternFaces, setCreaseClass, setCreaseTarget, to2d, validatePattern } from '../core/creasePattern';
 import type { Construction, CreaseClass, CreasePattern, ID, Joint, JointType, Link, Target, Vec3 } from '../core/types';
 import { isConstructionRef } from '../core/types';
 import { createColorPicker } from './colorPicker';
@@ -23,7 +23,7 @@ import { APP, EXAMPLES, HELP, JOINTS, MENU, MODES, PANEL, PATTERN, POPUP, PREVIE
 import { jointDescription, jointEnds, jointLabel } from './labels';
 import { duplicateLink, extrudePolygon, translation } from '../core/patterns';
 import { currentViolation, modelSize } from '../core/kinematics';
-import { bodyPlaneJoint, setBodyPlane } from '../core/model';
+import { bodyPlaneJoint, planeCarriesPattern, setBodyPlane } from '../core/model';
 import { add, cross, scale } from '../core/geometry';
 import type { SelectionView } from '../viewport/render';
 import { ToolManager, parseTypedPoint } from '../viewport/tools';
@@ -686,37 +686,43 @@ export class UI {
     return jointEnds(this.app.model, j);
   }
 
-  /** Undo / redo (buttons and keys): a running query cycle is ended first, so its highlight and instructions do not outlive the model they named. */
+  /**
+   * Undo / redo (buttons and keys): a running query cycle and a crease polyline are ended first, so their highlight,
+   * anchor and Backspace snapshots do not outlive the model they named (the ToolManager also drops a polyline whose
+   * model was replaced, which covers New, Open and the examples).
+   */
   private undo(): void {
     this.tools.endQuery();
+    this.tools.endPolyline(true);
     this.app.undo();
   }
 
   private redo(): void {
     this.tools.endQuery();
+    this.tools.endPolyline(true);
     this.app.redo();
   }
 
   /**
    * Fold command (Mechanism panel): pre-fold the first flat crease loop so that every crease leaves the singular flat
-   * state, on the side the stored mountain / valley classes ask for. When that loop's creases were generated from a
-   * crease pattern the whole pattern is folded as one sheet (prefoldPattern), so every generated crease leaves the
-   * flat state on the drawn branch. One undo entry on success; nothing recorded and the model untouched on failure,
-   * whose reason (naming the conflicting creases of an inconsistent assignment) is reported.
+   * state, on the side the stored mountain / valley classes ask for (prefoldFlat). When every crease of that loop was
+   * generated from a crease pattern the whole pattern is folded as one sheet, so every generated crease leaves the
+   * flat state on the drawn branch; a loop mixing generated and hand-made creases is folded on its own. One undo
+   * entry on success; nothing recorded and the model untouched on failure, whose reason (naming the conflicting
+   * creases of an inconsistent assignment) is reported.
    */
   private foldFlatVertex(): void {
     const app = this.app;
     const m = app.model;
     const hadDrivers = m.drivers.length > 0;
-    const flat = findCreaseLoops(m).find((l) => l.flat);
-    const pattern = flat ? patternOfJoint(m, flat.creaseIds[0]) : null;
     app.beginChange();
-    const r = pattern ? prefoldPattern(m, pattern.id, { honourAssigned: true }) : prefoldVertex(m, { honourAssigned: true });
+    const r = prefoldFlat(m, { honourAssigned: true });
     if (!r.ok || !r.creaseId) {
       app.abortChange();
       app.report(STATUS.foldFailed(r.reason ?? 'noBranch', this.conflictList(r.conflicts)));
       return;
     }
+    const pattern = r.patternId ? m.patterns?.[r.patternId] : undefined;
     const crease = m.joints[r.creaseId];
     app.select({ type: 'joint', id: r.creaseId });
     const ends = crease ? this.jointEnds(crease) : '';
@@ -839,7 +845,8 @@ export class UI {
    * "Generate panels": generatePanels in one undoable change (a previous generation is replaced), then the pattern
    * is hidden — the panels take its place; the model tree shows it again — the first panel is selected and the
    * status bar reports the counts and, when the checks found problems, their number. A pattern that encloses no
-   * face is refused with nothing changed.
+   * face is refused with nothing changed. A crease polyline still being drawn is ended first: generation is the
+   * natural end of the drawing, and a further click would draw into the hidden pattern.
    */
   private generatePattern(p: CreasePattern): void {
     const app = this.app;
@@ -848,6 +855,7 @@ export class UI {
       app.report(STATUS.patternNothingToGenerate);
       return;
     }
+    this.tools.endPolyline(true);
     app.beginChange();
     const r = generatePanels(m, p, { panelName: PATTERN.panelName });
     p.hidden = true;
@@ -1247,7 +1255,8 @@ export class UI {
       }
       app.endChange(); // records an undo entry only when the model changed (a reused driver on a folded vertex changes nothing)
       app.setActiveDriver(m.drivers.indexOf(r.driver));
-      const note = r.prefold ? (r.prefold.ok ? STATUS.prefolded : STATUS.flatVertexWarning) : '';
+      const sheet = r.patternId ? m.patterns?.[r.patternId] : undefined;
+      const note = r.prefold ? (r.prefold.ok ? (sheet ? STATUS.patternPrefolded(sheet.name, Object.keys(r.prefold.dihedrals ?? {}).length) : STATUS.prefolded) : STATUS.flatVertexWarning) : '';
       const message = r.reused ? STATUS.driverReused : STATUS.driverSet;
       app.setStatus(note ? `${message} · ${note}` : message);
     }, { icon: 'driver' });
@@ -1268,6 +1277,7 @@ export class UI {
       box.appendChild(isSketch ? el('p', 'hint ok', PANEL.isSketchPlane) : button(PANEL.sketchPlane, () => { app.beginChange(); m.settings.sketchPlaneId = c.id; app.endChange(); }));
     }
     if (c.builtin) box.appendChild(el('p', 'hint', PANEL.builtin));
+    else if (planeCarriesPattern(m, c.id)) box.appendChild(el('p', 'hint', PANEL.planeHasPattern)); // removeConstruction would refuse it
     else box.appendChild(button(PANEL.deleteItem, () => this.tools.deletePick({ type: 'construction', id: c.id }), { icon: 'delete', cls: 'btn--danger' }));
   }
 
@@ -1514,6 +1524,10 @@ export class UI {
     } else if (e.key === 'Backspace' && this.tools.popSketchSupported()) {
       e.preventDefault();
       this.tools.popSketchPoint();
+    } else if (e.key === 'Backspace' && (app.tool === 'cpattern' || app.tool === 'sketch')) {
+      // nothing to take back under a drawing tool (right after Enter, say): Backspace never deletes the selection
+      // there, which would be the whole pattern or the panel just closed; Del does
+      e.preventDefault();
     } else if (e.key === 'Delete' || e.key === 'Backspace') {
       if (app.selection) this.tools.deletePick({ type: app.selection.type, id: app.selection.id, pointId: app.selection.pointId, pose: app.selection.pose, creaseId: app.selection.creaseId });
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {

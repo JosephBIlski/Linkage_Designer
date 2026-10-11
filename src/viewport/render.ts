@@ -9,7 +9,7 @@ import type { Positions } from '../core/kinematics';
 import { modelSize } from '../core/kinematics';
 import { linkEdges, linkFaces } from '../core/model';
 import { creaseDihedralDeg, creaseMV, isCrease } from '../core/fold';
-import { patternBasis } from '../core/creasePattern';
+import { patternBasis, patternExtent } from '../core/creasePattern';
 import type { CreaseClass, ID, Joint, Link, Model, Vec3 } from '../core/types';
 import { add, centroid, cross, dist, len, normalize, scale, sub } from '../core/geometry';
 import type { AppSettings } from '../ui/settings';
@@ -129,7 +129,9 @@ export class ModelRenderer {
   update(state: RenderState): void {
     this.clear();
     const { model, settings } = state;
-    const size = modelSize(model, state.positions);
+    // the size unit (disc radii, crease widths) follows the geometry drawn: the links' extent and the visible crease
+    // patterns' (a pattern-only model would otherwise be drawn at the minimum unit, hairline creases and no discs)
+    const size = Math.max(modelSize(model, state.positions), ...Object.values(model.patterns ?? {}).filter((p) => !p.hidden).map(patternExtent));
     this.r = THREE.MathUtils.clamp(size * 0.012, 0.02, 0.12);
     if (settings.showConstruction) this.buildConstruction(state);
     this.buildModel(state, state.positions, this.vp.groups.model, false);

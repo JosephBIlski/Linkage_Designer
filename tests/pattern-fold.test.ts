@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import miuraSheetFile from '../examples/miuraSheet.linkage.json';
-import { createModel, groundLink, parseModel, serializeModel, setGround } from '../src/core/model';
-import { addPattern, addPatternCrease, addPatternVertex, generatePanels, miuraPattern, patternFaces, patternOfJoint, setCreaseClass } from '../src/core/creasePattern';
-import { applyPositions, computeMobility, currentViolation, positionsFromModel, solveForward, sweepDriver, type SweepResult } from '../src/core/kinematics';
-import { DEFAULT_PREFOLD_DEG, creaseDihedralDeg, creaseMV, findCreaseLoops, isCrease, isFlatDihedral, prefoldPattern, prefoldVertex } from '../src/core/fold';
+import { addAngleDriver, addJoint, candidateAngleDrivers, createModel, groundLink, parseModel, removeJoint, serializeModel, setGround } from '../src/core/model';
+import { addPattern, addPatternCrease, addPatternVertex, findPatternVertex, generatePanels, miuraPattern, patternBasis, patternFaces, patternOfJoint, setCreaseClass, to3d } from '../src/core/creasePattern';
+import { applyPositions, computeMobility, currentViolation, positionsFromModel, solveForward, sweepDriver, syncDriverValues, type SweepResult } from '../src/core/kinematics';
+import { DEFAULT_PREFOLD_DEG, creaseDihedralDeg, creaseMV, driveCrease, findCreaseLoops, foldCreaseToTarget, isCrease, isFlatDihedral, patternLoopCreases, prefoldFlat, prefoldPattern, prefoldVertex } from '../src/core/fold';
 import { EXAMPLE_BUILDERS, miuraSheet } from '../src/core/examples';
 import { EXAMPLES } from '../src/ui/strings';
-import { dist } from '../src/core/geometry';
+import { dist, dot, scale, sub } from '../src/core/geometry';
 import type { CreasePattern, ID, Model, Vec3 } from '../src/core/types';
 
 // ---------------------------------------------------------------------------
@@ -53,6 +53,9 @@ function travels(m: Model, sweep: SweepResult): number[] {
       return Math.max(...sweep.poses.map((pose) => dist(pose.positions.get(far)!, m.points[far].pos)));
     });
 }
+
+/** Distance from point `id` to the nearest of the points `ids`. */
+const farFrom = (m: Model, ids: ID[], id: ID): number => Math.min(...ids.map((g) => dist(m.points[g].pos, m.points[id].pos)));
 
 const centroid = (pts: Vec3[]): Vec3 => pts.reduce((s, q) => [s[0] + q[0] / pts.length, s[1] + q[1] / pts.length, s[2] + q[2] / pts.length] as Vec3, [0, 0, 0]);
 
@@ -242,6 +245,76 @@ describe('mountain / valley conflicts', () => {
     }
   });
 
+  it('Fold to target with a class changed on one generated crease names that crease, flat or already folded', () => {
+    // what the crease Properties do: the stored class is changed on the joint, then "Fold to target" with that class
+    const flipOne = (m: Model, p: CreasePattern, jointIds: ID[], k: number): { id: ID; mv: 'M' | 'V' } => {
+      const id = jointOfCrease(m, p, jointIds, patternFaces(m, p).interior[k]);
+      const j = m.joints[id];
+      const mv = j.fold!.mv === 'M' ? 'V' : 'M';
+      j.fold = { ...j.fold, mv };
+      return { id, mv };
+    };
+    for (const k of [0, 1, 2, 3]) {
+      const m = createModel();
+      const p = miuraPattern(m, 'plane_top', 1, 1);
+      const r = generatePanels(m, p);
+      const { id, mv } = flipOne(m, p, r.jointIds, k);
+      const before = serializeModel(m);
+      for (const target of [120, 160]) {
+        const f = foldCreaseToTarget(m, id, target, mv);
+        expect(f.ok).toBe(false);
+        expect(f.reason).toBe('mvConflict');
+        expect(f.conflicts).toEqual([id]);
+        expect(serializeModel(m)).toBe(before);
+      }
+    }
+    // the unit folded first (prefoldPattern), then one class flipped: the mirrored branch is asked for through flat
+    const m = createModel();
+    const p = miuraPattern(m, 'plane_top', 1, 1);
+    const r = generatePanels(m, p);
+    const id = jointOfCrease(m, p, r.jointIds, patternFaces(m, p).interior[0]);
+    expect(prefoldPattern(m, p.id).ok).toBe(true);
+    const j = m.joints[id];
+    const mv = j.fold!.mv === 'M' ? 'V' : 'M';
+    j.fold = { ...j.fold, mv };
+    const before = serializeModel(m);
+    const f = foldCreaseToTarget(m, id, 120, mv);
+    expect(f.reason).toBe('mvConflict');
+    expect(f.conflicts).toEqual([id]);
+    expect(serializeModel(m)).toBe(before);
+  });
+
+  it('a rigid degree-3 vertex in the sheet is a geometric failure (noBranch), never a conflict blamed on honoured classes', () => {
+    const m = createModel();
+    const p = miuraPattern(m, 'plane_top', 2, 2);
+    const basis = patternBasis(m, p);
+    const d = 2 / Math.tan(Math.PI / 3);
+    const at = (u: number, v: number): ID => findPatternVertex(p, to3d(basis, [u, v]), 1e-6)!.id;
+    // a degree-3 vertex inside cell (0, 0), joined to three of its corners: three creases around a vertex cannot fold
+    const c = addPatternVertex(m, p, to3d(basis, [0.9, 0.9])).vertex.id;
+    for (const [corner, cls] of [[at(0, 0), 'M'], [at(2, 0), 'V'], [at(d, 2), 'M']] as [ID, 'M' | 'V'][]) expect(addPatternCrease(m, p, c, corner, cls).ok).toBe(true);
+    const r = generatePanels(m, p);
+    expect(r.linkIds.length).toBe(11);
+    expect(r.jointIds.length).toBe(15);
+    expect(findCreaseLoops(m).map((l) => l.creaseIds.length).sort()).toEqual([3, 4, 4, 4, 4]);
+    const snapshot = serializeModel(m);
+    // every Miura loop, each of its zigzag (non-collinear) creases left unassigned: the first stage folds that loop
+    // on either branch, the degree-3 stage fails geometrically
+    let runs = 0;
+    for (const loop of findCreaseLoops(m).filter((l) => l.creaseIds.length === 4)) {
+      const collinear = new Set(loop.collinearPairs.flat());
+      for (const pref of loop.creaseIds.filter((id) => !collinear.has(id))) {
+        const mm = parseModel(snapshot);
+        delete mm.joints[pref].fold!.mv;
+        const res = prefoldPattern(mm, p.id, { preferCreaseId: pref, honourAssigned: true });
+        expect(res).toEqual({ ok: false, reason: 'noBranch' });
+        expect(prefoldPattern(parseModel(snapshot), p.id, { preferCreaseId: pref, honourAssigned: false })).toEqual({ ok: false, reason: 'noBranch' });
+        runs++;
+      }
+    }
+    expect(runs).toBe(8);
+  });
+
   it('on the 2 × 2 sheet a flipped crease away from the first loop is reported too', () => {
     const { m, p } = sheet();
     const loops = findCreaseLoops(m);
@@ -353,5 +426,136 @@ describe('the Miura-ori sheet example', () => {
     expect(computeMobility(file).dof).toBe(1);
     expect(flatOnes(file, Object.values(file.joints).filter((j) => isCrease(file, j)).map((j) => j.id))).toEqual([]);
     expect(miuraSheet(2, 2).drivers.length).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The single-crease commands on a generated sheet (Driver tool, Drive this crease, Fold to target)
+// ---------------------------------------------------------------------------
+
+describe('driveCrease and foldCreaseToTarget on a generated sheet', () => {
+  const sheets: [string, () => { m: Model; p: CreasePattern; creaseIds: ID[] }][] = [
+    ['2 × 2, first panel ground', () => sheet()],
+    ['3 × 3, first panel ground', () => sheet(3, 3)],
+    ['3 × 3, middle panel ground', sheetMiddleGround],
+  ];
+  for (const [name, build] of sheets) {
+    it(`${name}: every crease picked pre-folds the whole sheet on its drawn branch, DOF 1, the driver on the picked crease`, () => {
+      const { m: base, p, creaseIds } = build();
+      expect(patternLoopCreases(base, p).sort()).toEqual([...creaseIds].sort());
+      const snapshot = serializeModel(base);
+      for (const id of creaseIds) {
+        const m = parseModel(snapshot);
+        const r = driveCrease(m, id);
+        expect(r.prefold?.ok).toBe(true);
+        expect(r.patternId).toBe(p.id);
+        expect(Object.keys(r.prefold!.dihedrals!).length).toBe(creaseIds.length);
+        expect(flatOnes(m, creaseIds)).toEqual([]);
+        expect(offDrawn(m, creaseIds)).toEqual([]);
+        expect(findCreaseLoops(m).some((l) => l.flat)).toBe(false);
+        expect(computeMobility(m).dof).toBe(1);
+        expect(currentViolation(m)).toBeLessThan(1e-6);
+        expect(m.drivers.map((d) => [d.kind, d.jointId])).toEqual([['fold', id]]);
+        expect(r.driver?.value).toBeCloseTo(creaseDihedralDeg(m, m.joints[id])!, 9);
+      }
+    });
+
+    it(`${name}: Fold to target 150° with the stored class on every crease leaves no crease of the sheet flat or off its class`, () => {
+      const { m: base, creaseIds } = build();
+      const snapshot = serializeModel(base);
+      for (const id of creaseIds) {
+        const m = parseModel(snapshot);
+        const mv = m.joints[id].fold!.mv!;
+        const f = foldCreaseToTarget(m, id, 150, mv);
+        expect(f.ok).toBe(true);
+        expect(Math.abs(creaseDihedralDeg(m, m.joints[id])!)).toBeCloseTo(150, 5);
+        expect(creaseMV(m, m.joints[id])).toBe(mv);
+        expect(Object.keys(f.dihedrals!).sort()).toEqual([...creaseIds].sort());
+        expect(flatOnes(m, creaseIds)).toEqual([]);
+        expect(offDrawn(m, creaseIds)).toEqual([]);
+        expect(computeMobility(m).dof).toBe(1);
+        expect(currentViolation(m)).toBeLessThan(1e-6);
+      }
+    });
+  }
+
+  it('the sweep after driveCrease on a 2 × 2 sheet moves every panel', () => {
+    const { m, creaseIds } = sheet();
+    driveCrease(m, creaseIds[5]);
+    const sweep = sweepDriver(m, 0);
+    expect(sweep.poses.length).toBeGreaterThan(10);
+    for (const d of travels(m, sweep)) expect(d).toBeGreaterThan(0.5);
+  });
+});
+
+describe('prefoldFlat (the Fold button)', () => {
+  it('folds a generated sheet as a whole, a hand-built vertex on its own, and a loop mixing both on its own', () => {
+    // a generated unit: the sheet is folded (patternId set), every crease on its drawn class
+    const { m, p, creaseIds } = sheet();
+    const r = prefoldFlat(m, { honourAssigned: true });
+    expect(r.ok).toBe(true);
+    expect(r.patternId).toBe(p.id);
+    expect(flatOnes(m, creaseIds)).toEqual([]);
+    expect(offDrawn(m, creaseIds)).toEqual([]);
+    expect(prefoldFlat(m)).toEqual({ ok: false, reason: 'notFlat' });
+    expect(prefoldFlat(createModel())).toEqual({ ok: false, reason: 'noLoop' });
+    // a generated unit whose fourth crease was deleted and re-made by hand with the same features and class: the loop is
+    // flat and mixes a hand-made crease with generated ones, so the sheet pre-fold does not apply and the loop is folded
+    // on its own instead of being refused as "nothing to fold"
+    const mixed = createModel();
+    const q = miuraPattern(mixed, 'plane_top', 1, 1);
+    const gen = generatePanels(mixed, q);
+    const victim = mixed.joints[gen.jointIds[3]];
+    const [a, b, fold] = [victim.a, victim.b as typeof victim.a, victim.fold];
+    removeJoint(mixed, victim.id);
+    const hand = addJoint(mixed, 'revolute', a, b)!;
+    hand.fold = fold;
+    const loops = findCreaseLoops(mixed);
+    expect(loops.length).toBe(1);
+    expect(loops[0].flat).toBe(true);
+    expect(loops[0].creaseIds).toContain(hand.id);
+    expect(prefoldPattern(mixed, q.id, { honourAssigned: true })).toEqual({ ok: false, reason: 'noLoop' });
+    const f = prefoldFlat(mixed, { honourAssigned: true });
+    expect(f.ok).toBe(true);
+    expect(f.patternId).toBeUndefined();
+    expect(f.dof).toBe(1);
+    expect(flatOnes(mixed, loops[0].creaseIds)).toEqual([]);
+    expect(offDrawn(mixed, loops[0].creaseIds)).toEqual([]);
+  });
+});
+
+describe('the default driver after Fold to target on a loop-free generated hinge', () => {
+  it('the candidate angle driver takes a tip off the hinge axis, so its sweep moves the free panel', () => {
+    const m = createModel();
+    const p = addPattern(m, 'plane_top');
+    const ids = [[0, 0, 0], [3, 0, 0], [3, 3, 0], [0, 3, 0]].map((pos) => addPatternVertex(m, p, pos as Vec3).vertex.id);
+    for (let i = 0; i < 4; i++) expect(addPatternCrease(m, p, ids[i], ids[(i + 1) % 4], 'B').ok).toBe(true);
+    expect(addPatternCrease(m, p, ids[0], ids[2], 'V').ok).toBe(true);
+    const gen = generatePanels(m, p);
+    expect(gen.jointIds.length).toBe(1);
+    const jointId = gen.jointIds[0];
+    expect(foldCreaseToTarget(m, jointId, 120, 'V').ok).toBe(true);
+    expect(Math.abs(creaseDihedralDeg(m, m.joints[jointId])!)).toBeCloseTo(120, 5);
+    expect(m.drivers.length).toBe(0); // no loop: nothing kept
+    const cands = candidateAngleDrivers(m);
+    expect(cands.length).toBeGreaterThan(0);
+    for (const c of cands) {
+      // the tip is the free corner, off the hinge line through the pivot
+      const pivot = m.points[c.pivotId].pos;
+      const tip = m.points[c.tipId].pos;
+      const along = sub(tip, pivot);
+      expect(dist(along, scale(c.axis, dot(along, c.axis)))).toBeGreaterThan(1);
+    }
+    const c = cands[0];
+    addAngleDriver(m, c.linkId, c.pivotId, c.tipId, c.axis);
+    syncDriverValues(m);
+    const sweep = sweepDriver(m, 0);
+    expect(sweep.poses.length).toBeGreaterThan(10);
+    expect(Math.abs(sweep.range[1] - sweep.range[0])).toBeGreaterThan(90);
+    // the free panel's corner off the hinge (the vertex farthest from every ground point) travels
+    const ground = groundLink(m)!;
+    const free = Object.values(m.links).find((l) => !l.ground)!;
+    const offHinge = free.pointIds.reduce((b, id) => (farFrom(m, ground.pointIds, id) > farFrom(m, ground.pointIds, b) ? id : b), free.pointIds[0]);
+    expect(Math.max(...sweep.poses.map((pose) => dist(pose.positions.get(offHinge)!, m.points[offHinge].pos)))).toBeGreaterThan(0.5);
   });
 });

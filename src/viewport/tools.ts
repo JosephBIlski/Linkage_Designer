@@ -24,6 +24,7 @@ import {
   jointCompatible,
   jointsAtPoint,
   linkAllPointIds,
+  planeCarriesPattern,
   removeConstruction,
   removeJoint,
   removeLink,
@@ -109,6 +110,11 @@ export class ToolManager {
   private pickFromCycle = false;
   /** Crease pattern tool: the polyline of creases being drawn. */
   private polyline = new PatternPolyline();
+  /**
+   * The model object the polyline's clicks were drawn on: undo, redo and a file load install a new one, which makes
+   * the polyline's anchor and its per-click snapshots stale (polylineAlive), as cycleModel does for the query cycle.
+   */
+  private polylineModel: Model | null = null;
   onPopup: ((pointId: ID | null) => void) | null = null;
 
   constructor(private app: App) {
@@ -151,6 +157,20 @@ export class ToolManager {
     return this.cycle.active;
   }
 
+  /**
+   * Is the crease polyline being drawn on the current model? Undo, redo, New, Open and an example replace App.model
+   * with a fresh object: the polyline's last vertex may then be gone (and its id reused by the next vertex) and its
+   * Backspace snapshots would resurrect undone or replaced geometry, so such a polyline is ended on the spot and the
+   * next click starts a new one.
+   */
+  private polylineAlive(): boolean {
+    if (this.polyline.active && this.polylineModel !== this.app.model) {
+      this.polyline.end();
+      this.app.setOverlay({});
+    }
+    return this.polyline.active;
+  }
+
   setTool(tool: ToolName): void {
     this.app.setTool(tool);
     this.reset();
@@ -175,7 +195,7 @@ export class ToolManager {
       // abort the drag: restore the pre-drag model without touching the undo history
       this.app.abortChange();
     }
-    if (this.polyline.active) {
+    if (this.polylineAlive()) {
       // Esc ends the crease polyline (its creases stay); a second Esc cancels the tool
       this.endPolyline();
       return;
@@ -330,6 +350,10 @@ export class ToolManager {
       return;
     }
     if (ev.kind === 'dblclick') {
+      // a double-click as the first click of a crease polyline (one vertex placed, the second click of the gesture
+      // ignored as landing on it) ends nothing: the polyline stays open at that vertex instead of leaving an
+      // isolated vertex behind; Enter and Esc still end it explicitly
+      if (this.app.tool === 'cpattern' && this.polylineAlive() && this.polyline.length < 2) return;
       this.finish();
       return;
     }
@@ -623,7 +647,7 @@ export class ToolManager {
 
   /** True while the Panel tool has vertices, or the Crease pattern tool creases, that Backspace can remove. */
   popSketchSupported(): boolean {
-    return (this.app.tool === 'sketch' && this.points.length > 0) || (this.app.tool === 'cpattern' && this.polyline.length > 0);
+    return (this.app.tool === 'sketch' && this.points.length > 0) || (this.app.tool === 'cpattern' && this.polylineAlive() && this.polyline.length > 0);
   }
 
   /** Backspace while sketching removes the last vertex (the last crease of a crease polyline). Returns false when nothing was removed. */
@@ -693,9 +717,9 @@ export class ToolManager {
   // Crease pattern tool (plan 3b): polylines of creases on the sketch plane
   // ---------------------------------------------------------------------------
 
-  /** The pattern the current polyline draws into, while it exists. */
+  /** The pattern the current polyline draws into, while it exists (and the polyline is alive on the current model). */
   private polylinePattern(): CreasePattern | null {
-    const id = this.polyline.patternId;
+    const id = this.polylineAlive() ? this.polyline.patternId : null;
     return id ? (this.app.model.patterns?.[id] ?? null) : null;
   }
 
@@ -708,9 +732,10 @@ export class ToolManager {
 
   /**
    * A click of the Crease pattern tool. The first click of a polyline chooses
-   * its pattern — the selected one on the active sketch plane (shown again
-   * when it was hidden), else the single visible one there, else a new
-   * pattern — and places its first vertex; every further click places a
+   * its pattern — the selected one on the active sketch plane, else the single
+   * visible one there, else a new pattern — and places its first vertex (a
+   * hidden pattern is shown again by every click, so that hiding it mid-way,
+   * from the tree or its Properties, never leaves the drawing invisible); every further click places a
    * vertex and a crease from the previous one in the class of the tool
    * options (PatternPolyline; the core merges a vertex within tolerance,
    * splits the crease a vertex lands on and every crease the new crease
@@ -735,13 +760,14 @@ export class ToolManager {
     let p = this.polylinePattern();
     if (!p) {
       p = choosePattern(m, app.selection, m.settings.sketchPlaneId) ?? addPattern(m, m.settings.sketchPlaneId, nextPatternName(m, PATTERN.name));
-      if (p.hidden) p.hidden = false; // the drawing must be visible
       this.polyline.begin(p.id);
     }
+    if (p.hidden) p.hidden = false; // the drawing must be visible
     const cls = app.toolOptions.creaseClass;
     const r = this.polyline.addPoint(m, p, placed.pos, cls, before);
     app.select({ type: 'pattern', id: p.id });
-    app.endChange();
+    app.endChange(); // endChange keeps the model object: the polyline stays alive on it
+    this.polylineModel = app.model;
     if (r.same) return;
     if (!r.crease) app.setStatus(STATUS.patternVertexPlaced(p.name));
     else if (r.crease.ok) app.setStatus(STATUS.patternCreaseAdded(cls, r.crease.creaseIds.length));
@@ -751,12 +777,15 @@ export class ToolManager {
     if (lp && !forced) this.updatePreview(this.syntheticMove(lp, ev.pick));
   }
 
-  /** Enter, Esc or a double-click: end the crease polyline (its creases stay); the next click starts a new one. */
-  endPolyline(): void {
+  /**
+   * Enter, Esc or a double-click: end the crease polyline (its creases stay); the next click starts a new one.
+   * `quiet` ends it without the status message (undo, redo and Generate end it as a side effect).
+   */
+  endPolyline(quiet = false): void {
     if (!this.polyline.active) return;
     this.polyline.end();
     this.app.setOverlay({});
-    this.app.setStatus(STATUS.patternPolylineEnded);
+    if (!quiet) this.app.setStatus(STATUS.patternPolylineEnded);
   }
 
   /**
@@ -768,12 +797,14 @@ export class ToolManager {
    */
   private popPolylineSegment(): boolean {
     const app = this.app;
+    if (!this.polylineAlive()) return false;
     const patternId = this.polyline.patternId;
     const seg = this.polyline.pop();
     if (!seg) return false;
     app.beginChange();
     app.model = parseModel(seg.snapshot); // as App restores an aborted change: a fresh model object, the ids unchanged
     app.endChange();
+    this.polylineModel = app.model; // the polyline continues on the restored model
     const m = app.model;
     app.select(patternId && m.patterns?.[patternId] ? { type: 'pattern', id: patternId } : null);
     app.setStatus(seg.from === null ? STATUS.patternVertexRemoved : STATUS.patternCreaseRemoved);
@@ -800,7 +831,7 @@ export class ToolManager {
         this.editSource = { pointId: pick.pointId, linkId: pick.linkId };
         app.select({ type: 'vertex', id: pick.linkId, pointId: pick.pointId });
         app.setStatus(STATUS.editPickTarget);
-      } else app.setStatus(TOOLS.edit.hint);
+      } else app.setStatus(pick?.type === 'pvertex' || pick?.type === 'pcrease' ? STATUS.patternDragNothing : TOOLS.edit.hint);
       return;
     }
     const placed = forced ?? this.place(ev);
@@ -1166,7 +1197,7 @@ export class ToolManager {
         // first, in the same change (one undo entry), and leaves exactly one driver on the picked crease; a crease
         // that already has one keeps it (no second driver, which would freeze the vertex) and it becomes active
         const r = driveCrease(m, j.id);
-        if (r.prefold) note = r.prefold.ok ? STATUS.prefolded : STATUS.flatVertexWarning;
+        if (r.prefold) note = r.prefold.ok ? (r.patternId ? STATUS.patternPrefolded(m.patterns?.[r.patternId]?.name ?? r.patternId, Object.keys(r.prefold.dihedrals ?? {}).length) : STATUS.prefolded) : STATUS.flatVertexWarning;
         if (r.reused) message = STATUS.driverReused;
         if (r.driver) active = m.drivers.indexOf(r.driver);
       } else if (j && (j.type === 'prismatic' || j.type === 'cylindrical' || j.type === 'screw')) addSlideDriver(m, j.id);
@@ -1187,10 +1218,18 @@ export class ToolManager {
     this.deletePick(ev.pick);
   }
 
-  /** Delete the entity behind a pick / selection (a pattern goes with the panels it generated; a pattern vertex with its creases). */
+  /**
+   * Delete the entity behind a pick / selection (a pattern goes with the panels it generated; a pattern vertex with
+   * its creases), one undoable change. Pattern deletions are reported in the status bar, since a pattern takes
+   * generated panels with it. A construction plane a crease pattern lies on is refused with nothing changed.
+   */
   deletePick(pick: { type: string; id: ID; pointId?: ID; pose?: number; creaseId?: ID }): void {
     const app = this.app;
     const m = app.model;
+    if (pick.type === 'construction' && planeCarriesPattern(m, pick.id)) {
+      app.report(STATUS.planeHasPattern);
+      return;
+    }
     app.beginChange();
     switch (pick.type) {
       case 'joint':
@@ -1199,13 +1238,16 @@ export class ToolManager {
       case 'construction':
         removeConstruction(m, pick.id);
         break;
-      case 'pattern':
+      case 'pattern': {
+        const p = m.patterns?.[pick.id];
         if (this.polyline.patternId === pick.id) this.polyline.end();
-        removePattern(m, pick.id);
+        const [panels, creases] = [p?.generated?.linkIds.length ?? 0, p?.generated?.jointIds.length ?? 0]; // removed with it
+        if (p && removePattern(m, pick.id)) app.setStatus(STATUS.patternDeleted(p.name, panels, creases));
         break;
+      }
       case 'pcrease': {
         const p = m.patterns?.[pick.id];
-        if (p && pick.creaseId) removePatternCrease(m, p, pick.creaseId);
+        if (p && pick.creaseId && removePatternCrease(m, p, pick.creaseId)) app.setStatus(STATUS.patternCreaseDeleted);
         break;
       }
       case 'pvertex': {
@@ -1213,6 +1255,7 @@ export class ToolManager {
         if (p && pick.pointId) {
           if (this.polyline.last === pick.pointId) this.polyline.end();
           removePatternVertex(m, p, pick.pointId);
+          app.setStatus(STATUS.patternVertexDeleted);
         }
         break;
       }
@@ -1321,6 +1364,7 @@ export class ToolManager {
       return;
     }
     if (pick.type === 'construction') app.setStatus(STATUS.dragNothing);
+    else if (pick.type === 'pvertex' || pick.type === 'pcrease') app.setStatus(STATUS.patternDragNothing);
     this.drag = { kind: 'none' };
     void vp;
   }

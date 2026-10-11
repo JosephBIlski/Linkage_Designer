@@ -8,7 +8,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { App, ToolName } from '../src/app';
-import { addPattern, addPatternCrease, addPatternVertex, patternFaces } from '../src/core/creasePattern';
+import { addPattern, addPatternCrease, addPatternVertex, generatePanels, patternFaces } from '../src/core/creasePattern';
 import { rayPlane } from '../src/core/edit';
 import { dist } from '../src/core/geometry';
 import { createModel, parseModel, serializeModel } from '../src/core/model';
@@ -481,6 +481,24 @@ describe('Crease pattern tool', () => {
     expect(app.status).toBe(PATTERN.describeVertex(p.name));
     clickAt(tools, vp, [2, 2, 0], vpick);
     expect(app.selection).toEqual({ type: 'pvertex', id: p.id, pointId: vid });
+    // dragging a pattern vertex (or crease) moves nothing and says so; the model and the undo history are untouched
+    const beforeDrag = serializeModel(app.model);
+    const undoBefore = app.undo.length;
+    for (const pick of [vpick, cp]) {
+      tools.handle(ev('move', sv.x, sv.y, pick));
+      tools.handle(ev('down', sv.x, sv.y, pick));
+      tools.handle(ev('move', sv.x + 40, sv.y, null));
+      tools.handle(ev('up', sv.x + 40, sv.y, null));
+      expect(app.status).toBe(STATUS.patternDragNothing);
+      expect(serializeModel(app.model)).toBe(beforeDrag);
+      expect(app.undo.length).toBe(undoBefore);
+    }
+    // the Edit tool refuses a pattern vertex with the same message
+    tools.setTool('edit');
+    clickAt(tools, vp, [2, 2, 0], vpick);
+    expect(app.status).toBe(STATUS.patternDragNothing);
+    expect(serializeModel(app.model)).toBe(beforeDrag);
+    tools.setTool('select');
     // delete the vertex: its crease goes with it; then the crease; then the pattern
     tools.deletePick({ type: 'pvertex', id: p.id, pointId: vid });
     expect(vertexCount(p)).toBe(2);
@@ -505,5 +523,177 @@ describe('Crease pattern tool', () => {
     expect(q.id).not.toBe(p.id);
     expect(vertexCount(q)).toBe(1);
     expect(app.status).toBe(STATUS.patternVertexPlaced(q.name));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The polyline and the model it was drawn on: undo, New, hiding, double-clicks, deletion feedback
+// ---------------------------------------------------------------------------
+
+describe('Crease pattern tool: undo, replaced models, hiding and double-clicks', () => {
+  /** What App.undo does: the previous snapshot becomes a fresh model object, the selection is cleared. */
+  const undoLikeApp = (app: FakeApp): void => {
+    const s = app.undo.pop()!;
+    app.model = parseModel(s);
+    app.selection = null;
+  };
+
+  it('Ctrl+Z mid-polyline ends it: Backspace restores nothing stale, and the next click starts a new polyline with its status', () => {
+    const { app, vp, tools } = fakeApp(createModel());
+    tools.setTool('cpattern');
+    clickAt(tools, vp, [0, 0, 0]);
+    clickAt(tools, vp, [2, 0, 0]);
+    clickAt(tools, vp, [2, 2, 0]);
+    const p = onlyPattern(app.model);
+    expect(vertexCount(p)).toBe(3);
+    expect(creaseCount(p)).toBe(2);
+    undoLikeApp(app);
+    undoLikeApp(app);
+    const after = onlyPattern(app.model);
+    expect(vertexCount(after)).toBe(1);
+    expect(creaseCount(after)).toBe(0);
+    expect(app.undo.length).toBe(1);
+    const stateAfterUndo = serializeModel(app.model);
+    // Backspace: the polyline died with its model; nothing comes back
+    expect(tools.popSketchSupported()).toBe(false);
+    expect(tools.popSketchPoint()).toBe(false);
+    expect(serializeModel(app.model)).toBe(stateAfterUndo);
+    expect(app.undo.length).toBe(1);
+    expect(app.overlay).toEqual({});
+    // the next click starts a new polyline (a vertex placed, no crease to the undone vertex whose id is now reused)
+    clickAt(tools, vp, [4, 4, 0]);
+    const q = onlyPattern(app.model);
+    expect(vertexCount(q)).toBe(2);
+    expect(creaseCount(q)).toBe(0);
+    expect(app.status).toBe(STATUS.patternVertexPlaced(q.name));
+    expect(app.undo.length).toBe(2);
+    clickAt(tools, vp, [4, 0, 0]);
+    expect(creaseCount(q)).toBe(1);
+    expect(Object.values(q.creases).every((c) => [q.vertices[c.a].pos, q.vertices[c.b].pos].every((pos) => pos[0] === 4))).toBe(true);
+    expect(tools.popSketchSupported()).toBe(true);
+    // a single undo after two clicks: the undone vertex's id is reused by the next vertex, which is still a fresh start
+    const { app: app2, vp: vp2, tools: tools2 } = fakeApp(createModel());
+    tools2.setTool('cpattern');
+    clickAt(tools2, vp2, [0, 0, 0]);
+    clickAt(tools2, vp2, [3, 0, 0]);
+    undoLikeApp(app2);
+    clickAt(tools2, vp2, [3, 3, 0]);
+    const p2 = onlyPattern(app2.model);
+    expect(vertexCount(p2)).toBe(2);
+    expect(creaseCount(p2)).toBe(0);
+    expect(app2.status).toBe(STATUS.patternVertexPlaced(p2.name));
+    clickAt(tools2, vp2, [0, 3, 0]);
+    expect(creaseCount(p2)).toBe(1);
+    expect(app2.overlay.rubberBand && dist(app2.overlay.rubberBand.a, [0, 3, 0])).toBeLessThan(1e-9);
+  });
+
+  it('File > New (the model replaced) while drawing: Backspace brings nothing back; the polyline helper itself forgets a vanished anchor', () => {
+    const { app, vp, tools } = fakeApp(createModel());
+    tools.setTool('cpattern');
+    clickAt(tools, vp, [0, 0, 0]);
+    clickAt(tools, vp, [2, 0, 0]);
+    app.model = createModel();
+    app.undo = [];
+    app.selection = null;
+    const fresh = serializeModel(app.model);
+    expect(tools.popSketchSupported()).toBe(false);
+    expect(tools.popSketchPoint()).toBe(false);
+    expect(serializeModel(app.model)).toBe(fresh);
+    expect(Object.keys(app.model.patterns ?? {}).length).toBe(0);
+    clickAt(tools, vp, [1, 1, 0]);
+    const q = onlyPattern(app.model);
+    expect(vertexCount(q)).toBe(1);
+    expect(app.status).toBe(STATUS.patternVertexPlaced(q.name));
+    // PatternPolyline.addPoint on its own: a last vertex that no longer exists starts a new polyline
+    const m = createModel();
+    const p = addPattern(m, 'plane_top');
+    const pl = new PatternPolyline();
+    pl.begin(p.id);
+    pl.addPoint(m, p, [0, 0, 0], 'U');
+    const b = pl.addPoint(m, p, [2, 0, 0], 'U').vertex.vertex.id;
+    delete p.vertices[b];
+    delete p.creases[Object.keys(p.creases)[0]];
+    m.nextId -= 2; // as an undo would: the ids are handed out again
+    const r = pl.addPoint(m, p, [2, 2, 0], 'U');
+    expect(r.same).toBe(false);
+    expect(r.crease).toBeNull();
+    expect(r.vertex.vertex.id).toBe(b);
+    expect(Object.keys(p.creases).length).toBe(0);
+  });
+
+  it('hiding the pattern mid-polyline (tree eye, Properties): the next click shows it again; a quiet end leaves the status alone', () => {
+    const { app, vp, tools } = fakeApp(createModel());
+    tools.setTool('cpattern');
+    clickAt(tools, vp, [0, 0, 0]);
+    clickAt(tools, vp, [2, 0, 0]);
+    const p = onlyPattern(app.model);
+    p.hidden = true;
+    clickAt(tools, vp, [2, 2, 0]);
+    expect(p.hidden).toBe(false);
+    expect(creaseCount(p)).toBe(2);
+    expect(Object.keys(app.model.patterns!).length).toBe(1);
+    const status = app.status;
+    tools.endPolyline(true);
+    expect(app.status).toBe(status);
+    expect(app.overlay).toEqual({});
+    expect(tools.popSketchSupported()).toBe(false);
+  });
+
+  it('a double-click as the first click leaves the polyline open at that vertex instead of an isolated vertex', () => {
+    const { app, vp, tools } = fakeApp(createModel());
+    tools.setTool('cpattern');
+    const s = vp.worldToScreen([1, 1, 0]);
+    tools.handle(ev('move', s.x, s.y, null));
+    tools.handle(ev('down', s.x, s.y, null));
+    tools.handle(ev('up', s.x, s.y, null));
+    tools.handle(ev('down', s.x + 1, s.y, null));
+    tools.handle(ev('up', s.x + 1, s.y, null));
+    tools.handle(ev('dblclick', s.x + 1, s.y, null));
+    const p = onlyPattern(app.model);
+    expect(vertexCount(p)).toBe(1);
+    expect(creaseCount(p)).toBe(0);
+    expect(app.status).toBe(STATUS.patternVertexPlaced(p.name));
+    expect(tools.popSketchSupported()).toBe(true);
+    const t = vp.worldToScreen([3, 1, 0]);
+    tools.handle(ev('move', t.x, t.y, null));
+    expect(app.overlay.rubberBand && dist(app.overlay.rubberBand.a, [1, 1, 0])).toBeLessThan(1e-9);
+    clickAt(tools, vp, [3, 1, 0]);
+    expect(creaseCount(p)).toBe(1);
+    // with two vertices the double-click ends the polyline as before
+    tools.handle(ev('down', t.x + 1, t.y, null));
+    tools.handle(ev('dblclick', t.x + 1, t.y, null));
+    expect(app.status).toBe(STATUS.patternPolylineEnded);
+    expect(tools.popSketchSupported()).toBe(false);
+  });
+
+  it('deleting pattern elements reports what went: a pattern with the panels it generated', () => {
+    const { app, vp, tools } = fakeApp(createModel());
+    tools.setTool('cpattern');
+    app.toolOptions.creaseClass = 'B';
+    for (const q of [[0, 0, 0], [2, 0, 0], [2, 2, 0], [0, 2, 0], [0, 0, 0]] as Vec3[]) clickAt(tools, vp, q);
+    tools.finish();
+    const p = onlyPattern(app.model);
+    const vid = vertexAt(p, [2, 2, 0])!;
+    const c = Object.values(p.creases)[0];
+    tools.deletePick({ type: 'pcrease', id: p.id, creaseId: c.id });
+    expect(app.status).toBe(STATUS.patternCreaseDeleted);
+    tools.deletePick({ type: 'pvertex', id: p.id, pointId: vid });
+    expect(app.status).toBe(STATUS.patternVertexDeleted);
+    expect(creaseCount(p)).toBe(1);
+    tools.deletePick({ type: 'pattern', id: p.id });
+    expect(app.status).toBe(STATUS.patternDeleted(p.name, 0, 0));
+    expect(Object.keys(app.model.patterns ?? {}).length).toBe(0);
+    // a generated pattern: the counts of the panels and creases removed with it
+    const m = createModel();
+    const q = addPattern(m, 'plane_top');
+    const ids = [[0, 0, 0], [2, 0, 0], [2, 2, 0], [0, 2, 0]].map((pos) => addPatternVertex(m, q, pos as Vec3).vertex.id);
+    for (let i = 0; i < 4; i++) addPatternCrease(m, q, ids[i], ids[(i + 1) % 4], 'B');
+    addPatternCrease(m, q, ids[0], ids[2], 'V');
+    generatePanels(m, q);
+    const { app: app2, tools: tools2 } = fakeApp(m);
+    tools2.deletePick({ type: 'pattern', id: q.id });
+    expect(app2.status).toBe(STATUS.patternDeleted(q.name, 2, 1));
+    expect(Object.keys(app2.model.links).length).toBe(0);
+    expect(Object.keys(app2.model.joints).length).toBe(0);
   });
 });

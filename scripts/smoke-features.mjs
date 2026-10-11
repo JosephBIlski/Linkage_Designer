@@ -577,11 +577,16 @@ await page.screenshot({ path: `${OUT}/15-polygon-off-plane.png` });
 // ---------------------------------------------------------------------------------------------------------------
 // Crease-pattern-first construction (docs/CONSTRUCTION_PLAN.md §5, Phase 3b)
 // ---------------------------------------------------------------------------------------------------------------
-// 24. Crease pattern tool: a square of border creases drawn by clicking its four corners and closing on the first
-//     vertex (which snaps to the pattern vertex), then a valley diagonal between two corners, each polyline ended with
-//     Enter. The pattern is selected from the model tree and "Generate panels" turns it into 2 panels joined by one
-//     crease with fold.mv 'V', zero violation, the pattern hidden and the status text. Then the crease is selected,
-//     its target set to 120° and "Fold to target" pressed: the fold-angle readout reads 120.0° · Valley (V).
+// 24. Crease pattern tool (plan 3b acceptance): a square of border creases drawn by clicking its four corners and
+//     closing on the first vertex (which snaps to the pattern vertex), ended with Enter; Backspace right after Enter
+//     takes nothing back and deletes nothing (the pattern stays). The pattern alone sets the renderer's size unit
+//     (discs and crease widths are not drawn at the minimum). Then an unassigned diagonal between two corners; the
+//     pattern is selected from the model tree, its Checks show the one warning, clicking it selects the crease, and
+//     the crease's "Valley" button assigns it (one undo entry). "Generate panels" turns the pattern into 2 panels
+//     joined by one crease with fold.mv 'V', zero violation, the pattern hidden and the status text. Then the crease
+//     is selected, its target set to 120° and "Fold to target" pressed: the fold-angle readout reads 120.0° · Valley
+//     (V), and the Preview tab moves the free panel (a fold driver is chosen by default). Finally a second square with
+//     an unassigned diagonal generates with the warning counted in the status and a classless hinge.
 await freshTopView([[-1, -1, 0], [4, 4, 0]]);
 await page.click('button[title^="Crease pattern"]');
 await page.selectOption('.tool-options select', 'B');
@@ -591,32 +596,45 @@ for (const q of [[0, 0, 0], [3, 0, 0], [3, 3, 0], [0, 3, 0], [0, 0, 0]]) {
 }
 await page.keyboard.press('Enter');
 await waitStatus(/Polyline ended/);
-const square24 = await page.evaluate(() => { const { app } = window.linkageDesigner; const ps = Object.values(app.model.patterns ?? {}); const p = ps[0]; return p ? { patterns: ps.length, name: p.name, vertices: Object.keys(p.vertices).length, creases: Object.keys(p.creases).length, classes: Object.values(p.creases).map((c) => c.cls), selection: app.selection?.type } : null; });
-await page.selectOption('.tool-options select', 'V');
+await page.keyboard.press('Backspace');
+await page.waitForTimeout(300);
+const square24 = await page.evaluate(() => { const { app } = window.linkageDesigner; const ps = Object.values(app.model.patterns ?? {}); const p = ps[0]; return p ? { patterns: ps.length, name: p.name, vertices: Object.keys(p.vertices).length, creases: Object.keys(p.creases).length, classes: Object.values(p.creases).map((c) => c.cls), selection: app.selection?.type, status: app.status, unit: app.renderer.r } : null; });
+await page.selectOption('.tool-options select', 'U');
 await clickWorld([0, 0, 0]);
 await waitStatus(/Vertex placed/);
 await clickWorld([3, 3, 0]);
-await waitStatus(/Crease \(valley\) added/);
+await waitStatus(/Crease \(unassigned\) added/);
 await page.keyboard.press('Enter');
 await waitStatus(/Polyline ended/);
-const drawn24 = await page.evaluate(() => { const { app } = window.linkageDesigner; const ps = Object.values(app.model.patterns ?? {}); const p = ps[0]; return p ? { patterns: ps.length, vertices: Object.keys(p.vertices).length, creases: Object.keys(p.creases).length, valleys: Object.values(p.creases).filter((c) => c.cls === 'V').length, borders: Object.values(p.creases).filter((c) => c.cls === 'B').length, links: Object.keys(app.model.links).length } : null; });
-const okDrawn24 = !!square24 && square24.patterns === 1 && square24.vertices === 4 && square24.creases === 4 && square24.classes.every((c) => c === 'B') && square24.selection === 'pattern' && !!drawn24 && drawn24.patterns === 1 && drawn24.vertices === 4 && drawn24.creases === 5 && drawn24.valleys === 1 && drawn24.borders === 4 && drawn24.links === 0;
-console.log('crease pattern tool: square of borders closed on its first vertex, valley diagonal', JSON.stringify({ square: square24, drawn: drawn24 }), okDrawn24 ? 'OK' : 'FAIL');
+const drawn24 = await page.evaluate(() => { const { app } = window.linkageDesigner; const ps = Object.values(app.model.patterns ?? {}); const p = ps[0]; return p ? { patterns: ps.length, vertices: Object.keys(p.vertices).length, creases: Object.keys(p.creases).length, unassigned: Object.values(p.creases).filter((c) => c.cls === 'U').length, borders: Object.values(p.creases).filter((c) => c.cls === 'B').length, links: Object.keys(app.model.links).length } : null; });
+const okDrawn24 = !!square24 && square24.patterns === 1 && square24.vertices === 4 && square24.creases === 4 && square24.classes.every((c) => c === 'B') && square24.selection === 'pattern' && /Polyline ended/.test(square24.status) && square24.unit > 0.04 && !!drawn24 && drawn24.patterns === 1 && drawn24.vertices === 4 && drawn24.creases === 5 && drawn24.unassigned === 1 && drawn24.borders === 4 && drawn24.links === 0;
+console.log('crease pattern tool: square of borders closed on its first vertex (Backspace after Enter keeps it, size unit from the pattern), unassigned diagonal', JSON.stringify({ square: square24, drawn: drawn24 }), okDrawn24 ? 'OK' : 'FAIL');
 await page.screenshot({ path: `${OUT}/16-crease-pattern-drawn.png` });
-// select the pattern through its model-tree row and generate
+// select the pattern through its model-tree row: the Checks show the unassigned crease; clicking the line selects it
+// and its Valley button assigns the class
 await page.click('button[title^="Select —"]');
 await page.evaluate(() => window.linkageDesigner.app.select(null));
 await page.waitForTimeout(200);
 const treeRow24 = await page.evaluate(() => { const row = [...document.querySelectorAll('.tree-item')].find((r) => r.querySelector('.tree-item__label')?.textContent === 'Pattern 1'); return row ? { badges: [...row.querySelectorAll('.tree-badge')].map((b) => b.textContent), group: row.closest('.tree-group')?.querySelector('.tree-group__summary')?.textContent ?? '' } : null; });
 await page.click('.tree-item:has-text("Pattern 1")');
 await page.waitForTimeout(300);
-const props24 = await page.evaluate(() => ({ selection: window.linkageDesigner.app.selection, subtitle: document.querySelector('.props-panel .panel__subtitle')?.textContent ?? '', rows: [...document.querySelectorAll('.props-panel .prop-row')].map((r) => r.textContent.trim()), checks: [...document.querySelectorAll('.props-panel .crease-pattern p')].map((e) => e.textContent), buttons: [...document.querySelectorAll('.props-panel button')].map((b) => b.textContent.trim()) }));
+const warn24 = await page.evaluate(() => ({ selection: window.linkageDesigner.app.selection, subtitle: document.querySelector('.props-panel .panel__subtitle')?.textContent ?? '', rows: [...document.querySelectorAll('.props-panel .prop-row')].map((r) => r.textContent.trim()), warnings: [...document.querySelectorAll('.props-panel .crease-pattern p.hint.warn.clickable')].map((e) => e.textContent), undo: window.linkageDesigner.app.undoStack.length }));
+await page.click('.props-panel .crease-pattern p.hint.warn.clickable');
+await page.waitForTimeout(300);
+const picked24 = await page.evaluate(() => ({ selection: window.linkageDesigner.app.selection, subtitle: document.querySelector('.props-panel .panel__subtitle')?.textContent ?? '' }));
+await page.click('.props-panel .show-points button:has-text("Valley")');
+await page.waitForTimeout(300);
+const assigned24 = await page.evaluate(() => { const { app } = window.linkageDesigner; const p = Object.values(app.model.patterns ?? {})[0]; const sel = app.selection; return { cls: sel?.creaseId ? p.creases[sel.creaseId]?.cls : null, subtitle: document.querySelector('.props-panel .panel__subtitle')?.textContent ?? '', undo: app.undoStack.length, checks: [...document.querySelectorAll('.props-panel .crease-pattern p')].map((e) => e.textContent) }; });
+const okAssign24 = warn24.selection?.type === 'pattern' && /Crease pattern · Pattern 1/.test(warn24.subtitle) && warn24.warnings.length === 1 && /unassigned/.test(warn24.warnings[0]) && picked24.selection?.type === 'pcrease' && !!picked24.selection.creaseId && /Crease \(unassigned\) · Pattern 1/.test(picked24.subtitle) && assigned24.cls === 'V' && /Crease \(valley\) · Pattern 1/.test(assigned24.subtitle) && assigned24.undo === warn24.undo + 1 && assigned24.checks.some((t) => /No problems found/.test(t));
+console.log('pattern checks: the unassigned diagonal is listed, clicking it selects the crease, Valley assigns it', JSON.stringify({ warnings: warn24.warnings, picked: picked24, assigned: { ...assigned24, checks: assigned24.checks.length } }), okAssign24 ? 'OK' : 'FAIL');
+// the pattern's Properties follow the crease's: generate from there
+const props24 = await page.evaluate(() => ({ selection: window.linkageDesigner.app.selection, rows: [...document.querySelectorAll('.props-panel .prop-row')].map((r) => r.textContent.trim()), checks: [...document.querySelectorAll('.props-panel .crease-pattern p')].map((e) => e.textContent), buttons: [...document.querySelectorAll('.props-panel button')].map((b) => b.textContent.trim()) }));
 await page.click('.props-panel button:has-text("Generate panels")');
 const generated24 = await waitStatus(/Generated|Nothing to generate/);
 await page.waitForTimeout(400);
 const after24 = await page.evaluate(() => { const { app } = window.linkageDesigner; const m = app.model; const p = Object.values(m.patterns ?? {})[0]; const creases = Object.values(m.joints).filter((j) => j.type === 'revolute' && j.a.kind === 'edge' && j.pairs?.length === 2); return { links: Object.values(m.links).map((l) => [l.name, l.kind, l.pointIds.length, l.ground]), creases: creases.map((j) => ({ id: j.id, mv: j.fold?.mv ?? null, target: j.fold?.target ?? null })), bodyJoints: Object.values(m.joints).filter((j) => j.a.kind === 'body').length, dof: app.sim.mobility?.dof, violation: app.sim.violation, hidden: !!p?.hidden, generated: p?.generated ? { links: p.generated.linkIds.length, joints: p.generated.jointIds.length } : null, selection: app.selection?.type, treeBadges: [...document.querySelectorAll('.tree-item')].find((r) => r.querySelector('.tree-item__label')?.textContent === 'Pattern 1') ? [...[...document.querySelectorAll('.tree-item')].find((r) => r.querySelector('.tree-item__label')?.textContent === 'Pattern 1').querySelectorAll('.tree-badge')].map((b) => b.textContent) : null }; });
-const okGen24 = !!treeRow24 && /Crease patterns/.test(treeRow24.group) && treeRow24.badges.includes('5 creases') && props24.selection?.type === 'pattern' && /Crease pattern · Pattern 1/.test(props24.subtitle) && props24.rows.some((r) => /4 · 5 · 2/.test(r)) && props24.checks.some((t) => /No problems found/.test(t)) && props24.buttons.includes('Generate panels') && /Generated 2 panels and 1 crease\./.test(generated24) && !/warning/.test(generated24) && after24.links.length === 2 && after24.links.every((l) => l[1] === 'polygon' && l[2] === 3) && after24.links.filter((l) => l[3]).length === 1 && after24.creases.length === 1 && after24.creases[0].mv === 'V' && after24.bodyJoints === 0 && after24.violation < 1e-8 && after24.dof === 1 && after24.hidden && after24.generated?.links === 2 && after24.generated?.joints === 1 && after24.selection === 'link' && !!after24.treeBadges && after24.treeBadges.includes('hidden');
-console.log('generate panels from the pattern: 2 panels, 1 valley crease, zero violation, pattern hidden', JSON.stringify({ treeRow: treeRow24, subtitle: props24.subtitle, counts: props24.rows.find((r) => /faces/.test(r)), checks: props24.checks, status: generated24, after: { ...after24, links: after24.links.map((l) => l[0]) } }), okGen24 ? 'OK' : 'FAIL');
+const okGen24 = !!treeRow24 && /Crease patterns/.test(treeRow24.group) && treeRow24.badges.includes('5 creases') && props24.selection?.type === 'pcrease' && props24.rows.some((r) => /4 · 5 · 2/.test(r)) && props24.checks.some((t) => /No problems found/.test(t)) && props24.buttons.includes('Generate panels') && /Generated 2 panels and 1 crease\./.test(generated24) && !/warning/.test(generated24) && after24.links.length === 2 && after24.links.every((l) => l[1] === 'polygon' && l[2] === 3) && after24.links.filter((l) => l[3]).length === 1 && after24.creases.length === 1 && after24.creases[0].mv === 'V' && after24.bodyJoints === 0 && after24.violation < 1e-8 && after24.dof === 1 && after24.hidden && after24.generated?.links === 2 && after24.generated?.joints === 1 && after24.selection === 'link' && !!after24.treeBadges && after24.treeBadges.includes('hidden');
+console.log('generate panels from the pattern: 2 panels, 1 valley crease, zero violation, pattern hidden', JSON.stringify({ treeRow: treeRow24, counts: props24.rows.find((r) => /faces/.test(r)), checks: props24.checks, status: generated24, after: { ...after24, links: after24.links.map((l) => l[0]) } }), okGen24 ? 'OK' : 'FAIL');
 await page.screenshot({ path: `${OUT}/17-crease-pattern-generated.png` });
 // the generated crease: target 120°, Fold to target, readout 120.0° · Valley (V)
 await page.evaluate((id) => window.linkageDesigner.app.select({ type: 'joint', id }), after24.creases[0].id);
@@ -633,6 +651,43 @@ const angle24 = Number((readout24.row.match(/(\d+(?:\.\d+)?)°/) ?? [])[1]);
 const okFold24 = /Folded to target/.test(folded24) && Math.abs(angle24 - 120) < 0.5 && /Valley/.test(readout24.row) && readout24.target === 120 && readout24.mv === 'V' && readout24.violation < 1e-6 && readout24.selection === 'joint';
 console.log('fold the generated crease to its target of 120°', JSON.stringify({ status: folded24.slice(0, 80), readout: readout24.row, angle: angle24, target: readout24.target, mv: readout24.mv, dof: readout24.dof, violation: readout24.violation }), okFold24 ? 'OK' : 'FAIL');
 await page.screenshot({ path: `${OUT}/18-crease-pattern-folded.png` });
+// Preview after Fold to target: the model had no driver, so a fold driver on the crease is chosen and the free panel sweeps
+await page.click('button.mode-tab:has-text("Preview")');
+await page.waitForTimeout(2500);
+const preview24 = await page.evaluate(() => { const { app } = window.linkageDesigner; const m = app.model; const sw = app.sim.sweep; const ground = Object.values(m.links).find((l) => l.ground); const gp = ground.pointIds.map((id) => m.points[id].pos); const farFromGround = (id) => Math.min(...gp.map((g) => Math.hypot(...g.map((v, k) => v - m.points[id].pos[k])))); const travel = sw ? Object.values(m.links).filter((l) => !l.ground).map((l) => { const id = l.pointIds.reduce((b, x) => (farFromGround(x) > farFromGround(b) ? x : b), l.pointIds[0]); const a = sw.poses.map((p) => p.positions.get(id)); let mx = 0; for (const q of a) mx = Math.max(mx, Math.hypot(...q.map((v, k) => v - a[0][k]))); return +mx.toFixed(2); }) : null; return { drivers: m.drivers.map((d) => d.kind), poses: sw ? sw.poses.length : 0, message: app.sim.message, travel }; });
+const okPreview24 = preview24.drivers.length === 1 && preview24.drivers[0] === 'fold' && preview24.poses > 10 && preview24.message === '' && !!preview24.travel && preview24.travel.length === 1 && preview24.travel[0] > 0.5;
+console.log('preview after Fold to target moves the free panel (default fold driver)', JSON.stringify(preview24), okPreview24 ? 'OK' : 'FAIL');
+await page.click('button.mode-tab:has-text("Construction")');
+await page.waitForTimeout(300);
+// a second square with an unassigned diagonal: generated with the warning counted in the status, the hinge classless
+await page.evaluate(() => { const { app } = window.linkageDesigner; app.select(null); app.viewport.setView('top'); app.viewport.fit([[-1, -1, -3], [9, 4, 3]]); });
+await page.waitForTimeout(300);
+await page.click('button[title^="Crease pattern"]');
+await page.selectOption('.tool-options select', 'B');
+for (const q of [[5, 0, 0], [8, 0, 0], [8, 3, 0], [5, 3, 0], [5, 0, 0]]) {
+  await clickWorld(q);
+  await waitStatus(/Vertex placed|added|nothing was added/);
+}
+await page.keyboard.press('Enter');
+await waitStatus(/Polyline ended/);
+await page.selectOption('.tool-options select', 'U');
+await clickWorld([5, 0, 0]);
+await waitStatus(/Vertex placed/);
+await clickWorld([8, 3, 0]);
+await waitStatus(/Crease \(unassigned\) added/);
+await page.keyboard.press('Enter');
+await waitStatus(/Polyline ended/);
+await page.click('button[title^="Select —"]');
+await page.evaluate(() => window.linkageDesigner.app.select(null));
+await page.waitForTimeout(200);
+await page.click('.tree-item:has-text("Pattern 2")');
+await page.waitForTimeout(300);
+await page.click('.props-panel button:has-text("Generate panels")');
+const generated24b = await waitStatus(/Generated|Nothing to generate/);
+await page.waitForTimeout(400);
+const after24b = await page.evaluate(() => { const { app } = window.linkageDesigner; const m = app.model; const p = Object.values(m.patterns ?? {}).find((x) => x.name === 'Pattern 2'); const hinges = (p?.generated?.jointIds ?? []).map((id) => m.joints[id]).filter(Boolean); return { patterns: Object.keys(m.patterns ?? {}).length, links: Object.keys(m.links).length, hinges: hinges.map((j) => ({ type: j.type, mv: j.fold?.mv ?? null })), violation: app.sim.violation }; });
+const okGen24b = /Generated 2 panels and 1 crease\. 1 warning: select the pattern in the model tree to read them\./.test(generated24b) && after24b.patterns === 2 && after24b.links === 4 && after24b.hinges.length === 1 && after24b.hinges[0].type === 'revolute' && after24b.hinges[0].mv === null && after24b.violation < 1e-8;
+console.log('a pattern with an unassigned interior crease still generates, with the warning counted', JSON.stringify({ status: generated24b, after: after24b }), okGen24b ? 'OK' : 'FAIL');
 // 25. The Miura-ori sheet example (plan 3c) and the Fold command on a generated crease pattern. The example loads
 //     pre-folded on its drawn branch: 16 panels, 24 creases, DOF 1, one fold driver at 160°, every crease label in the
 //     tree with a class and an angle below 180°, the pattern kept hidden. "Regenerate panels" on that pattern (selected

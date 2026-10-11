@@ -114,11 +114,19 @@ export function patternTolerance(p: CreasePattern): number {
 // Patterns
 // ---------------------------------------------------------------------------
 
-/** Create an empty pattern on a construction plane. `name` defaults to "Pattern n". */
+/** "<base> n" with the smallest n ≥ 1 that no pattern uses (so a name freed by a deletion is reused, never a duplicate). */
+export function nextPatternName(m: Model, base: string = DEFAULT_PATTERN_NAME): string {
+  const used = new Set(Object.values(m.patterns ?? {}).map((p) => p.name));
+  let n = 1;
+  while (used.has(`${base} ${n}`)) n++;
+  return `${base} ${n}`;
+}
+
+/** Create an empty pattern on a construction plane. `name` defaults to nextPatternName ("Pattern n", the smallest unused n). */
 export function addPattern(m: Model, planeId: ID, name?: string): CreasePattern {
   m.patterns ??= {};
   const id = newId(m, 'pattern');
-  const p: CreasePattern = { id, name: name ?? `${DEFAULT_PATTERN_NAME} ${Object.keys(m.patterns).length + 1}`, planeId, vertices: {}, creases: {} };
+  const p: CreasePattern = { id, name: name ?? nextPatternName(m), planeId, vertices: {}, creases: {} };
   m.patterns[id] = p;
   return p;
 }
@@ -403,14 +411,30 @@ export interface PatternFaces {
   faces: ID[][];
   /** The outer boundary (clockwise) of the component enclosing the largest area; empty when there is no bounded face. */
   outer: ID[];
-  /** Creases with exactly one bounded face. */
+  /** Creases with exactly one generated face (a face with a hole counts as none, except for its own outline). */
   border: ID[];
-  /** Creases with two different bounded faces. */
+  /** Creases with two different generated faces. */
   interior: ID[];
   /** Creases with the same face on both sides (tree edges), or with no bounded face at all (slivers). */
   dangling: ID[];
   /** Vertices with no crease. */
   isolated: ID[];
+  /** Faces with a hole or a pinched boundary (see PatternHole): counted in `faces`, generated as no panel. */
+  holes: PatternHole[];
+}
+
+/**
+ * A bounded face that cannot become a panel: a closed outline of another
+ * component lies inside it without touching its boundary (a hole: the outer
+ * polygon would cover the panels generated inside it), or its boundary passes
+ * through a vertex twice (an inner outline joined to the boundary by a single
+ * crease, so the face is a ring pinched at that crease, not a simple polygon).
+ */
+export interface PatternHole {
+  /** Index into PatternFaces.faces of the face that is not generated. */
+  face: number;
+  /** The creases to blame: the enclosed outline's, or the crease the boundary runs along twice. */
+  creaseIds: ID[];
 }
 
 interface HalfEdge {
@@ -438,6 +462,21 @@ interface Traced {
   interior: ID[];
   dangling: ID[];
   isolated: ID[];
+  holes: PatternHole[];
+}
+
+/** Even–odd (ray-casting) test: is `q` strictly inside the polygon `poly`? A point on an edge counts as neither. */
+function insidePolygon(q: Vec2, poly: Vec2[]): boolean {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[i];
+    const b = poly[j];
+    if (a[1] > q[1] !== b[1] > q[1]) {
+      const x = a[0] + ((q[1] - a[1]) * (b[0] - a[0])) / (b[1] - a[1]);
+      if (q[0] < x) inside = !inside;
+    }
+  }
+  return inside;
 }
 
 /** The tracing behind patternFaces (the half-edge convention is documented there); shared with validatePattern and generatePanels. */
@@ -521,12 +560,34 @@ function trace(m: Model, p: CreasePattern, tol: number = patternTolerance(p)): T
   const areaTol = 0.5 * tol * Math.max(1, patternExtent(p));
   const boundedIndex = new Map<number, number>();
   const bounded: Traced['bounded'] = [];
+  const boundedRoot: ID[] = []; // the component of each bounded face
   faces.forEach((f, i) => {
     if (outerFaces.has(i) || f.area <= areaTol) return;
     const cycle = removeSpurs(f.halfEdges.map((e) => halfEdges[e].from));
     if (cycle.length < 3) return;
     boundedIndex.set(i, bounded.length);
     bounded.push({ cycle, halfEdges: f.halfEdges });
+    boundedRoot.push(find(f.first));
+  });
+  // holes: a component with a bounded face (a closed outline) whose vertex lies strictly inside a bounded face of
+  // another component is enclosed by that face (components never cross, since addPatternCrease splits crossings, so
+  // one vertex decides for the whole outline); a bounded face whose spur-free cycle repeats a vertex is a ring
+  // pinched at the crease its boundary runs along twice. Neither face is generated (PatternHole).
+  const holes: PatternHole[] = [];
+  const uniq = (ids: ID[]): ID[] => [...new Set(ids)];
+  for (const [root, outerIndex] of outerOf) {
+    if (!boundedRoot.includes(root)) continue;
+    const q = uv.get(faces[outerIndex].first)!;
+    const outline = uniq(faces[outerIndex].halfEdges.map((e) => halfEdges[e].creaseId));
+    bounded.forEach((b, k) => {
+      if (boundedRoot[k] !== root && insidePolygon(q, b.cycle.map((id) => uv.get(id)!))) holes.push({ face: k, creaseIds: outline });
+    });
+  }
+  bounded.forEach((b, k) => {
+    if (new Set(b.cycle).size === b.cycle.length || holes.some((h) => h.face === k)) return;
+    const seen = new Set<ID>();
+    const twice = uniq(b.halfEdges.map((e) => halfEdges[e].creaseId).filter((id) => (seen.has(id) ? true : (seen.add(id), false))));
+    holes.push({ face: k, creaseIds: twice.length ? twice : [halfEdges[b.halfEdges[0]].creaseId] });
   });
   // the outer boundary: the outer face enclosing the largest area
   let outer: ID[] = [];
@@ -538,7 +599,11 @@ function trace(m: Model, p: CreasePattern, tol: number = patternTolerance(p)): T
     }
   }
   if (outer.length < 3) outer = [];
-  // crease classification
+  // crease classification: a holed face generates no panel, so a crease is interior only between two generated faces;
+  // one with a bounded face on at least one side (generated or not) is a border, one with none (or the same face on
+  // both sides) is dangling
+  const holed = new Set(holes.map((h) => h.face));
+  const generated = (k: number): boolean => k >= 0 && !holed.has(k);
   const faceOf = new Map<ID, [number, number]>();
   const border: ID[] = [];
   const interior: ID[] = [];
@@ -550,11 +615,11 @@ function trace(m: Model, p: CreasePattern, tol: number = patternTolerance(p)): T
     const f1 = boundedIndex.get(h1.face) ?? -1;
     faceOf.set(h0.creaseId, [f0, f1]);
     if (h0.face === h1.face || (f0 < 0 && f1 < 0)) dangling.push(h0.creaseId);
-    else if (f0 >= 0 && f1 >= 0) interior.push(h0.creaseId);
+    else if (generated(f0) && generated(f1)) interior.push(h0.creaseId);
     else border.push(h0.creaseId);
   }
   const isolated = [...degree.entries()].filter(([, d]) => d === 0).map(([id]) => id);
-  return { basis, bounded, faceOf, halfEdges, outer, degree, border, interior, dangling, isolated };
+  return { basis, bounded, faceOf, halfEdges, outer, degree, border, interior, dangling, isolated, holes };
 }
 
 /** Collapse every x, y, x excursion of a vertex cycle to x until none is left (the spurs of dangling creases). */
@@ -604,11 +669,13 @@ function removeSpurs(cycle: ID[]): ID[] {
  * A bounded face is a traced cycle of positive area beyond the tolerance;
  * the face of least signed area in each component is its outer face. The
  * vertex cycles reported drop the spurs of dangling creases (… x, y, x … →
- * … x …), so a face's cycle lists its boundary vertices only.
+ * … x …), so a face's cycle lists its boundary vertices only. A face that
+ * encloses another component's outline, or whose cycle repeats a vertex, is
+ * listed in `holes` (PatternHole) and generates no panel.
  */
 export function patternFaces(m: Model, p: CreasePattern, tol: number = patternTolerance(p)): PatternFaces {
   const t = trace(m, p, tol);
-  return { faces: t.bounded.map((f) => f.cycle), outer: t.outer, border: t.border, interior: t.interior, dangling: t.dangling, isolated: t.isolated };
+  return { faces: t.bounded.map((f) => f.cycle), outer: t.outer, border: t.border, interior: t.interior, dangling: t.dangling, isolated: t.isolated, holes: t.holes };
 }
 
 // ---------------------------------------------------------------------------
@@ -651,7 +718,7 @@ export function patternVertexSectors(m: Model, p: CreasePattern, vertexId: ID): 
   return { creaseIds: dirs.map((d) => d.id), sectorDeg };
 }
 
-export type PatternIssueKind = 'oddDegree' | 'kawasaki' | 'maekawa' | 'dangling' | 'unassigned' | 'isolated' | 'noFaces';
+export type PatternIssueKind = 'oddDegree' | 'kawasaki' | 'maekawa' | 'dangling' | 'unassigned' | 'borderInside' | 'hole' | 'isolated' | 'noFaces';
 
 /**
  * One problem of a pattern (validatePattern). The UI turns these into
@@ -661,6 +728,8 @@ export type PatternIssueKind = 'oddDegree' | 'kawasaki' | 'maekawa' | 'dangling'
  *  - maekawa: vertexId, creaseIds, mountains, valleys;
  *  - dangling: creaseIds (one crease);
  *  - unassigned: creaseIds (one interior crease of class 'U');
+ *  - borderInside: creaseIds (one interior crease of class 'B');
+ *  - hole: creaseIds (the enclosed outline's creases, or the crease a pinched boundary runs along twice; PatternHole);
  *  - isolated: vertexId;
  *  - noFaces: nothing else.
  */
@@ -707,6 +776,11 @@ function interiorVertices(p: CreasePattern, t: Traced): ID[] {
  *    all) would generate no hinge;
  *  - unassigned: an interior crease of class 'U' generates a crease without
  *    a mountain / valley preference;
+ *  - borderInside: an interior crease of class 'B' (a border drawn between
+ *    two faces) generates such a crease as well, since a border carries no
+ *    fold direction; the vertex conditions treat it as unassigned;
+ *  - hole: a face enclosing another outline, or pinched at one crease, is
+ *    not generated (PatternHole);
  *  - isolated: a vertex without creases;
  *  - noFaces: the pattern encloses no bounded face, so nothing is generated.
  * Developability needs no check: a drawn pattern is flat by construction.
@@ -730,7 +804,12 @@ export function validatePattern(m: Model, p: CreasePattern, tolDeg: number = SEC
     }
   }
   for (const id of t.dangling) issues.push({ kind: 'dangling', creaseIds: [id] });
-  for (const id of t.interior) if (p.creases[id].cls === 'U') issues.push({ kind: 'unassigned', creaseIds: [id] });
+  for (const id of t.interior) {
+    const cls = p.creases[id].cls;
+    if (cls === 'U') issues.push({ kind: 'unassigned', creaseIds: [id] });
+    else if (cls === 'B') issues.push({ kind: 'borderInside', creaseIds: [id] });
+  }
+  for (const h of t.holes) issues.push({ kind: 'hole', creaseIds: h.creaseIds });
   for (const id of t.isolated) issues.push({ kind: 'isolated', vertexId: id });
   if (t.bounded.length === 0) issues.push({ kind: 'noFaces' });
   return issues;
@@ -778,7 +857,10 @@ function nextLinkName(m: Model, base: string): string {
  * panel becomes ground. The pattern records what was generated
  * (`p.generated`, with each link's face vertices in point order). Returns
  * the ids and the pattern's validation issues as warnings; a pattern without
- * bounded faces generates nothing.
+ * bounded faces generates nothing. A face with a hole or a pinched boundary
+ * (PatternHole, reported among the warnings) is skipped — its panel would
+ * cover the panels inside it, the overlap the Panel tool refuses as well — and
+ * so is a crease between it and a neighbour.
  */
 export function generatePanels(m: Model, p: CreasePattern, opts: GenerateOptions = {}): GenerateResult {
   removeGenerated(m, p);
@@ -786,26 +868,30 @@ export function generatePanels(m: Model, p: CreasePattern, opts: GenerateOptions
   const base = opts.panelName ?? DEFAULT_PANEL_NAME;
   const linkIds: ID[] = [];
   const faces: Record<ID, ID[]> = {};
-  for (const f of t.bounded) {
+  const holed = new Set(t.holes.map((h) => h.face));
+  const linkOfFace: (ID | null)[] = t.bounded.map((f, k) => {
+    if (holed.has(k)) return null;
     const pts = f.cycle.map((id) => [...p.vertices[id].pos] as Vec3);
     const link = addPolygonFromPoints(m, pts, { name: nextLinkName(m, base), onPlaneId: null });
     linkIds.push(link.id);
     faces[link.id] = [...f.cycle];
-  }
+    return link.id;
+  });
   const jointIds: ID[] = [];
-  const edgeOf = (linkId: ID, c: PatternCrease): Feature | null => {
-    const link = m.links[linkId];
+  const edgeOf = (linkId: ID | null, c: PatternCrease): Feature | null => {
+    const link = linkId ? m.links[linkId] : undefined;
+    if (!link || !linkId) return null;
     const ia = faces[linkId].indexOf(c.a);
     const ib = faces[linkId].indexOf(c.b);
-    if (!link || ia < 0 || ib < 0) return null;
+    if (ia < 0 || ib < 0) return null;
     return { linkId, kind: 'edge', pointIds: [link.pointIds[ia], link.pointIds[ib]] };
   };
   for (const cid of t.interior) {
     const c = p.creases[cid];
     const [fa, fb] = t.faceOf.get(cid) ?? [-1, -1];
     if (fa < 0 || fb < 0 || fa === fb) continue;
-    const ea = edgeOf(linkIds[fa], c);
-    const eb = edgeOf(linkIds[fb], c);
+    const ea = edgeOf(linkOfFace[fa], c);
+    const eb = edgeOf(linkOfFace[fb], c);
     if (!ea || !eb) continue;
     const joint: Joint | null = addJoint(m, 'revolute', ea, eb);
     if (!joint) continue;

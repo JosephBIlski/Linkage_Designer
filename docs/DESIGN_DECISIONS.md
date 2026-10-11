@@ -3,7 +3,8 @@
 This document records *why* the prototype is built the way it is. The
 feature-level behaviour is specified in [SPEC.md](SPEC.md); the original brief
 is in [ORIGINAL_SPEC.md](ORIGINAL_SPEC.md); the diagnosis and plan behind the
-v0.3 joining / folding work and the v0.4 construction workflow are in
+v0.3 joining / folding work, the v0.4 construction workflow and the v0.5
+crease-pattern-first construction are in
 [CONSTRUCTION_PLAN.md](CONSTRUCTION_PLAN.md).
 
 ## 1. Point-based constraint formulation (the "Crane" idea)
@@ -59,6 +60,16 @@ Jacobian. Three properties made it the right choice here:
   tolerance works for everything. The numeric Jacobian of the dihedral
   constraint wraps its difference at ±π, so the derivative stays finite when
   the two samples straddle the discontinuity.
+- **Crease patterns (v0.5) are a generator over this formulation, not a new
+  kind of constraint.** A pattern is a planar straight-line graph kept beside
+  the model (`Model.patterns`) that the solver never sees; "Generate panels"
+  turns its bounded faces into ordinary polygon links and its interior
+  creases into ordinary edge–edge revolutes with merged end points — exactly
+  the objects the Panel and Joint tools make by hand — so the DOF count, the
+  pre-fold, the sweeps, the validator and the inverse design need no
+  pattern-specific code, and a generated vertex is indistinguishable from a
+  hand-built one to all of them. The pattern only records what it generated
+  so that it can be regenerated or deleted together with it (SPEC.md §19).
 
 ## 2. Rigid bodies, planarity and joint helper points
 
@@ -91,6 +102,13 @@ Jacobian. Three properties made it the right choice here:
   like the first and held on its line by two point-on-line constraints plus a
   slide lock whose offset is *measured* from the current pose (5 equations),
   exactly as a revolute against a datum axis; such a hinge is not a crease.
+- **Generated creases are exact (v0.5).** The two panels of a crease
+  generated from a pattern are built from the same vertex positions, so
+  their shared edges agree to the bit, the merge needs no adaptation (§8,
+  "Joining edges of unequal length") and the flat sheet has zero residual
+  at the pattern's positions. The pattern's class (mountain / valley) and
+  target angle are copied onto the joint's optional `fold` record; a border
+  or unassigned interior crease generates the same joint without a class.
 - **Cylindrical** = two point-on-line constraints (4 eq.), **prismatic** =
   cylindrical + a reference point held in a plane containing the axis (5 eq.),
   **screw** = cylindrical + translation−pitch·rotation/2π coupling (5 eq.),
@@ -185,7 +203,11 @@ damping dynamics.
 ## 6. UI decisions
 
 - **Z-up**, Creo-style default datums (ORIGIN, X/Y/Z, TOP/FRONT/RIGHT) and
-  right-button orbit / middle-button pan, as in Rhino.
+  right-button orbit / middle-button pan, as in Rhino. Since v0.5 each
+  builtin plane's normal points toward the camera of its view (TOP +Z,
+  FRONT −Y, RIGHT +X), so that what is drawn on a plane in its view is
+  judged from the side the user sees (§8, "Which side is the front of
+  FRONT").
 - The 2-D workflow is a *sketch plane*: new bars/polygons receive a planar
   "body" constraint to the active construction plane, which the compiler turns
   into frozen coordinates. Removing that constraint (or sketching in 3-D mode)
@@ -252,9 +274,53 @@ damping dynamics.
   data; each classical condition (developability, Kawasaki, Maekawa; Hull
   1994) is reported on its own, so a pyramid apex reads "developable ✗ ·
   Kawasaki 0.0° ✓" rather than one opaque verdict.
+- **Crease patterns are drawn on the sketch plane (v0.5).** A pattern lives
+  on a construction plane and its 2-D frame is the plane's (origin, x
+  direction, normal × x), for three reasons: the Crease pattern tool then
+  uses the placement rule and the snaps of every other click-placed tool
+  (plus pattern vertices and creases), the pattern can be shown and edited
+  in 3-D beside the panels it generated, and the side from which its
+  mountain / valley classes are judged is the plane's front — which is why
+  the builtin planes now face the camera of their view and why a plane that
+  carries a pattern cannot be deleted (the pattern would silently be
+  re-based on world XY). The pattern is kept with the model after
+  generation, hidden rather than consumed: regeneration rebuilds the flat
+  sheet from the drawing, and the Miura-ori sheet example ships with its
+  pattern.
+- **Class colours and the pattern's own feedback (v0.5).** Mountain and
+  valley creases of a pattern use the mechanism's crease colours (red /
+  blue), so a drawn crease and the hinge it generates read the same; border
+  creases are dark grey (`#3b3f44`: the outline of the sheet, which
+  generates no hinge) and unassigned creases amber (`#e0a400`: a warning
+  colour, since an unassigned interior crease is a problem the Checks
+  report). A selected pattern highlights its vertices only, so the classes
+  stay readable while it is selected. Pattern vertices have no names, so
+  the Checks name them by their plane coordinates, and each line selects the
+  element it concerns. The Checks live in the pattern's Properties — they
+  are properties of the drawing, available before anything is generated,
+  and a pattern can be drawn while panels of another already exist — whereas
+  the §18.4 validator in the Mechanism panel checks the panels once they
+  exist; both report the same conditions in the same words.
+- **Backspace restores a snapshot, and the polyline is bound to its model
+  (v0.5).** A click of the Crease pattern tool can merge a vertex, split the
+  crease it lands on and split every crease the new crease crosses;
+  removing those piecemeal is error-prone, so each click keeps the model
+  serialised before it and Backspace restores that snapshot as one undo
+  entry (taking back the first vertex removes a pattern that click created).
+  Because undo, redo and a file load replace the model object, a polyline
+  remembers the object it was drawn on and ends itself when that changes — a
+  stale snapshot would otherwise resurrect undone geometry, and a reused
+  vertex id would continue the polyline from the wrong vertex (§8).
+- **Pattern elements are redrawn, not moved (v0.5).** Dragging a pattern
+  vertex would have to re-split every crossing its creases make and re-merge
+  what the move brings together; the Select and Edit tools refuse with a
+  message that names the alternative (delete the vertex and click its new
+  position, or Backspace while drawing). Pattern vertices and creases rank
+  between link vertices and joints in the pick priority, so a pattern drawn
+  over its generated panels stays reachable above their edges and faces.
 - All strings live in `src/ui/strings.ts`.
 
-## 8. Lessons from testing (v0.2 – v0.4)
+## 8. Lessons from testing (v0.2 – v0.5)
 
 **Degree-4 vertex example (Miura).** The first version used sector angles
 (α, π−α, α, π−α), which makes *both* crease pairs collinear: an "X" vertex,
@@ -484,6 +550,101 @@ for a 20° defect. Headless steps were wrong before the code was, too: an
 plane, and an out-and-back orbit returns the camera to its start, so the
 orbit has to be measured mid-drag.
 
+**One prescribed dihedral folds a sheet onto a mixed branch (v0.5).** The
+pre-fold of v0.3 generalised to a set of creases — every crease of a
+generated sheet — with one prescribed dihedral worked for a 2 × 2 Miura
+sheet and failed for a 3 × 3 sheet grounded in the middle: the damped
+Gauss–Newton step away from the singular flat state is the cheapest motion
+that changes the driven dihedral, which folds the driven vertex generically
+but takes the straight lines of creases through the other vertices as
+straight hinges, leaving their zigzag creases flat and some classes
+mirrored (8 of 24 creases flat). The plan's second stage — driving the first
+crease further with a secant warm start — changed nothing (still 8 flat
+creases), because the hinge and generic branches of a vertex meet only in
+the flat state, so moving along either branch can never carry the vertex
+onto the other. The remedy is staged: after the chosen loop, every other
+loop of the sheet is visited in adjacency order (loops sharing a crease
+next) and, when some of its creases are still flat, one of them
+(non-collinear first) is prescribed ±160° from the current pose, both signs
+tried, under the acceptance test over all loops folded so far; within that
+one solve the vertex passes back through its flat state and comes out on
+the generic branch that agrees with its neighbours. Finally the first crease
+is prescribed ±160° again, so the driven crease sits at the usual angle.
+Verified on 2 × 2, 3 × 3, 4 × 4, 1 × 3 and 3 × 1 sheets with the first and
+the middle panel as ground and every starting loop (at most three stages,
+six solves). It is a heuristic (§9): a sheet whose loops cannot be folded
+in any such order reports "no branch".
+
+**A single crease of a sheet cannot be folded alone (v0.5).** The Driver
+tool, *Drive this crease* and *Fold to target* on one crease of a generated
+sheet pre-folded that crease's vertex only, which left the other vertices
+on mixed branches with no flat loop left for the Fold button to repair.
+They now fold the whole sheet the crease belongs to, as Fold does. The set
+is the pattern's generated creases that close a loop: a generated crease
+that closes none (a square's diagonal, the hinge of a panel hanging off the
+sheet) is a free hinge with a degree of freedom of its own that no
+prescribed dihedral moves, and requiring it to fold refused valid patterns.
+A loop that mixes a hand-made crease with generated ones is folded on its
+own rather than refused as "nothing to fold", since a flat loop plainly
+exists.
+
+**Naming the crease that is wrong (v0.5).** When every folded pose
+contradicts some stored class the user needs to know which crease to
+change, not that "no branch was found". A pose counts as a conflict only
+when it converged, folded everything checked and lowered the DOF — so the
+DOF is computed before the class test — and the creases reported are the
+smallest mismatching set over such poses: a Miura unit with one crease
+flipped to 2 : 2 then names that one crease, not the three creases of the
+mirrored pose. Two refinements came from the tests: a class-only rejection
+stays local to its stage, so a later geometric failure (a rigid degree-3
+vertex somewhere in the sheet) still reads "no branch" instead of blaming
+honoured classes; and *Fold to target* keeps the smallest conflict set
+across its attempts, since the attempt that drives the changed crease to the
+requested side names that crease while the mirrored attempt names all the
+others. Explicit preferences on the bent pair that contradict each other,
+formerly "no branch", are now a conflict naming one of the two.
+
+**Holes and pinched faces (v0.5).** Half-edge tracing reports a square
+drawn inside a square as two bounded faces, and generation then covered the
+inner panel with the outer one — the overlap the Panel tool refuses. Since
+crossings are always split, components never cross, so one vertex of each
+closed component tested (even–odd) against the bounded faces of the other
+components decides whether that component is a hole; a face whose spur-free
+cycle repeats a vertex (an inner outline joined to the boundary by a single
+crease) is a ring pinched at that crease, not a simple polygon. Both are
+reported as a hole and generate no panel; a second connector makes two
+proper ring halves, which generate. The same scrutiny found that an interior
+crease of class Border generated a classless hinge without a word; it is
+now reported too.
+
+**Which side is the front of FRONT (v0.5).** Mountain / valley is judged
+from the normal of the plane a pattern is drawn on. FRONT's normal pointed
+along +Y, away from the camera of the Front view, so a valley drawn in the
+Front view folded away from the viewer. The builtin FRONT normal is now −Y,
+toward its view's camera, like TOP (+Z) and RIGHT (+X); files store their
+construction geometry, so earlier files keep the FRONT they were written
+with, and the example files were re-exported.
+
+**The polyline outlived its model (v0.5).** Undo, redo, New, Open and the
+examples install a fresh model object; a crease polyline kept drawing from
+its last vertex id — which the next vertex may reuse — and its Backspace
+snapshots brought undone geometry back. The polyline now remembers the
+model object it was drawn on (as the query cycle already did) and ends
+itself when that changes; undo and redo end it explicitly.
+
+**Small things the pattern workflow exposed (v0.5).** Preview on a model
+whose only joint is a generated hinge chose an angle driver whose tip was
+the other end of the hinged edge, a point on the axis that never moves, so
+the sweep had no range; the candidate angle driver now takes the link point
+farthest from the axis, and a driverless model with creases gets a fold
+driver on its first crease instead. The renderer's size unit came from the
+links alone, so a pattern-only model was drawn with hairline creases and no
+discs, and Zoom to fit ignored it; both include the visible patterns now.
+Backspace, which removes the last sketch vertex and otherwise deletes the
+selection, would have deleted the selected pattern right after Enter; under
+a drawing tool it now takes back polyline clicks only. A double-click as the
+first click left an isolated vertex, so it now leaves the polyline open.
+
 ## 9. Known limitations (prototype)
 
 - Patterning copies one link at a time; joints between copies are not
@@ -496,10 +657,16 @@ orbit has to be measured mid-drag.
 - Prism and cylinder internal geometry is treated as fixed during inverse
   design (only bars and polygons change shape); cylinders are rigid.
 - Branch handling in sweeps is heuristic (displacement guard).
-- The Fold command pre-folds one vertex (one crease loop) per press, and only
-  loops around a single vertex are detected; a vertex where more than one
-  cycle of panels meets is skipped, and the vertices of a multi-vertex sheet
-  are not folded consistently with each other.
+- The Fold command pre-folds one vertex (one crease loop) per press unless
+  that loop belongs to a generated sheet, which is folded as a whole; only
+  loops around a single vertex are detected, a vertex where more than one
+  cycle of panels meets is skipped, and the vertices of a hand-built
+  multi-vertex sheet are not folded consistently with each other.
+- The sheet-wide pre-fold is a staged heuristic (§8) verified on Miura
+  sheets up to 4 × 4 and single vertices: a pattern whose vertices need a
+  branch that no ±160° prescription in any loop order reaches reports "no
+  branch". It produces a pre-folded state, not a flat-folded one, and checks
+  the local conditions only — no layer ordering, no self-intersection.
 - "Fold to target" follows one continuation path; a crease whose other
   constraints admit several branches may be reported unreachable although a
   different path exists.
@@ -528,6 +695,18 @@ orbit has to be measured mid-drag.
 - "Place on sketch plane (2-D)" is one setting for every click-placed tool;
   there is no per-tool placement plane, and no tool places on the view plane
   except as the fallback.
+- A crease pattern lies on one construction plane and its creases are
+  straight segments between vertices (no curved creases); faces with holes
+  and pinched faces are reported and not generated; a pattern is one sheet
+  (two patterns, or a pattern and hand-built panels in one loop, are not
+  folded together beyond folding that loop alone).
+- Pattern vertices and creases cannot be moved; they are deleted and
+  redrawn. Vertices have no names and are identified by their plane
+  coordinates. The checks cover interior vertices (all creases interior)
+  only; a vertex with a border or dangling crease needs none.
+- The mountain / valley classes of a pattern are judged from its plane's
+  front side; a pattern drawn while looking at the back of its plane has the
+  opposite meaning. Only the Miura-ori tessellation has a builder.
 - No collision detection, no dynamics.
 
 ## References
@@ -559,6 +738,14 @@ orbit has to be measured mid-drag.
 - E. L. Allgower, K. Georg. *Numerical Continuation Methods: An
   Introduction.* Springer, 1990 (predictor steps, branch switching at
   bifurcations).
+- K. Miura. *Method of Packaging and Deployment of Large Membranes in
+  Space.* The Institute of Space and Astronautical Science, report 618,
+  1985 (the Miura-ori tessellation and its one-DOF rigid folding; the
+  pattern builder and the sheet example).
+- M. de Berg, O. Cheong, M. van Kreveld, M. Overmars. *Computational
+  Geometry: Algorithms and Applications*, 3rd ed. Springer, 2008 (the
+  doubly-connected edge list and face tracing of a planar subdivision; the
+  crease pattern's half-edge tracing follows ch. 2).
 - M. Bächer, S. Coros, B. Thomaszewski. *LinkEdit: Interactive Linkage
   Editing using Symbolic Kinematics.* ACM Trans. Graph. 34(4), SIGGRAPH 2015.
 - S. Coros, B. Thomaszewski, G. Noris, S. Sueda, M. Forberg, R. Sumner,

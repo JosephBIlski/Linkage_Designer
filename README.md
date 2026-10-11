@@ -18,17 +18,18 @@ reaches what you drew.
   0–1, robust joining and folding, are implemented in v0.3 and Phase 2, the
   construction workflow — right-click query pick, the Panel tool's sector
   feedback, 3-D placement on the sketch plane, the crease-pattern validator —
-  in v0.4; Phase 3, crease-pattern-first, is planned).
+  in v0.4, and Phase 3, crease-pattern-first — the Crease pattern tool,
+  panel generation and the sheet-wide pre-fold — in v0.5).
 
 ## Running
 
 ```bash
 npm install
 npm run dev        # http://localhost:5173
-npm test           # solver / kinematics / synthesis / joining / folding / picking / sketching / validator unit tests (vitest)
+npm test           # solver / kinematics / synthesis / joining / folding / picking / sketching / validator / crease-pattern unit tests (vitest)
 npm run build      # type-check + production build into dist/
 node scripts/smoke.mjs            # headless-browser smoke test of the built app (needs Playwright's Chromium)
-node scripts/smoke-features.mjs   # same for the Panel / Polygon / Edit / Pattern tools, the query cycle, 3-D placement, the model tree and the origami workflow
+node scripts/smoke-features.mjs   # same for the Panel / Polygon / Edit / Pattern / Crease pattern tools, the query cycle, 3-D placement, the model tree, the origami workflow and the Miura-ori sheet
 ```
 
 Node 22 is assumed (`.nvmrc`). The built app is static and can be served from
@@ -69,26 +70,44 @@ any path (GitHub Pages workflow included in `.github/workflows/ci.yml`).
    **Fold** in the Mechanism panel before simulating; it releases the panels
    from the plane and pre-folds every crease. A crease's Properties offer
    *Mountain / valley*, *Fold to target* and *Drive this crease*.
-3. Select a vertex and tick **Show output path & design space** in the
+3. **Crease patterns.** Instead of building a sheet panel by panel, draw its
+   crease pattern: pick *Crease pattern* (`C`), choose the class of the
+   creases you are about to draw (mountain, valley, border or unassigned)
+   and click polylines of creases on the sketch plane — clicks snap to
+   pattern vertices and onto creases, crossings are split, `Enter` ends a
+   polyline and `Backspace` takes back the last click. The pattern's
+   Properties (select it in the viewport or under *Crease patterns* in the
+   model tree) count its faces and list its **Checks** — Kawasaki and
+   Maekawa per interior vertex, dangling or unassigned creases, holes —
+   each line selecting the element concerned; a crease's Properties set its
+   class and target angle. **Generate panels** turns every face into a
+   panel and every interior crease into a hinge with its drawn class, flat
+   and exactly joined; **Fold** then folds the whole sheet as one on the
+   drawn mountain / valley branch (an inconsistent assignment is refused
+   with the creases named), and *Regenerate panels* rebuilds the flat sheet
+   from the drawing. *Examples → Miura-ori sheet (3×3 vertices)* is a 4 × 4
+   Miura-ori built this way, pattern included.
+4. Select a vertex and tick **Show output path & design space** in the
    Properties panel (the examples already do this).
-4. **Simulation mode.** The output path appears with green editing points and
+5. **Simulation mode.** The output path appears with green editing points and
    the magenta design space. Drag an editing point: it turns red, the mechanism
    adapts, and *Design DOF left* drops. Lock points or constrain them to a
    datum in Properties. Toggle *Soft assumptions* to hide the preview until the
    design is fully specified.
-5. **Preview mode.** Play the motion through the driver's range.
-6. *File → Save* writes a `.linkage.json` with the solidified design (a pose
+6. **Preview mode.** Play the motion through the driver's range.
+7. *File → Save* writes a `.linkage.json` with the solidified design (a pose
    that violates the constraints is saved as it is, and the status bar says
    so).
 
 Mouse: left-click picks, right-click (no drag) cycles through the features
 under the pointer, right-drag orbits, middle-drag pans, wheel zooms. Keys:
-`1` select, `2` link, `3` polygon, `4` prism, `5` cylinder, `S` panel, `E`
-edit, `J` joint, `G` ground, `D` driver, `M` mirror, `P` pattern, `F` zoom to
-fit, `Enter` closes a panel, `Backspace` removes its last vertex, `Esc` ends
-the query cycle or cancels the tool, `Del` deletes, `Ctrl+Z` / `Ctrl+Y` undo
-/ redo. See `docs/SPEC.md` §1 for the full list; `?` in the top bar shows
-quick help.
+`1` select, `2` link, `3` polygon, `4` prism, `5` cylinder, `S` panel, `C`
+crease pattern, `E` edit, `J` joint, `G` ground, `D` driver, `M` mirror, `P`
+pattern, `F` zoom to fit, `Enter` closes a panel or ends a crease polyline,
+`Backspace` removes the panel's last vertex or takes back the polyline's
+last click, `Esc` ends the query cycle, the polyline or the tool, `Del`
+deletes, `Ctrl+Z` / `Ctrl+Y` undo / redo. See `docs/SPEC.md` §1 for the full
+list; `?` in the top bar shows quick help.
 
 ## Project layout
 
@@ -106,12 +125,14 @@ src/core/        solver and mechanism model (no DOM / three.js)
   patterns.ts      copy / mirror / array patterning, extrusion
   jointMeasure.ts  fold (dihedral) and slide measurement of joints
   feasibility.ts   pre-flight solve, rollback and diagnoses for construction edits; consistency guard
-  fold.ts          creases, crease loops, mountain / valley, the Fold (pre-fold) command
+  fold.ts          creases, crease loops, mountain / valley, the Fold (pre-fold) command, the sheet-wide pre-fold of a generated pattern
   sector.ts        running sector-angle sums at shared vertices for the Panel tool (labels, overlap refusal)
   validate.ts      crease-pattern validator (developability, Kawasaki, Maekawa per interior vertex)
+  creasePattern.ts crease patterns: editing with merges and splits at crossings, half-edge face tracing, Kawasaki / Maekawa and structural checks, panel generation, the Miura-ori builder
 src/viewport/    three.js scene, renderer and interactive tools
   pickRank.ts      pick results and their ranking for the query cycle (DOM-free)
   pickCycle.ts     the right-click query cycle state machine (DOM-free)
+  patternPolyline.ts the Crease pattern tool's polyline state machine and pattern choice (DOM-free)
 src/ui/          strings (all UI text), settings + colour maths, panels, colour picker, icons, joint labels
 tests/           vitest unit tests
 examples/        example mechanism files

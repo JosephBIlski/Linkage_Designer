@@ -1,15 +1,15 @@
-# Mechanism construction workflow: diagnosis and plan (v0.3 – v0.4)
+# Mechanism construction workflow: diagnosis and plan (v0.3 – v0.5)
 
-Status: Phases 0 and 1 are implemented (v0.3) and Phase 2 is implemented
-(v0.4). Phase 3 remains planned.
+Status: Phases 0 and 1 are implemented (v0.3), Phase 2 is implemented
+(v0.4) and Phase 3 is implemented (v0.5).
 
 This document records why a user could not build a degree-4 origami vertex
 from four triangles with the Joint tool, what the evidence showed, which
 options were weighed, and the phased plan that was chosen. It is the
-specification for the v0.3 and v0.4 changes; `docs/SPEC.md` §17 (Phases
-0–1) and §18 (Phase 2) describe the behaviour of each feature as implemented,
-and `docs/DESIGN_DECISIONS.md` §6 and §8 keep the decisions and the lessons
-learned. The *Implemented* note under each phase in §5 records where the
+specification for the v0.3, v0.4 and v0.5 changes; `docs/SPEC.md` §17
+(Phases 0–1), §18 (Phase 2) and §19 (Phase 3) describe the behaviour of
+each feature as implemented, and `docs/DESIGN_DECISIONS.md` §6 and §8 keep
+the decisions and the lessons learned. The *Implemented* note under each phase in §5 records where the
 implementation differs from the plan; §2 (evidence) and §4 (options) are
 left as they were written.
 
@@ -502,7 +502,7 @@ vertices.
   (90°, 90°, 100°, 80°) (off by 20°). Tests: `tests/validate.test.ts`;
   smoke step 19. Specified in SPEC.md §18.4.
 
-### Phase 3: crease-pattern-first (large, in progress)
+### Phase 3: crease-pattern-first (large, implemented in v0.5)
 
 The user draws the crease pattern; the panels and creases are generated from
 it. A drawn pattern lies in one plane, so developability (sector angles sum
@@ -552,6 +552,27 @@ checks (dangling creases, unassigned interior creases).
   stale links or joints; the crease-pattern validator of Phase 2 reports the
   generated vertices as developable with Kawasaki 0.
 
+*Implemented with these differences.* `miuraPattern(rows, cols, …)` counts
+interior vertices (1 × 1 is the four-cell unit); its horizontal creases change
+class at every vertex (the odd crease of each vertex is the collinear one on
+the tilt side), so the whole sheet folds on one branch. Overlapping collinear
+creases are refused (`'overlap'`), not ignored. Two further validation kinds
+exist: `borderInside` (an interior crease of class Border, which generates a
+classless hinge and is counted as a warning, the vertex conditions treating
+it as unassigned) and `hole` (a closed outline inside a face without touching
+its boundary, or a face whose boundary passes through a vertex twice — an
+outline joined by a single crease; such a face is counted in the face count
+but generates no panel, since panels with holes are not supported and the
+outer panel would cover the inner ones, the overlap the Panel tool refuses).
+`addPattern` names patterns "Pattern n" with the smallest unused n
+(`nextPatternName`), and a construction plane that carries a pattern cannot
+be deleted (`removeConstruction` returns false, `planeCarriesPattern`), since
+the pattern's 2-D frame — and the side its classes are judged from — is the
+plane's. The builtin FRONT datum's normal is now −Y, so that every builtin
+plane faces the camera of its view (Top +Z, Front −Y, Right +X) and a valley
+drawn in the Front view folds toward the viewer; files written before keep
+the FRONT they store (+Y), and new joints made on FRONT get the −Y axis.
+
 **3b. Crease-pattern tool and presentation.**
 - Tool "Crease pattern" (shortcut C): clicks place pattern vertices on the
   active sketch plane (snapping to pattern vertices, datum points, the grid
@@ -577,6 +598,25 @@ checks (dangling creases, unassigned interior creases).
   the free panel; a pattern with an unassigned interior crease shows the
   warning and still generates.
 
+*Implemented with these differences.* Backspace restores the model as it was
+before the last click (a snapshot per click: the only exact inverse of a
+merge or a split), and only while a polyline is being drawn — right after
+Enter, or under the Panel tool, Backspace deletes nothing (Del deletes the
+selection); a double-click as the first click leaves the polyline open at
+that vertex instead of an isolated vertex. A polyline is bound to the model
+object it was drawn on: undo, redo, New, Open and the examples end it, so a
+stale anchor is never continued and a stale snapshot never restored. Hiding
+the pattern mid-polyline is undone by the next click, and "Generate panels"
+ends the polyline first. Pattern vertices and creases cannot be dragged
+(Select) or moved (Edit): both refuse with a message. Deleting a pattern,
+vertex or crease is reported in the status bar (a pattern with the counts of
+the panels and creases removed with it). The renderer's size unit and Zoom
+to fit include the visible patterns, so a pattern-only model is drawn at a
+sensible size. Preview on a driverless model with creases chooses a fold
+driver on the first crease (an angle driver's tip is now the link point
+farthest from the joint axis, never one on it), so Fold to target followed
+by Preview sweeps the free panel.
+
 **3c. Pattern-wide pre-fold and the Miura sheet example.**
 - `prefoldVertex` is generalised so that the acceptance test covers a
   chosen set of creases (all creases of a pattern): the driven crease is
@@ -592,6 +632,27 @@ checks (dangling creases, unassigned interior creases).
   menu; a test asserts DOF 1 after the pre-fold, all creases folded with
   the drawn classes, and a sweep that moves every panel.
 
+*Implemented with these differences.* `prefoldVertex` honours the stored
+class of every crease of the set by default (`honourAssigned`, which every
+UI command passes) and reports `mvConflict` naming the fewest creases whose
+class the closest pose could not honour; a class-only rejection of one stage
+is reported only when that stage fails (a later geometric failure, such as a
+rigid degree-3 vertex, stays `noBranch`). One prescribed dihedral lands all
+but the smallest sheets on a mixed branch, so a sheet (`creaseIds`) is folded
+in stages, loop after loop in adjacency order, and `prefoldPattern` requires
+only the generated creases that close a loop (a diagonal's free hinge is left
+alone). The Driver tool, "Drive this crease" and "Fold to target" on a crease
+of a generated sheet fold the whole sheet the same way (`patternLoopCreases`;
+the status names the sheet), since pre-folding one vertex of a sheet alone
+would leave it on a mixed branch with no flat loop left to repair; "Fold to
+target" keeps the smallest conflict set across its attempts, so a class
+changed on one crease is blamed on that crease. The Fold button
+(`prefoldFlat`) folds the sheet when every crease of the first flat loop was
+generated by one pattern and that loop alone otherwise (a loop mixing a
+hand-made crease with generated ones is folded, not refused as "nothing to
+fold"). The Miura-ori sheet example is grounded at the panel nearest its
+middle and ships as `examples/miuraSheet.linkage.json`.
+
 ## 6. Data-model changes
 
 | Change | Phase | Compatibility |
@@ -601,6 +662,9 @@ checks (dangling creases, unassigned interior creases).
 | Settings colours `mountain`, `valley` | 1b | Defaults applied when missing. |
 | `Joint.b` of an unequal-length hinge stored with its end points in the order matching `Joint.a` | 0a | Order only, no new field; existing files load unchanged. |
 | — | 2 | No model or file change: the validator's reports are transient (`SimState.vertexReports`), and `PickResult` gained viewport-only fields (`sub`, `exact`, `band`, `queried`). |
+| `Model.patterns?: Record<ID, CreasePattern>` | 3a | Optional; old files load unchanged. A pattern stores its plane id, vertices, creases (class, target) and, once generated, the ids of its links and joints with each link's face vertices; `joint.fold` carries the generated creases' class and target. |
+| Settings colours `patternBorder`, `patternUnassigned` | 3b | Defaults applied when missing. |
+| Builtin FRONT datum `dir` −Y | 3 (review) | New models only: `parseModel` keeps the construction a file stores. |
 
 No change to `Model.version` is needed: all additions are optional.
 
@@ -623,9 +687,19 @@ No change to `Model.version` is needed: all additions are optional.
   query cycle's life cycle, the Joint tool's front-band substitution, the
   Panel tool's refusal, 2-D placement from a camera on the sketch plane, the
   Polygon tool's tilted join), `tests/edit.test.ts` (2c: `placementOnPlane`;
-  the 2-D constraint on constant points), `tests/validate.test.ts` (2d).
-  243 tests in all.
-- Headless browser (`scripts/smoke-features.mjs`, steps 18–23): four regular
+  the 2-D constraint on constant points), `tests/validate.test.ts` (2d),
+  `tests/creasePattern.test.ts` (3a: the plane frame, editing with merges,
+  splits and crossings, face tracing, holes and pinched faces, validation
+  incl. `borderInside`, generation on every builtin plane, pattern names,
+  the plane-deletion refusal, files), `tests/patternTool.test.ts` (3b: the
+  polyline helpers and the ToolManager's crease-pattern flow — clicks,
+  snaps, Enter / Esc / double-click, Backspace, typed coordinates, undo and
+  replaced models, hiding, drag refusals, deletion messages),
+  `tests/pattern-fold.test.ts` (3c: `prefoldPattern` on the 2 × 2 and 3 × 3
+  sheets, conflicts, the rigid degree-3 vertex, `driveCrease` and
+  `foldCreaseToTarget` on every crease of a sheet, `prefoldFlat`, the
+  default driver, the Miura-ori sheet example). 312 tests in all.
+- Headless browser (`scripts/smoke-features.mjs`, steps 18–25): four regular
   triangles placed exactly and by mouse end with a refused fourth joint, the
   sector-angle message, an unchanged model and no undo entry; a refused
   Length edit leaves no stale widget; the Polygon tool joins typed triangles
@@ -637,7 +711,14 @@ No change to `Model.version` is needed: all additions are optional.
   stays silent under the idle pointer, and plain, top-view and out-and-back
   right-drags orbit without a cycle (20); 3-D placement lands on the sketch
   plane and the Front view's 2-D clicks on the view plane (21, 22); the
-  Polygon tool tilts to a snapped off-plane vertex (23).
+  Polygon tool tilts to a snapped off-plane vertex (23); the Crease pattern
+  tool draws a square and its diagonal, Backspace after Enter keeps the
+  pattern, the Checks list the unassigned crease and its Valley button
+  assigns it, Generate gives 2 panels and 1 valley crease, Fold to target
+  120° and Preview moves the free panel, a second pattern generates with its
+  warning counted (24); the Miura-ori sheet example loads pre-folded,
+  Regenerate flattens it and Fold folds the sheet as one on its drawn branch,
+  Preview moves every panel (25).
 - Regression: all existing tests, `npm run build`, both smoke scripts.
 
 ## 8. Decisions taken (formerly open)
@@ -659,6 +740,19 @@ No change to `Model.version` is needed: all additions are optional.
   and the validator use the 0.5° sector tolerance of the joint diagnoses
   (`SECTOR_SUM_TOLERANCE_DEG`); the validator's flat-foldability is the
   Kawasaki condition alone, developability a separate mark.
+- Phase 3 constants, none of them Settings: pattern positions coincide
+  within 1e-6 of the pattern's extent, never below 1e-6 units
+  (`PATTERN_TOLERANCE`, `patternTolerance` in `src/core/creasePattern.ts`);
+  the pattern's checks use the same 0.5° sector tolerance; every stage of a
+  sheet-wide pre-fold prescribes `DEFAULT_PREFOLD_DEG`; the second click of
+  a double-click is ignored within 12 px of the last vertex; pattern
+  vertices and creases rank between link vertices and joints in
+  `PICK_PRIORITY`. The pattern class colours (border `#3b3f44`, unassigned
+  `#e0a400`) are Settings; mountain / valley reuse the crease colours. The
+  default names "Pattern n" and "Panel n" come from the UI strings (the core
+  falls back to the same words), and a pattern is hidden after generation
+  rather than deleted. Patterns are drawn on construction planes, whose
+  builtin normals face their view cameras (FRONT −Y).
 
 ## 9. References
 

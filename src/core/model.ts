@@ -44,7 +44,12 @@ export function createModel(): Model {
   return m;
 }
 
-/** Creo-style default datum geometry: origin, X/Y/Z axes, TOP (XY), FRONT (XZ) and RIGHT (YZ) planes. */
+/**
+ * Creo-style default datum geometry: origin, X/Y/Z axes, TOP (XY), FRONT (XZ) and RIGHT (YZ) planes. Each plane's
+ * normal points toward the camera of the view that looks at it (scene.ts setView: Top from +Z, Front from −Y, Right
+ * from +X), so that what is drawn on a plane in its view — the winding of a panel, the mountain / valley class of a
+ * crease pattern (creasePattern.ts patternBasis, fold.ts creaseMV) — is judged from the side the user sees it from.
+ */
 export function addBuiltinDatums(m: Model): void {
   const put = (c: Construction) => (m.construction[c.id] = c);
   put({ id: 'point_origin', kind: 'point', name: 'ORIGIN', origin: [0, 0, 0], builtin: true });
@@ -52,7 +57,7 @@ export function addBuiltinDatums(m: Model): void {
   put({ id: 'axis_y', kind: 'axis', name: 'Y', origin: [0, 0, 0], dir: [0, 1, 0], size: 20, builtin: true });
   put({ id: 'axis_z', kind: 'axis', name: 'Z', origin: [0, 0, 0], dir: [0, 0, 1], size: 20, builtin: true });
   put({ id: 'plane_top', kind: 'plane', name: 'TOP', origin: [0, 0, 0], dir: [0, 0, 1], xDir: [1, 0, 0], size: 6, builtin: true });
-  put({ id: 'plane_front', kind: 'plane', name: 'FRONT', origin: [0, 0, 0], dir: [0, 1, 0], xDir: [1, 0, 0], size: 6, builtin: true });
+  put({ id: 'plane_front', kind: 'plane', name: 'FRONT', origin: [0, 0, 0], dir: [0, -1, 0], xDir: [1, 0, 0], size: 6, builtin: true });
   put({ id: 'plane_right', kind: 'plane', name: 'RIGHT', origin: [0, 0, 0], dir: [1, 0, 0], xDir: [0, 1, 0], size: 6, builtin: true });
 }
 
@@ -851,9 +856,20 @@ export function removeLink(m: Model, linkId: ID): void {
   delete m.links[linkId];
 }
 
+/** Does a crease pattern lie on construction plane `id`? Such a plane cannot be deleted (removeConstruction). */
+export function planeCarriesPattern(m: Model, id: ID): boolean {
+  return Object.values(m.patterns ?? {}).some((p) => p.planeId === id);
+}
+
+/**
+ * Remove a construction element with the joints and editing-point constraints that refer to it. Refused (false) for
+ * an unknown or builtin element and for a plane a crease pattern lies on: the pattern's 2-D frame, and with it the
+ * side its crease classes are judged from, is the plane's, so deleting the plane would silently re-base the pattern
+ * on world XY (or leave it without a frame); the pattern has to be deleted first.
+ */
 export function removeConstruction(m: Model, id: ID): boolean {
   const c = m.construction[id];
-  if (!c || c.builtin) return false;
+  if (!c || c.builtin || planeCarriesPattern(m, id)) return false;
   for (const j of Object.values(m.joints)) if (isConstructionRef(j.b) && j.b.constructionId === id) removeJoint(m, j.id);
   m.targets = m.targets.filter((t) => t.constructionId !== id);
   delete m.construction[id];
@@ -878,7 +894,12 @@ export function translateLink(m: Model, link: Link, delta: Vec3): void {
 // Drivers
 // ---------------------------------------------------------------------------
 
-/** Candidate angle drivers: bars / polygon edges with one end joined (directly) to the ground link or construction geometry. */
+/**
+ * Candidate angle drivers: bars / polygon edges with one end joined (directly) to the ground link or construction
+ * geometry. The tip is the point of the link farthest from the joint's axis line through the pivot (a point on that
+ * line, such as the other end of a hinged edge, would give an angle driver with no range, since rotating about the
+ * axis never moves it); a link with no point off the axis offers no candidate.
+ */
 export function candidateAngleDrivers(m: Model): { linkId: ID; pivotId: ID; tipId: ID; axis: Vec3 }[] {
   const out: { linkId: ID; pivotId: ID; tipId: ID; axis: Vec3 }[] = [];
   const ground = groundLink(m);
@@ -892,9 +913,11 @@ export function candidateAngleDrivers(m: Model): { linkId: ID; pivotId: ID; tipI
         if (!grounded) continue;
         if (j.type !== 'revolute' && j.type !== 'spherical' && j.type !== 'cylindrical') continue;
         const axis = j.axis ?? sketchNormal(m);
-        // tip: farthest other visible point of this link
+        // tip: the point of this link farthest from the axis line through the pivot (never one on that line)
+        const n = normalize(axis);
+        const perp = (q: ID): number => len(cross(sub(P(m, q), P(m, pid)), n));
         let tip: ID | null = null;
-        for (const q of link.pointIds) if (q !== pid && (!tip || dist(P(m, q), P(m, pid)) > dist(P(m, tip), P(m, pid)))) tip = q;
+        for (const q of link.pointIds) if (q !== pid && perp(q) > 1e-9 * Math.max(1, dist(P(m, q), P(m, pid))) && (!tip || perp(q) > perp(tip))) tip = q;
         if (tip) out.push({ linkId: link.id, pivotId: pid, tipId: tip, axis });
       }
     }

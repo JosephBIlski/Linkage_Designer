@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { addConstructionPlane, bodyPlaneJoint, cloneModel, createModel, groundLink, parseModel, serializeModel } from '../src/core/model';
+import { addConstructionPlane, addOffsetPlane, bodyPlaneJoint, cloneModel, createModel, groundLink, parseModel, planeCarriesPattern, removeConstruction, serializeModel } from '../src/core/model';
 import {
   addPattern,
   addPatternCrease,
@@ -9,6 +9,7 @@ import {
   findPatternVertex,
   generatePanels,
   miuraPattern,
+  nextPatternName,
   patternBasis,
   patternFaces,
   patternInteriorVertices,
@@ -96,12 +97,12 @@ describe('patternBasis', () => {
     expect(dist(cross(b.xDir, b.yDir), b.normal)).toBeLessThan(1e-12);
     expect(to2d(b, [3, -1, 7])).toEqual([3, -1]);
     expect(to3d(b, [3, -1])).toEqual([3, -1, 0]);
-    // FRONT (normal +Y, x = +X): y direction of the frame is normal × xDir = −Z
+    // FRONT (normal −Y, toward the Front view's camera; x = +X): y direction of the frame is normal × xDir = +Z, up on screen
     const f = fresh('plane_front');
     const bf = patternBasis(f.m, f.p);
-    expect(bf.normal).toEqual([0, 1, 0]);
+    expect(bf.normal).toEqual([0, -1, 0]);
     expect(bf.xDir).toEqual([1, 0, 0]);
-    expect(dist(bf.yDir, [0, 0, -1])).toBeLessThan(1e-12);
+    expect(dist(bf.yDir, [0, 0, 1])).toBeLessThan(1e-12);
     expect(dist(cross(bf.xDir, bf.yDir), bf.normal)).toBeLessThan(1e-12);
     // a tilted user plane with an offset origin
     const m2 = createModel();
@@ -121,8 +122,43 @@ describe('patternBasis', () => {
     const r = addPatternVertex(m, p, [1, 5, 2]);
     expect(r.existing).toBe(false);
     expect(r.vertex.pos).toEqual([1, 0, 2]);
-    expect(addPattern(m, 'plane_top').name).toBe('Pattern 2');
+    expect(addPattern(m, 'plane_top').name).toBe('Pattern 1'); // the smallest unused number ("Test pattern" does not count)
     expect(m.patterns && Object.keys(m.patterns).length).toBe(2);
+  });
+
+  it('addPattern names: the smallest unused number, so a deleted pattern\'s name is reused and never duplicated', () => {
+    const m = createModel();
+    const p1 = addPattern(m, 'plane_top');
+    const p2 = addPattern(m, 'plane_top');
+    expect([p1.name, p2.name]).toEqual(['Pattern 1', 'Pattern 2']);
+    expect(removePattern(m, p1.id)).toBe(true);
+    const p3 = addPattern(m, 'plane_top');
+    expect(p3.name).toBe('Pattern 1');
+    const names = Object.values(m.patterns!).map((p) => p.name);
+    expect(new Set(names).size).toBe(names.length);
+    expect(nextPatternName(m)).toBe('Pattern 3');
+    expect(nextPatternName(m, 'Sheet')).toBe('Sheet 1');
+  });
+
+  it('a construction plane that carries a pattern cannot be deleted (the pattern\'s frame is the plane\'s)', () => {
+    const m = createModel();
+    const plane = addConstructionPlane(m, [0, 0, 5], [0, 0, -1], 'Under', [1, 0, 0]);
+    const p = miuraPattern(m, plane.id, 1, 1, 60);
+    const before = serializeModel(m);
+    expect(planeCarriesPattern(m, plane.id)).toBe(true);
+    expect(removeConstruction(m, plane.id)).toBe(false);
+    expect(serializeModel(m)).toBe(before);
+    expect(patternBasis(m, p).normal).toEqual([0, 0, -1]);
+    expect(patternFaces(m, p).faces.length).toBe(4);
+    // the builtin planes stay refused for their own reason; a plane without a pattern goes
+    expect(removeConstruction(m, 'plane_top')).toBe(false);
+    const free = addOffsetPlane(m, 'plane_front', 1)!;
+    expect(planeCarriesPattern(m, free.id)).toBe(false);
+    expect(removeConstruction(m, free.id)).toBe(true);
+    // once the pattern is gone the plane can be deleted
+    expect(removePattern(m, p.id)).toBe(true);
+    expect(removeConstruction(m, plane.id)).toBe(true);
+    expect(m.construction[plane.id]).toBeUndefined();
   });
 });
 
@@ -397,8 +433,71 @@ describe('patternFaces', () => {
     expect(f.faces.length).toBe(2);
     for (const face of f.faces) {
       const n = normalize(newellNormal(face.map((id) => p.vertices[id].pos)));
-      expect(dist(n, [0, 1, 0])).toBeLessThan(1e-12);
+      expect(dist(n, [0, -1, 0])).toBeLessThan(1e-12);
     }
+  });
+
+  it('a closed outline inside a face (a hole) is reported with the enclosing face, which generates no panel', () => {
+    const { m, p } = fresh();
+    const outer = square(m, p, 6, [0, 0]);
+    const inner = square(m, p, 2, [2, 2]);
+    const f = patternFaces(m, p);
+    expect(f.faces.length).toBe(2);
+    expect(f.border.length).toBe(8);
+    expect(f.holes.length).toBe(1);
+    expect(f.faces[f.holes[0].face]).toEqual(expect.arrayContaining(outer));
+    expect(sorted(f.holes[0].creaseIds.map((id) => Number(id.split('_')[1])))).toEqual(sorted(Object.values(p.creases).filter((c) => inner.includes(c.a) && inner.includes(c.b)).map((c) => Number(c.id.split('_')[1]))));
+    const issues = validatePattern(m, p);
+    expect(issues.map((i) => i.kind)).toEqual(['hole']);
+    expect(issues[0].creaseIds).toEqual(f.holes[0].creaseIds);
+    const r = generatePanels(m, p);
+    expect(r.linkIds.length).toBe(1); // the inner panel only: the outer one would cover it
+    expect(r.jointIds.length).toBe(0);
+    expect(r.warnings.map((w) => w.kind)).toEqual(['hole']);
+    const pts = m.links[r.linkIds[0]].pointIds.map((id) => m.points[id].pos);
+    expect(pts.every((q) => q[0] >= 2 - 1e-9 && q[0] <= 4 + 1e-9 && q[1] >= 2 - 1e-9 && q[1] <= 4 + 1e-9)).toBe(true);
+    // a hinged pair inside the hole generates its crease; the outer face is still skipped
+    C(m, p, inner[0], inner[2], 'V');
+    const r2 = generatePanels(m, p);
+    expect(patternFaces(m, p).faces.length).toBe(3);
+    expect(r2.linkIds.length).toBe(2);
+    expect(r2.jointIds.length).toBe(1);
+    expect(r2.warnings.map((w) => w.kind)).toEqual(['hole']);
+    // two squares side by side (the existing case) and a square with a diagonal have no hole
+    const { m: m2, p: p2 } = fresh();
+    square(m2, p2, 2, [0, 0]);
+    square(m2, p2, 2, [5, 0]);
+    expect(patternFaces(m2, p2).holes).toEqual([]);
+    expect(validatePattern(m2, p2)).toEqual([]);
+    const { m: m3, p: p3 } = fresh();
+    const [a3, , c3] = square(m3, p3);
+    C(m3, p3, a3, c3, 'V');
+    expect(patternFaces(m3, p3).holes).toEqual([]);
+    // an outline joined to the boundary by a single crease pinches the ring face at that crease: reported, not generated
+    const { m: m4, p: p4 } = fresh();
+    const outer4 = square(m4, p4, 6, [0, 0]);
+    const inner4 = square(m4, p4, 2, [2, 2]);
+    const [link] = C(m4, p4, outer4[0], inner4[0], 'B');
+    const f4 = patternFaces(m4, p4);
+    expect(f4.faces.length).toBe(2);
+    expect(f4.holes.length).toBe(1);
+    expect(f4.holes[0].creaseIds).toEqual([link]);
+    expect(f4.dangling).toEqual([link]); // the pinch crease has the ring face on both sides: no hinge either way
+    expect(validatePattern(m4, p4).map((i) => i.kind)).toEqual(['dangling', 'hole']);
+    const r4 = generatePanels(m4, p4);
+    expect(r4.linkIds.length).toBe(1);
+    expect(r4.warnings.map((w) => w.kind)).toEqual(['dangling', 'hole']);
+    // a second connector makes two proper ring halves: no hole, three panels and the hinges between them (the inner
+    // sides and the connectors are now interior border creases, and the connector vertices have degree 3: reported)
+    C(m4, p4, outer4[2], inner4[2], 'B');
+    expect(patternFaces(m4, p4).holes).toEqual([]);
+    const kinds4 = validatePattern(m4, p4).map((i) => i.kind);
+    expect(kinds4).not.toContain('hole');
+    expect(kinds4).not.toContain('dangling');
+    expect(kinds4.filter((k) => k === 'borderInside').length).toBe(6);
+    const r5 = generatePanels(m4, p4);
+    expect(r5.linkIds.length).toBe(3);
+    expect(r5.jointIds.length).toBe(6);
   });
 });
 
@@ -676,11 +775,53 @@ describe('generatePanels', () => {
     for (const id of r.linkIds) {
       const pts = m.links[id].pointIds.map((pid) => m.points[pid].pos);
       expect(pts.every((pt) => Math.abs(pt[1]) < 1e-15)).toBe(true);
-      expect(dist(normalize(newellNormal(pts)), [0, 1, 0])).toBeLessThan(1e-12);
+      expect(dist(normalize(newellNormal(pts)), [0, -1, 0])).toBeLessThan(1e-12);
     }
     const reports = validateCreasePattern(m);
     expect(reports.length).toBe(1);
     expect(Math.abs(reports[0].kawasakiDeg)).toBeLessThan(1e-9);
+  });
+
+  it('on every builtin plane the generated panels face the camera of the plane\'s view (top +Z, front −Y, right +X)', () => {
+    // scene.ts setView places the camera along these directions, so the side the crease classes are judged from
+    // (the plane normal, the panels\' oriented normal) is the side the user draws the pattern from
+    const views: [string, Vec3][] = [['plane_top', [0, 0, 1]], ['plane_front', [0, -1, 0]], ['plane_right', [1, 0, 0]]];
+    for (const [planeId, toCamera] of views) {
+      const { m } = fresh();
+      expect(dist(normalize(m.construction[planeId].dir!), toCamera)).toBeLessThan(1e-12);
+      const p = miuraPattern(m, planeId, 1, 1, 60, 1.5, 1);
+      const r = generatePanels(m, p);
+      expect(r.linkIds.length).toBe(4);
+      for (const id of r.linkIds) {
+        const pts = m.links[id].pointIds.map((pid) => m.points[pid].pos);
+        expect(dist(normalize(newellNormal(pts)), toCamera)).toBeLessThan(1e-12);
+      }
+    }
+  });
+
+  it('an interior crease of class Border is reported (borderInside) and generates a hinge without a class, counted as a warning', () => {
+    const { m, p } = fresh();
+    const [a, , c] = square(m, p);
+    const [diag] = C(m, p, a, c, 'B');
+    const f = patternFaces(m, p);
+    expect(f.faces.length).toBe(2);
+    expect(f.interior).toEqual([diag]);
+    expect(f.border.length).toBe(4);
+    const issues = validatePattern(m, p);
+    expect(issues).toEqual([{ kind: 'borderInside', creaseIds: [diag] }]);
+    const r = generatePanels(m, p);
+    expect(r.linkIds.length).toBe(2);
+    expect(r.jointIds.length).toBe(1);
+    expect(m.joints[r.jointIds[0]].fold).toEqual({});
+    expect(r.warnings.length).toBe(1);
+    // the vertex conditions treat it as unassigned: Maekawa is skipped on the Miura unit with one border inside
+    const { m: m2 } = fresh();
+    const p2 = miuraPattern(m2, 'plane_top', 1, 1, 60, 2, 2);
+    const inner = patternFaces(m2, p2).interior[0];
+    setCreaseClass(m2, p2, inner, 'B');
+    expect(validatePattern(m2, p2)).toEqual([{ kind: 'borderInside', creaseIds: [inner] }]);
+    setCreaseClass(m2, p2, inner, 'U');
+    expect(validatePattern(m2, p2)).toEqual([{ kind: 'unassigned', creaseIds: [inner] }]);
   });
 
   it('removePattern removes the generated links and joints with the pattern', () => {

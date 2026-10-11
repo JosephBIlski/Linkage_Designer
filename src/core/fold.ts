@@ -21,7 +21,8 @@ import { jointDihedralDeg } from './jointMeasure';
 import { applyPositions, computeMobility, feasibilityTolerance, isAccepted, measureDriver, positionsFromModel, solveForward, syncDriverValues, type Positions } from './kinematics';
 import { addFoldDriver, bodyPlaneJoint, jointAxisPoints, linkFaces, offAxisPoint, removeJoint, serializeModel, sketchNormal } from './model';
 import { mergedPointGroups, restore } from './feasibility';
-import type { Driver, FeatureKind, ID, Joint, Model, Vec3 } from './types';
+import { patternOfJoint } from './creasePattern';
+import type { CreasePattern, Driver, FeatureKind, ID, Joint, Model, Vec3 } from './types';
 import { isConstructionRef } from './types';
 
 /** A crease counts as flat (unfolded) when its dihedral is within this many degrees of ±180°. */
@@ -534,11 +535,14 @@ export function prefoldVertex(m: Model, opts: PrefoldOptions = {}): FoldResult {
   };
   /**
    * Prescribe ±angle on the first candidate crease and sign that gives an acceptable pose: the solve converged, no
-   * crease of `check` is flat, the DOF is lower than before and no crease of `check` has the wrong class (a pose
-   * failing the class test alone is remembered for the conflict report). Returns the crease driven, or null with the
-   * pose unchanged.
+   * crease of `check` is flat, the DOF is lower than before and no crease of `check` has the wrong class. Returns the
+   * crease driven, or null with the pose unchanged. The class-only rejections stay local to the stage: only when the
+   * stage fails altogether is its closest pose (the fewest mismatched creases) recorded for the mvConflict report,
+   * so a rejected pose of a stage that then succeeded with the other sign (its classes honoured after all) never
+   * turns a later stage's geometric failure — a rigid vertex, say — into a conflict naming innocent creases.
    */
   const drive = (candidates: ID[], check: ID[], sign?: 1 | -1): ID | null => {
+    let closest: ID[] | null = null;
     for (const cid of candidates) {
       const pref = wanted(cid);
       const first = sign ?? (pref ? predictedSign(m, m.joints[cid], up, pref) : 1);
@@ -549,12 +553,13 @@ export function prefoldVertex(m: Model, opts: PrefoldOptions = {}): FoldResult {
         if (stillFlat(check).length === 0 && computeMobility(m).dof < dofBefore) {
           const bad = mismatched(check);
           if (bad.length === 0) return cid;
-          noteConflicts(bad);
+          if (!closest || bad.length < closest.length) closest = bad;
         }
         applyPositions(m, saved);
         syncDriverValues(m);
       }
     }
+    if (closest) noteConflicts(closest);
     return null;
   };
 
@@ -658,15 +663,67 @@ function predictedSign(m: Model, j: Joint, up: Vec3, pref: 'M' | 'V'): 1 | -1 {
  */
 export function prefoldPattern(m: Model, patternId: ID, opts: Omit<PrefoldOptions, 'loop' | 'creaseIds'> = {}): FoldResult {
   const p = m.patterns?.[patternId];
-  const generated = (p?.generated?.jointIds ?? []).filter((id) => m.joints[id] && isCrease(m, m.joints[id]));
-  if (generated.length === 0) return { ok: false, reason: 'noLoop' };
-  const loops = findCreaseLoops(m).filter((l) => l.creaseIds.every((id) => generated.includes(id)));
+  if (!p) return { ok: false, reason: 'noLoop' };
+  const { loops, creaseIds } = patternLoops(m, p);
   if (loops.length === 0) return { ok: false, reason: 'noLoop' };
   const flat = loops.filter((l) => l.flat);
   const loop = flat.find((l) => opts.preferCreaseId !== undefined && l.creaseIds.includes(opts.preferCreaseId)) ?? flat[0];
   if (!loop) return { ok: false, reason: 'notFlat' };
-  const creaseIds = generated.filter((id) => loops.some((l) => l.creaseIds.includes(id)));
   return prefoldVertex(m, { ...opts, loop, creaseIds });
+}
+
+/**
+ * The crease loops made entirely of a pattern's generated creases, and those
+ * creases: the set a sheet-wide pre-fold must fold (prefoldPattern), which the
+ * single-crease commands (driveCrease, foldCreaseToTarget) fold as well when
+ * the picked crease belongs to it, since pre-folding one vertex of a generated
+ * sheet alone leaves the sheet on a mixed branch (see prefoldVertex) with no
+ * flat loop left for the Fold command to repair. A generated crease that
+ * closes no loop is a free hinge and is left out.
+ */
+function patternLoops(m: Model, p: CreasePattern): { loops: CreaseLoop[]; creaseIds: ID[] } {
+  const generated = (p.generated?.jointIds ?? []).filter((id) => m.joints[id] && isCrease(m, m.joints[id]));
+  const loops = generated.length ? findCreaseLoops(m).filter((l) => l.creaseIds.every((id) => generated.includes(id))) : [];
+  return { loops, creaseIds: generated.filter((id) => loops.some((l) => l.creaseIds.includes(id))) };
+}
+
+/** The generated creases of a pattern that close a crease loop (see patternLoops); empty for an ungenerated pattern. */
+export function patternLoopCreases(m: Model, p: CreasePattern): ID[] {
+  return patternLoops(m, p).creaseIds;
+}
+
+/**
+ * The creases a single-crease command must fold together with crease
+ * `jointId`: the loop-closing creases of the generated sheet it belongs to
+ * (patternLoopCreases), or null when the crease was not generated or closes
+ * no loop of its pattern.
+ */
+function sheetOfCrease(m: Model, jointId: ID): { pattern: CreasePattern; creaseIds: ID[] } | null {
+  const pattern = patternOfJoint(m, jointId);
+  if (!pattern) return null;
+  const creaseIds = patternLoopCreases(m, pattern);
+  return creaseIds.includes(jointId) ? { pattern, creaseIds } : null;
+}
+
+/**
+ * The Fold button: pre-fold the first flat crease loop of the model. When
+ * every crease of that loop was generated by a crease pattern the whole sheet
+ * is folded (prefoldPattern, starting from that loop); a loop that mixes
+ * generated and hand-made creases, or has none generated, is folded on its own
+ * (prefoldVertex), since prefoldPattern would not count it among the pattern's
+ * loops and report noLoop although a flat loop exists. `patternId` names the
+ * sheet when one was folded. noLoop when the model has no crease loop, notFlat
+ * when none is flat.
+ */
+export function prefoldFlat(m: Model, opts: Omit<PrefoldOptions, 'loop' | 'creaseIds' | 'preferCreaseId'> = {}): FoldResult & { patternId?: ID } {
+  const loops = findCreaseLoops(m);
+  if (loops.length === 0) return { ok: false, reason: 'noLoop' };
+  const flat = loops.find((l) => l.flat);
+  if (!flat) return { ok: false, reason: 'notFlat' };
+  const pattern = patternOfJoint(m, flat.creaseIds[0]);
+  const whole = !!pattern && flat.creaseIds.every((id) => pattern.generated?.jointIds.includes(id));
+  if (whole) return { ...prefoldPattern(m, pattern.id, { ...opts, preferCreaseId: flat.creaseIds[0] }), patternId: pattern.id };
+  return prefoldVertex(m, { ...opts, loop: flat });
 }
 
 // ---------------------------------------------------------------------------
@@ -720,7 +777,9 @@ function lockedPanels(m: Model, j: Joint, loop: CreaseLoop | null): ID[] {
  * 180° flat, 0° closed) with the class `mv` (creaseMV convention; default: the
  * crease's current class, valley when flat), the "Fold to target" action of a
  * crease's Properties. A crease of a flat loop is pre-folded first
- * (prefoldVertex, preferring this crease and the side `mv` asks for), which
+ * (prefoldVertex, preferring this crease and the side `mv` asks for; a crease
+ * of a generated sheet takes the whole sheet with it, see sheetOfCrease, and
+ * no crease of the sheet may be left flat by the target), which
  * selects the generic branch and removes the sketch-plane constraints of the
  * loop's panels; then foldCreaseTo prescribes the signed target
  * (creaseTargetDihedral) by continuation, in steps of at most
@@ -749,6 +808,10 @@ export function foldCreaseToTarget(m: Model, jointId: ID, targetDeg: number, mv?
   if (!j || !isCrease(m, j)) return { ok: false, reason: 'unreachable' };
   const loop = findCreaseLoops(m).find((l) => l.creaseIds.includes(jointId)) ?? null;
   if (lockedPanels(m, j, loop).length > 0) return { ok: false, reason: 'locked' };
+  // a crease of a generated sheet: the whole sheet must leave the flat state with it (sheetOfCrease), and none of its
+  // creases may be left flat by the target
+  const sheet = loop ? sheetOfCrease(m, jointId) : null;
+  const set: ID[] = sheet ? sheet.creaseIds : (loop?.creaseIds ?? []);
   const snapshot = serializeModel(m);
   const magnitude = Math.min(180, Math.abs(targetDeg));
   const flatTarget = isFlatDihedral(magnitude);
@@ -805,8 +868,8 @@ export function foldCreaseToTarget(m: Model, jointId: ID, targetDeg: number, mv?
     const target = creaseTargetDihedral(m, j, targetDeg, mv);
     if (target === null || !prescribe(target)) return false;
     if (mv && !flatTarget && !closedTarget && creaseMV(m, j) !== mv) return false;
-    if (loop && !flatTarget) {
-      for (const id of loop.creaseIds) {
+    if (!flatTarget) {
+      for (const id of set) {
         const d = creaseDihedralDeg(m, m.joints[id]);
         if (d === null || isFlatDihedral(d)) return false;
       }
@@ -816,7 +879,7 @@ export function foldCreaseToTarget(m: Model, jointId: ID, targetDeg: number, mv?
 
   const done = (removedPlanes: ID[]): FoldResult => {
     const dihedrals: Record<ID, number> = {};
-    for (const id of loop?.creaseIds ?? [jointId]) {
+    for (const id of set.length ? set : [jointId]) {
       const d = creaseDihedralDeg(m, m.joints[id]);
       if (d !== null) dihedrals[id] = d;
     }
@@ -838,23 +901,25 @@ export function foldCreaseToTarget(m: Model, jointId: ID, targetDeg: number, mv?
     const flatSnapshot = serializeModel(m); // every attempt starts from the flat state
     const pref = mv ? mvSeenFrom(m, j, mv, loopNormal(m, start)) : undefined;
     let reason: FoldReason = 'unreachable';
+    // the smallest conflict set any attempt reports is kept (an attempt that drives this crease to the requested
+    // side names the one crease whose class is at odds with the others; the mirrored attempt names all the others),
+    // and never discarded by a later attempt, so the message names the crease the user changed
     let conflicts: ID[] | undefined;
     // the preferred sign of the pre-fold first (prefoldVertex verifies the class when it drives this crease)
     const attempts: (PrefoldOptions['sign'] | undefined)[] = [undefined, 1, -1];
     for (const sign of attempts) {
-      const r = prefoldVertex(m, { loop: start, preferCreaseId: jointId, angleDeg: targetDeg, sign, mountainValley: pref && sign === undefined ? { [jointId]: pref } : undefined });
+      const r = prefoldVertex(m, { loop: start, preferCreaseId: jointId, angleDeg: targetDeg, sign, mountainValley: pref && sign === undefined ? { [jointId]: pref } : undefined, creaseIds: sheet?.creaseIds });
       if (!r.ok) {
         reason = r.reason ?? 'noBranch'; // prefoldVertex restored the flat state itself
-        conflicts = r.conflicts;
+        if (r.conflicts && (!conflicts || r.conflicts.length < conflicts.length)) conflicts = r.conflicts;
         continue;
       }
       if (settle()) return done(r.removedPlanes ?? []);
       restore(m, flatSnapshot);
       reason = 'unreachable';
-      conflicts = undefined;
     }
     restore(m, snapshot);
-    return conflicts ? { ok: false, reason, conflicts } : { ok: false, reason };
+    return conflicts ? { ok: false, reason: 'mvConflict', conflicts } : { ok: false, reason };
   }
   if (settle()) return done([]);
   restore(m, snapshot);
@@ -868,6 +933,8 @@ export interface DriveCreaseResult {
   prefold: FoldResult | null;
   /** The crease already had a fold driver, which is returned instead of a second one. */
   reused: boolean;
+  /** The pattern whose generated sheet the pre-fold folded as a whole (prefold only). */
+  patternId?: ID;
 }
 
 /**
@@ -875,7 +942,10 @@ export interface DriveCreaseResult {
  * "Drive this crease" action). When the joint is a crease of a flat loop the
  * vertex is pre-folded first (prefoldVertex, preferring this crease and the
  * side its stored fold.mv asks for), because a sweep started in the flat state
- * follows the degenerate straight-hinge branch; the driver the pre-fold keeps
+ * follows the degenerate straight-hinge branch; a crease of a generated sheet
+ * takes the whole sheet with it (sheetOfCrease, `patternId` in the result), as
+ * prefoldPattern does, so that no crease of the sheet is left flat or off its
+ * drawn class; the driver the pre-fold keeps
  * for a driverless model is replaced by the one on the picked crease. A crease
  * never carries two fold drivers: an existing fold driver on this crease is
  * returned as is (`reused`), and when the model's only driver is the fold
@@ -889,11 +959,14 @@ export function driveCrease(m: Model, jointId: ID): DriveCreaseResult {
   const j = m.joints[jointId];
   if (!j || j.type !== 'revolute') return { driver: null, prefold: null, reused: false };
   let prefold: FoldResult | null = null;
+  let patternId: ID | undefined;
   const loop = isCrease(m, j) ? findCreaseLoops(m).find((l) => l.creaseIds.includes(jointId)) : undefined;
   if (loop?.flat) {
     const hadDrivers = m.drivers.length > 0;
     const mv = j.fold?.mv;
-    prefold = prefoldVertex(m, { loop, preferCreaseId: jointId, mountainValley: mv ? { [jointId]: mvSeenFrom(m, j, mv, loopNormal(m, loop)) } : undefined });
+    const sheet = sheetOfCrease(m, jointId);
+    prefold = prefoldVertex(m, { loop, preferCreaseId: jointId, mountainValley: mv ? { [jointId]: mvSeenFrom(m, j, mv, loopNormal(m, loop)) } : undefined, creaseIds: sheet?.creaseIds });
+    if (prefold.ok && sheet) patternId = sheet.pattern.id;
     if (prefold.ok && !hadDrivers) m.drivers = [];
   }
   const existing = m.drivers.find((d) => d.kind === 'fold' && d.jointId === jointId);
@@ -902,5 +975,5 @@ export function driveCrease(m: Model, jointId: ID): DriveCreaseResult {
   }
   const driver = existing ?? addFoldDriver(m, jointId);
   syncDriverValues(m);
-  return { driver, prefold, reused: !!existing };
+  return { driver, prefold, reused: !!existing, patternId };
 }

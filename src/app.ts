@@ -22,9 +22,9 @@ import {
   type SweepResult,
 } from './core/kinematics';
 import { EXAMPLE_BUILDERS } from './core/examples';
-import { addAngleDriver, candidateAngleDrivers, cloneModel, createModel, creasesLockedByPlane, parseModel, serializeModel, groundLink } from './core/model';
+import { addAngleDriver, addFoldDriver, candidateAngleDrivers, cloneModel, createModel, creasesLockedByPlane, parseModel, serializeModel, groundLink } from './core/model';
 import { solidifyRestGeometry } from './core/feasibility';
-import { findCreaseLoops, type CreaseLoop } from './core/fold';
+import { findCreaseLoops, isCrease, type CreaseLoop } from './core/fold';
 import { validateCreasePattern, type VertexReport } from './core/validate';
 import { analyseDesign, applyDesign, solveDesign, symmetricEigen3, type DesignAnalysis, type DesignResult, type PointDesignSpace } from './core/synthesis';
 import { normalize, sub } from './core/geometry';
@@ -359,6 +359,8 @@ export class App {
       .filter((p) => p.role !== 'helper')
       .map((p) => p.pos);
     for (const path of this.currentPaths()) pts.push(...path.points);
+    // the visible crease patterns are framed too, so a pattern-only model fits as well
+    for (const p of Object.values(this.model.patterns ?? {})) if (!p.hidden) for (const v of Object.values(p.vertices)) pts.push(v.pos);
     this.viewport.fit(pts);
   }
 
@@ -373,12 +375,23 @@ export class App {
   // Kinematics refresh
   // ---------------------------------------------------------------------------
 
+  /**
+   * A model without a driver gets a default one when a motion is needed: a fold driver on its first crease when it has
+   * creases (a folded pattern then previews as a fold, the input being the crease's dihedral, as the Fold command's
+   * kept driver does), else the first candidate angle driver.
+   */
   private ensureDriver(): void {
-    if (this.model.drivers.length > 0) return;
-    const cands = candidateAngleDrivers(this.model);
+    const m = this.model;
+    if (m.drivers.length > 0) return;
+    const crease = Object.values(m.joints).find((j) => isCrease(m, j));
+    if (crease && addFoldDriver(m, crease.id)) {
+      syncDriverValues(m);
+      return;
+    }
+    const cands = candidateAngleDrivers(m);
     if (cands.length === 0) return;
     const c = cands[0];
-    addAngleDriver(this.model, c.linkId, c.pivotId, c.tipId, c.axis);
+    addAngleDriver(m, c.linkId, c.pivotId, c.tipId, c.axis);
   }
 
   private recomputeKinematics(): void {
