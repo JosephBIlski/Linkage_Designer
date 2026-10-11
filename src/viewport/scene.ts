@@ -15,9 +15,10 @@ export type { PickResult, PickType } from './pickRank';
 
 export interface ViewportPointerEvent {
   /**
-   * 'query' is a right-button click that was not an orbit drag (press and
-   * release within QUERY_CLICK_PX): it steps the query cycle through
-   * everything under the pointer. It is sent before the matching 'up'.
+   * 'query' is a right-button click that was not an orbit drag (the pointer
+   * never strayed more than QUERY_CLICK_PX from the press while the button was
+   * down): it steps the query cycle through everything under the pointer. It
+   * is sent before the matching 'up'.
    */
   kind: 'down' | 'move' | 'up' | 'dblclick' | 'leave' | 'query';
   button: number;
@@ -58,8 +59,12 @@ export class Viewport {
   onPointer: ((ev: ViewportPointerEvent) => void) | null = null;
   onBeforeRender: (() => void) | null = null;
   private pickRadiusPx = 10;
-  /** Where the right button went down: a release within QUERY_CLICK_PX of it is a query click, anything further an orbit drag. */
-  private rightDown: { x: number; y: number } | null = null;
+  /**
+   * Where the right button went down and whether the pointer has since strayed more than QUERY_CLICK_PX from it: a
+   * release that never did is a query click; one that did (even after returning to the press position) was an orbit
+   * drag, which OrbitControls followed all along.
+   */
+  private rightDown: { x: number; y: number; dragged: boolean } | null = null;
   private disposed = false;
 
   constructor(container: HTMLElement, settings: AppSettings) {
@@ -93,15 +98,20 @@ export class Viewport {
       this.onPointer({ kind, button: (e as PointerEvent).button ?? 0, clientX: e.clientX, clientY: e.clientY, shiftKey: e.shiftKey, ctrlKey: e.ctrlKey || e.metaKey, altKey: e.altKey, pick, original: e });
     };
     dom.addEventListener('pointerdown', (e) => {
-      if (e.button === 2) this.rightDown = { x: e.clientX, y: e.clientY };
+      if (e.button === 2) this.rightDown = { x: e.clientX, y: e.clientY, dragged: false };
       forward('down')(e);
     });
-    dom.addEventListener('pointermove', forward('move'));
+    dom.addEventListener('pointermove', (e) => {
+      // OrbitControls captures the pointer on this same element, so the moves of a right-drag still arrive here
+      const d = this.rightDown;
+      if (d && !d.dragged && Math.hypot(e.clientX - d.x, e.clientY - d.y) > QUERY_CLICK_PX) d.dragged = true;
+      forward('move')(e);
+    });
     dom.addEventListener('pointerup', (e) => {
-      // OrbitControls (same element, pointer capture) orbits on right-drag; only a right click that stayed put is a query
+      // OrbitControls orbits on right-drag; only a right click whose pointer never left the press position is a query
       const down = this.rightDown;
       this.rightDown = null;
-      if (e.button === 2 && down && Math.hypot(e.clientX - down.x, e.clientY - down.y) <= QUERY_CLICK_PX) forward('query')(e);
+      if (e.button === 2 && down && !down.dragged && Math.hypot(e.clientX - down.x, e.clientY - down.y) <= QUERY_CLICK_PX) forward('query')(e);
       forward('up')(e);
     });
     dom.addEventListener('pointerleave', forward('leave'));
@@ -228,10 +238,19 @@ export class Viewport {
     };
     const dir = dirs[view];
     this.camera.position.copy(target.clone().add(dir.multiplyScalar(d)));
-    // keep Z up except for the top view where Y is "up" on screen
-    this.camera.up.set(0, 0, 1);
-    if (view === 'top') this.camera.up.set(0, 1, 0);
+    // keep Z up except for the top view where Y is "up" on screen. OrbitControls fixes its orbit axis to the camera's
+    // up vector when it is created, so the controls are rebuilt whenever that vector changes (as setOrthographic
+    // does); otherwise the top view sits at the pole of a Z-up frame, where a sideways right-drag cannot orbit.
+    // Orbiting out of the top view then keeps Y as screen-up until another view is chosen.
+    const up = view === 'top' ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, 0, 1);
+    const upChanged = !this.camera.up.equals(up);
+    this.camera.up.copy(up);
     this.camera.lookAt(target);
+    if (upChanged) {
+      this.controls.dispose();
+      this.controls = this.makeControls(this.camera);
+      this.controls.target.copy(target);
+    }
     this.controls.update();
   }
 

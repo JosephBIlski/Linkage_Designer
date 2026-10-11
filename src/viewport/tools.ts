@@ -4,7 +4,7 @@
  * editing-point dragging for inverse design.
  */
 import type { App, ToolName } from '../app';
-import { add, dist, dot, len, normalize, scale, sub, cross } from '../core/geometry';
+import { add, dist, dot, len, normalize, perpendicular, scale, sub, cross } from '../core/geometry';
 import { solveSketch, syncDriverValues } from '../core/kinematics';
 import { tryAddJoint, trySolveCommit } from '../core/feasibility';
 import { driveCrease, findCreaseLoops, isCrease } from '../core/fold';
@@ -30,13 +30,14 @@ import {
   setGround,
   sketchNormal,
 } from '../core/model';
-import type { ConstructionRef, Feature, ID, JointType, Target, Vec3 } from '../core/types';
-import { autoJoinCoincident, coincidentVertex, fitSketchPlane, moveVertex, placeOnFittedPlane, placementOnPlane, projectToPlane } from '../core/edit';
-import { sectorPreview, sectorStatus, type SectorStatus } from '../core/sector';
+import type { ConstructionRef, Feature, ID, JointType, Model, Target, Vec3 } from '../core/types';
+import { PLACEMENT_MIN_COS, autoJoinCoincident, coincidenceTolerance, coincidentVertex, fitSketchPlane, moveVertex, placeOnFittedPlane, placementOnPlane, projectToPlane } from '../core/edit';
+import { sketchSectors, type SectorStatus } from '../core/sector';
 import { duplicateLink, hasCollinearTriple, linearArray, mirrorAcrossPlane, polarArray } from '../core/patterns';
 import { addPolygonFromPoints } from '../core/model';
 import { isConstructionRef } from '../core/types';
 import { FEATURES, OVERLAY, STATUS, TOOLS, CONSTRUCTION_NAMES, jointRefusedMessage } from '../ui/strings';
+import { jointDescription } from '../ui/labels';
 import type { OverlayLabel, OverlayView } from './render';
 import type { PickResult, ViewportPointerEvent } from './scene';
 import { PickCycle } from './pickCycle';
@@ -96,6 +97,8 @@ export class ToolManager {
   private lastPointer: { x: number; y: number } | null = null;
   /** Query cycle: a right-click steps through everything under the pointer; the current candidate is shown as the hover. */
   private cycle = new PickCycle();
+  /** The model object the cycle was started on: undo, redo and a file load install a new one, which makes the cycle's candidates stale (cycleAlive). */
+  private cycleModel: Model | null = null;
   /** True while the pick being dispatched was named through the query cycle (the user chose it explicitly). */
   private pickFromCycle = false;
   onPopup: ((pointId: ID | null) => void) | null = null;
@@ -105,19 +108,37 @@ export class ToolManager {
   }
 
   reset(): void {
+    const wasCycling = this.cycleAlive();
     this.points = [];
     this.featureA = null;
     this.editSource = null;
     this.patternLinkId = null;
     this.pendingLength = null;
     this.drag = { kind: 'none' };
-    this.cycle.cancel();
     this.app.setOverlay({});
     this.app.setHint(toolHint(this.app.tool));
+    // a tool switch during a query cycle: the normal hover, status and the new tool's preview replace the candidate
+    // and its "left-click: use it" instructions
+    if (wasCycling) this.endCycle();
+    else this.cycle.cancel();
   }
 
   /** True while a query cycle (right-click) is stepping through the features under the pointer. */
   get queryActive(): boolean {
+    return this.cycleAlive();
+  }
+
+  /** End a running query cycle (normal hover resumes); callers do this before undo, redo or a load replaces the model. */
+  endQuery(): void {
+    if (this.cycleAlive()) this.endCycle();
+  }
+
+  /**
+   * Is the query cycle running on the current model? A cycle started on a model object that has since been replaced
+   * (undo, redo, New, Open: App installs a fresh object) is cancelled on the spot, so its candidates are never used.
+   */
+  private cycleAlive(): boolean {
+    if (this.cycle.active && this.cycleModel !== this.app.model) this.cycle.cancel();
     return this.cycle.active;
   }
 
@@ -136,7 +157,7 @@ export class ToolManager {
   }
 
   cancel(): void {
-    if (this.cycle.active) {
+    if (this.cycleAlive()) {
       // Esc first leaves the query cycle (normal hover resumes); a second Esc cancels the tool as before
       this.endCycle();
       return;
@@ -169,6 +190,9 @@ export class ToolManager {
    * Where would a click at this pointer position place a point? A hovered vertex or datum point snaps; otherwise the
    * pointer ray is cast onto the active sketch plane (always for the datum and Panel tools and in 2-D mode; in 3-D mode
    * unless the ray grazes or misses the plane, plan 2c) and the view plane through the previous point is the fallback.
+   * In 2-D mode a grazing ray still lands on the sketch plane, but a ray that misses it, or meets it at the camera
+   * (the Front and Right views look along the TOP plane, so every off-centre ray hits it at depth 0), falls back to
+   * the view plane too, instead of placing the point at the camera.
    */
   private place(ev: { clientX: number; clientY: number; pick: PickResult | null }, allowSnap = true): PlacedPoint | null {
     const m = this.app.model;
@@ -185,14 +209,13 @@ export class ToolManager {
     const pl = this.sketchPlane();
     const ray = vp.pointerRay(ev.clientX, ev.clientY);
     const onSketchPlane = this.app.toolOptions.mode2d || this.app.tool === 'cpoint' || this.app.tool === 'caxis' || this.app.tool === 'cplane' || this.app.tool === 'sketch';
-    if (onSketchPlane) pos = vp.projectToPlane(ev.clientX, ev.clientY, pl.o, pl.n);
-    if (!pos) {
-      const view = vp.projectToViewPlane(ev.clientX, ev.clientY, last ?? [0, 0, 0]);
-      // 3-D mode (plan 2c): a free click still lands where the pointer ray meets the sketch plane, so geometry is built
-      // on a predictable plane; the view plane through the previous point serves only when the ray grazes or misses it
-      pos = onSketchPlane || !view ? view : placementOnPlane(ray, pl.o, pl.n, view);
-    }
-    if (!pos) return null;
+    const view = vp.projectToViewPlane(ev.clientX, ev.clientY, last ?? [0, 0, 0]);
+    if (!view) return null;
+    // 3-D mode (plan 2c): a free click still lands where the pointer ray meets the sketch plane, so geometry is built
+    // on a predictable plane; the view plane through the previous point serves only when the ray grazes or misses it.
+    // 2-D mode and the sketch-plane tools: grazing rays are placed on the plane as well (minCos 0); only a miss or a
+    // hit at the camera falls back
+    pos = placementOnPlane(ray, pl.o, pl.n, view, onSketchPlane ? 0 : PLACEMENT_MIN_COS);
     pos = this.gridSnap(pos);
     if (this.pendingLength !== null && last) {
       const d = sub(pos, last);
@@ -253,14 +276,18 @@ export class ToolManager {
     const app = this.app;
     this.lastPointer = { x: ev.clientX, y: ev.clientY };
     if (ev.kind === 'leave') {
-      this.cycle.cancel();
+      // the pointer left the canvas: a cycle ends with its instructions, as nothing is under the pointer any more
+      if (this.cycleAlive()) {
+        this.cycle.cancel();
+        app.setStatus('');
+      }
       app.setHover(null);
       return;
     }
     if (ev.kind === 'query') return this.queryClick(ev);
     if (ev.kind === 'move') {
       if (this.drag.kind !== 'none') return this.dragMove(ev);
-      if (this.cycle.active) {
+      if (this.cycleAlive()) {
         // within a few pixels of the query position the highlighted candidate stays (normal hover would replace it);
         // farther away the cycle ends and normal hover resumes
         if (this.cycle.isSamePlace(ev.clientX, ev.clientY)) {
@@ -287,8 +314,12 @@ export class ToolManager {
     this.onPopup?.(null);
     // a left-click while a query cycle is active uses the highlighted candidate as the pick of the active tool (every
     // tool, and the snap of place(), reads ev.pick); the candidate may be stale when the model changed meanwhile
-    const chosen = this.cycle.active && this.cycle.isSamePlace(ev.clientX, ev.clientY) ? this.cycle.current : null;
+    const wasCycling = this.cycleAlive();
+    const chosen = wasCycling && this.cycle.isSamePlace(ev.clientX, ev.clientY) ? this.cycle.current : null;
     this.cycle.cancel();
+    // the cycle's instructions leave the status bar with the click: the plain description of the feature used, as a
+    // normal hover shows it (a tool that writes its own status replaces it)
+    if (wasCycling) app.setStatus(chosen ? this.describePick(chosen) : ev.pick ? this.describePick(ev.pick) : '');
     const queried = chosen !== null && this.pickExists(chosen);
     this.pickFromCycle = queried;
     try {
@@ -309,22 +340,31 @@ export class ToolManager {
     const app = this.app;
     if (this.drag.kind !== 'none') return;
     const here = { x: ev.clientX, y: ev.clientY };
-    const cand = this.cycle.active && this.cycle.isSamePlace(here.x, here.y) ? this.cycle.next() : this.cycle.start(app.viewport.pickCandidates(here.x, here.y), here, app.hover);
+    const cand = this.cycleAlive() && this.cycle.isSamePlace(here.x, here.y) ? this.cycle.next() : this.cycle.start(app.viewport.pickCandidates(here.x, here.y), here, app.hover);
+    this.cycleModel = app.model;
     if (!cand) {
       app.setStatus(STATUS.queryNothing);
       return;
     }
-    app.setHover(cand);
+    // the candidate was named explicitly: datum planes and axes light up for such a hover only (render.ts)
+    app.setHover({ ...cand, queried: true });
     this.updatePreview({ ...ev, pick: cand });
     app.setStatus(STATUS.queryPick(this.cycle.index + 1, this.cycle.count, this.describePick(cand), this.cycle.count > 1 ? STATUS.queryHint : STATUS.queryHintSingle));
   }
 
-  /** Leave the query cycle: the normal hover at the pointer position resumes. */
+  /** Leave the query cycle: the normal hover at the pointer position resumes, and the tool's preview is redrawn for it. */
   private endCycle(): void {
     this.cycle.cancel();
-    const p = this.lastPointer ? this.app.viewport.pick(this.lastPointer.x, this.lastPointer.y) : null;
+    const lp = this.lastPointer;
+    const p = lp ? this.app.viewport.pick(lp.x, lp.y) : null;
     this.app.setHover(p);
     this.app.setStatus(p ? this.describePick(p) : '');
+    if (lp) this.updatePreview(this.syntheticMove(lp, p));
+  }
+
+  /** A pointer-move event at `at` for the preview code, which reads only the position and the pick. */
+  private syntheticMove(at: { x: number; y: number }, pick: PickResult | null): ViewportPointerEvent {
+    return { kind: 'move', button: 0, clientX: at.x, clientY: at.y, shiftKey: false, ctrlKey: false, altKey: false, pick, original: null as unknown as MouseEvent };
   }
 
   /** Does the feature a pick names still exist? A cycle candidate may outlive an undo or a deletion. */
@@ -381,7 +421,10 @@ export class ToolManager {
   private describePick(p: PickResult): string {
     const m = this.app.model;
     if (p.type === 'editPoint') return `${STATUS.pose} ${p.pose} · ${m.points[p.pointId!]?.name ?? ''}`;
-    if (p.type === 'joint') return m.joints[p.id]?.type ?? '';
+    if (p.type === 'joint') {
+      const j = m.joints[p.id];
+      return j ? jointDescription(m, j) : '';
+    }
     if (p.type === 'construction') return m.construction[p.id]?.name ?? '';
     const f = this.featureFromPick(p);
     return f ? this.describeFeature(f) : '';
@@ -474,28 +517,19 @@ export class ToolManager {
   /**
    * Sector-angle labels of the Panel tool: at every sketch vertex that sits on
    * an existing vertex, the running sum of the corner angles of the panels
-   * around it plus the angle the new panel adds between its two adjacent
-   * sketch edges (sectorPreview). `pts` is the closed polyline including the
-   * cursor, so the cursor closes the open edge; a cursor resting on the first
-   * vertex (about to close the polygon) is left out, since it duplicates it.
-   * Green when the panel closes the ring at 360°, red when the angles cannot
-   * lie flat, neutral otherwise (sectorStatus).
+   * around it plus the true interior angle the new panel adds between its two
+   * adjacent sketch edges (sketchSectors, so a reflex corner counts 270°).
+   * `pts` is the closed polyline including the cursor, so the cursor closes
+   * the open edge; a cursor resting on the first vertex (about to close the
+   * polygon) is left out, since it duplicates it. Green when the panel closes
+   * the ring at 360°, red when the angles cannot lie flat or the corner is
+   * collinear (the panel would be refused), neutral otherwise.
    */
   private sectorLabels(points: PlacedPoint[], pts: Vec3[]): OverlayLabel[] {
-    const m = this.app.model;
     const n = pts.length >= 3 && dist(pts[pts.length - 1], pts[0]) < 1e-9 ? pts.length - 1 : pts.length;
     if (n < 3) return [];
-    const labels: OverlayLabel[] = [];
-    for (let i = 0; i < n; i++) {
-      const pid = points[i].snappedPointId;
-      if (!pid || !m.points[pid]) continue;
-      const prev = pts[(i + n - 1) % n];
-      const next = pts[(i + 1) % n];
-      if (dist(prev, pts[i]) < 1e-9 || dist(next, pts[i]) < 1e-9) continue;
-      const s = sectorPreview(m, pts[i], prev, next, pid);
-      labels.push({ pos: pts[i], text: OVERLAY.sectorSum(s.sumDeg, s.addedDeg), cls: SECTOR_LABEL_CLASS[sectorStatus(s)] });
-    }
-    return labels;
+    const sectors = sketchSectors(this.app.model, pts.slice(0, n), points.slice(0, n).map((p) => p.snappedPointId ?? null));
+    return sectors.map((s) => ({ pos: pts[s.index], text: OVERLAY.sectorSum(s.preview.sumDeg, s.preview.addedDeg), cls: SECTOR_LABEL_CLASS[s.status] }));
   }
 
   /**
@@ -557,7 +591,9 @@ export class ToolManager {
   popSketchPoint(): boolean {
     if (this.app.tool !== 'sketch' || this.points.length === 0) return false;
     this.points.pop();
+    const lp = this.lastPointer;
     if (this.points.length === 0) this.app.setOverlay({});
+    else if (lp) this.updatePreview(this.syntheticMove(lp, this.app.viewport.pick(lp.x, lp.y))); // the polyline and labels drop the vertex at once
     return true;
   }
 
@@ -578,10 +614,20 @@ export class ToolManager {
       return;
     }
     const m = app.model;
+    // a red sector label at a shared vertex while the panel lies in the plane of the panels around it means the panel
+    // would overlap them (in a plane the corners around a vertex tile exactly 360°): refused with the sector message
+    // and nothing changed, as the Joint tool refuses such a loop; a closed ring in 3-D (a pyramid) is a legitimate
+    // folded vertex and is joined
+    const overlap = sketchSectors(m, pts, points.map((p) => p.snappedPointId ?? null)).find((s) => s.status === 'bad' && s.coplanar);
+    if (overlap) {
+      const pt = m.points[overlap.pointId];
+      app.report(STATUS.sketchRefusedSector(`${m.links[pt.linkId]?.name ?? ''} ${pt.name}`.trim(), overlap.preview.sumDeg));
+      return;
+    }
     app.beginChange();
     const link = addPolygonFromPoints(m, pts, { name: app.nextLinkName('polygon'), onPlaneId: onSketchPlane ? m.settings.sketchPlaneId : null });
     const snapped = link.pointIds.filter((_, i) => points[i].snappedPointId);
-    const joints = snapped.length ? autoJoinCoincident(m, link, snapped, { defaultJoint: m.settings.defaultJoint, axis: sketchNormal(m) }) : [];
+    const { joints, refused } = snapped.length ? autoJoinCoincident(m, link, snapped, { defaultJoint: m.settings.defaultJoint, axis: sketchNormal(m) }) : { joints: [], refused: null };
     for (let i = 0; i < points.length; i++) {
       const cid = points[i].snappedConstructionId;
       if (cid && m.construction[cid]?.kind === 'point') addJoint(m, 'spherical', { linkId: link.id, kind: 'vertex', pointIds: [link.pointIds[i]] }, { constructionId: cid });
@@ -591,7 +637,8 @@ export class ToolManager {
     const notes: string[] = [];
     if (joints.length) notes.push(`${STATUS.jointCreated} (${joints.length})`);
     if (!onSketchPlane) notes.push(STATUS.sketchOffPlane);
-    if (notes.length) app.setStatus(notes.join(' · '));
+    if (refused) app.report(STATUS.autoJoinRefused(jointRefusedMessage(refused)));
+    else if (notes.length) app.setStatus(notes.join(' · '));
     this.points = [];
     app.setOverlay({});
   }
@@ -779,22 +826,36 @@ export class ToolManager {
     const r = dist(c, placed.pos);
     if (r < 1e-6) return;
     const m = app.model;
-    const n = this.sketchPlane().n;
     const xDir = sub(placed.pos, c);
+    const snappedFirst = placed.snappedPointId && m.points[placed.snappedPointId] ? placed.snappedPointId : null;
+    // a snapped first vertex is authoritative, as the Panel tool's snapped vertices are: when it does not lie in the
+    // sketch plane through the centre, the polygon is built in the plane through the centre and that vertex that is
+    // closest to the sketch plane (the two-point rule of fitSketchPlane), so the vertex is met exactly and no 2-D
+    // constraint is applied (the plane is not the sketch plane); the status bar says so
+    let n = this.sketchPlane().n;
+    const offPlane = !!snappedFirst && Math.abs(dot(xDir, normalize(n))) > coincidenceTolerance(m);
+    if (offPlane) {
+      const e = normalize(xDir);
+      const tilted = sub(normalize(n), scale(e, dot(normalize(n), e)));
+      n = normalize(len(tilted) > 1e-6 ? tilted : perpendicular(e));
+    }
     app.beginChange();
     const opts = app.toolOptions;
     const link =
       app.tool === 'prism'
         ? addPrism(m, c, n, r, Math.max(3, opts.sides), opts.height, { name: app.nextLinkName('prism'), xDir })
-        : addPolygon(m, c, n, r, Math.max(3, opts.sides), { name: app.nextLinkName('polygon'), xDir, onPlaneId: opts.mode2d ? m.settings.sketchPlaneId : null });
+        : addPolygon(m, c, n, r, Math.max(3, opts.sides), { name: app.nextLinkName('polygon'), xDir, onPlaneId: opts.mode2d && !offPlane ? m.settings.sketchPlaneId : null });
     // every vertex of the new polygon / prism that lands on an existing vertex is joined (plan 2b): shared edges become
     // creases, single vertices get pins; the first vertex is the clicked circumcircle point, so a snap there is kept
-    // as a pair even when the polygon's plane leaves it slightly off the snapped vertex (the pin was always made)
-    const snappedFirst = placed.snappedPointId && m.points[placed.snappedPointId] ? placed.snappedPointId : null;
-    const joints = autoJoinCoincident(m, link, link.pointIds, { defaultJoint: m.settings.defaultJoint, axis: n, extraPairs: snappedFirst ? [[link.pointIds[0], snappedFirst]] : [] });
+    // as a pair even when rounding leaves it slightly off the snapped vertex (the pin was always made)
+    const { joints, refused } = autoJoinCoincident(m, link, link.pointIds, { defaultJoint: m.settings.defaultJoint, axis: n, extraPairs: snappedFirst ? [[link.pointIds[0], snappedFirst]] : [] });
     app.select({ type: 'link', id: link.id });
     app.endChange();
-    if (joints.length) app.setStatus(`${STATUS.jointCreated} (${joints.length})`);
+    const notes: string[] = [];
+    if (joints.length) notes.push(`${STATUS.jointCreated} (${joints.length})`);
+    if (offPlane) notes.push(STATUS.sketchOffPlane);
+    if (refused) app.report(STATUS.autoJoinRefused(jointRefusedMessage(refused)));
+    else if (notes.length) app.setStatus(notes.join(' · '));
     this.points = [];
     app.setOverlay({});
   }
@@ -912,13 +973,18 @@ export class ToolManager {
 
   /**
    * The best-ranked feature under the pointer that lies on a link other than
-   * `a`'s and that the joint type accepts with `a` (datum geometry is never
-   * substituted: joining to the X axis because two panel edges coincide would
-   * surprise). The query cycle still lets the user override the choice.
+   * `a`'s and that the joint type accepts with `a`, taken from the front depth
+   * band only (band 0 of rankPickCandidates: the features at the clicked
+   * spot), so a mis-click on the first link never joins to geometry hidden
+   * behind the clicked panel. Datum geometry is never substituted either:
+   * joining to the X axis because two panel edges coincide would surprise.
+   * The query cycle still reaches occluded features and overrides the choice.
    */
   private otherLinkCandidate(ev: { clientX: number; clientY: number }, type: JointType, a: Feature): Feature | null {
     const m = this.app.model;
     for (const c of this.app.viewport.pickCandidates(ev.clientX, ev.clientY)) {
+      // model features come sorted by band, datum geometry after them: the first candidate past the front band ends it
+      if (c.type === 'construction' || (c.band ?? 0) > 0) break;
       const f = this.featureFromPick(c);
       if (!f || isConstructionRef(f) || f.linkId === a.linkId) continue;
       if (jointCompatible(m, type, a, f)) return f;

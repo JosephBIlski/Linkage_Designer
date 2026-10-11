@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { addBar, addJoint, addPolygon, addPolygonFromPoints, createModel, setGround } from '../src/core/model';
+import { addBar, addJoint, addPolygon, addPolygonFromPoints, addPrism, bodyPlaneJoint, createModel, serializeModel, setGround } from '../src/core/model';
 import { autoJoinCoincident, coincidenceTolerance, coincidentVertex } from '../src/core/edit';
 import { mergedPointGroups } from '../src/core/feasibility';
-import { sectorPreview, sectorStatus, type SectorPreview } from '../src/core/sector';
+import { sectorPreview, sectorStatus, sketchSectors, type SectorPreview } from '../src/core/sector';
 import { computeMobility, currentViolation, modelSize } from '../src/core/kinematics';
-import { dist } from '../src/core/geometry';
+import { dist, newellNormal } from '../src/core/geometry';
+import { hasCollinearTriple } from '../src/core/patterns';
 import type { ID, Link, Model, Vec3 } from '../src/core/types';
 
 const O: Vec3 = [0, 0, 0];
@@ -15,7 +16,7 @@ const SIDE = Math.sqrt(3); // side of a regular triangle with circumradius 1
 const C = (k: number): Vec3 => [SIDE * Math.cos((Math.PI / 3) * k), SIDE * Math.sin((Math.PI / 3) * k), 0];
 const vertexAt = (m: Model, link: Link, p: Vec3): ID => link.pointIds.reduce((b, id) => (dist(m.points[id].pos, p) < dist(m.points[b].pos, p) ? id : b), link.pointIds[0]);
 const creases = (m: Model) => Object.values(m.joints).filter((j) => j.type === 'revolute' && j.a.kind === 'edge' && j.pairs?.length === 2);
-const join = (m: Model, link: Link) => autoJoinCoincident(m, link, link.pointIds, { defaultJoint: 'revolute', axis: [0, 0, 1] });
+const join = (m: Model, link: Link) => autoJoinCoincident(m, link, link.pointIds, { defaultJoint: 'revolute', axis: [0, 0, 1] }).joints;
 
 /**
  * Three developable triangles O–p_i–p_{i+1} with sectors 60°, 60°, 120° (the fourth, 120°, is missing), flat on TOP,
@@ -152,8 +153,69 @@ describe('sectorPreview: live sector-angle feedback while sketching a panel', ()
     expect(s.closesRing).toBe(true);
   });
 
+  it('counts a reflex corner of the sketch at its full angle when the winding normal is given (an L closing the ring around a square)', () => {
+    const m = createModel();
+    const sq = addPolygonFromPoints(m, [[0, 0, 0], [0, -1, 0], [1, -1, 0], [1, 0, 0]], { onPlaneId: 'plane_top' });
+    setGround(m, sq.id);
+    const L: Vec3[] = [[0, 0, 0], [1, 0, 0], [1, 1, 0], [-1, 1, 0], [-1, -1, 0], [0, -1, 0]];
+    // without a normal the corner is read as its supplement and the closing ring looks wrong
+    const unsigned = sectorPreview(m, O, [0, -1, 0], [1, 0, 0], sq.pointIds[0]);
+    expect(unsigned.addedDeg).toBeCloseTo(90, 9);
+    expect(sectorStatus(unsigned)).toBe('bad');
+    // with the sketch's winding normal the L's corner at O is 270°: 90° + 270° = 360°, the ring closes flat
+    const signed = sectorPreview(m, O, [0, -1, 0], [1, 0, 0], sq.pointIds[0], newellNormal(L));
+    expect(signed.addedDeg).toBeCloseTo(270, 9);
+    expect(signed.sumDeg).toBeCloseTo(360, 9);
+    expect(signed.closesRing).toBe(true);
+    expect(sectorStatus(signed)).toBe('ok');
+    // the orientation of the sketch does not matter: the reversed polyline gives the same corner
+    const reversed = [...L].reverse();
+    const back = sectorPreview(m, O, [1, 0, 0], [0, -1, 0], sq.pointIds[0], newellNormal(reversed));
+    expect(back.addedDeg).toBeCloseTo(270, 9);
+    // sketchSectors feeds the normal itself and reports the same
+    const sectors = sketchSectors(m, L, [sq.pointIds[0], null, null, null, null, null]);
+    expect(sectors.length).toBe(1);
+    expect(sectors[0].preview.addedDeg).toBeCloseTo(270, 9);
+    expect(sectors[0].status).toBe('ok');
+    expect(sectors[0].coplanar).toBe(true);
+    // and the finished panel agrees: an L joined to the square is a developable vertex
+    const l = addPolygonFromPoints(m, L, { onPlaneId: 'plane_top' });
+    expect(join(m, l).length).toBe(2);
+    expect(currentViolation(m)).toBeLessThan(1e-9);
+  });
+
+  it('an L plus two 45° triangles is developable (SPEC §17.1): the last triangle closes the ring at 360°', () => {
+    const m = createModel();
+    const L = addPolygonFromPoints(m, [[0, 0, 0], [1, 0, 0], [1, 1, 0], [-1, 1, 0], [-1, -1, 0], [0, -1, 0]], { onPlaneId: 'plane_top' });
+    setGround(m, L.id);
+    const ta = addPolygonFromPoints(m, [O, [1, -1, 0], [1, 0, 0]], { onPlaneId: 'plane_top' });
+    expect(join(m, ta).length).toBe(1);
+    const pts: Vec3[] = [O, [0, -1, 0], [1, -1, 0]];
+    const [s] = sketchSectors(m, pts, [L.pointIds[0], null, null]);
+    expect(s.preview.existingDeg).toBeCloseTo(270 + 45, 9);
+    expect(s.preview.addedDeg).toBeCloseTo(45, 9);
+    expect(s.preview.sumDeg).toBeCloseTo(360, 9);
+    expect(s.preview.closesRing).toBe(true);
+    expect(s.status).toBe('ok');
+  });
+
+  it('a collinear corner at a shared vertex is never ok: the degenerate fourth regular triangle O–C3–C0 reads 360° but is bad', () => {
+    const { m, tris } = threeRegularFlat();
+    const pts: Vec3[] = [O, C(3), C(0)];
+    // the preview alone sees a ring closing at 360° (a straight corner adds 180°)
+    const p = sectorPreview(m, O, C(0), C(3), vertexAt(m, tris[0], O));
+    expect(p.addedDeg).toBeCloseTo(180, 9);
+    expect(p.sumDeg).toBeCloseTo(360, 9);
+    expect(p.closesRing).toBe(true);
+    expect(sectorStatus(p)).toBe('ok');
+    // the Panel tool refuses such a panel as degenerate, so the label must not announce it in green
+    expect(hasCollinearTriple(pts)).toBe(true);
+    const [s] = sketchSectors(m, pts, [vertexAt(m, tris[0], O), null, null]);
+    expect(s.status).toBe('bad');
+  });
+
   it('sectorStatus thresholds follow the 0.5° sector tolerance', () => {
-    const p = (sumDeg: number, closesRing: boolean): SectorPreview => ({ existingDeg: 0, addedDeg: sumDeg, sumDeg, closesRing });
+    const p = (sumDeg: number, closesRing: boolean): SectorPreview => ({ existingDeg: 0, addedDeg: sumDeg, sumDeg, closesRing, linkIds: [] });
     expect(sectorStatus(p(360, true))).toBe('ok');
     expect(sectorStatus(p(360.4, true))).toBe('ok');
     expect(sectorStatus(p(359.4, true))).toBe('bad');
@@ -235,6 +297,67 @@ describe('coincident vertices (Panel and Polygon tools join typed and snapped ve
     expect(currentViolation(m)).toBeLessThan(1e-9);
   });
 
+  it('a fourth regular triangle overlapping the flat fan (O, C3, C1): red 300° label, coplanar, so the Panel tool refuses it', () => {
+    const { m, tris } = threeRegularFlat();
+    for (const t of tris.slice(1)) join(m, t); // the three exist already: T2 creases with both neighbours, T3 has nothing left
+    expect(creases(m).length).toBe(2);
+    const pts: Vec3[] = [O, C(3), C(1)];
+    const sectors = sketchSectors(m, pts, [vertexAt(m, tris[0], O), vertexAt(m, tris[2], C(3)), vertexAt(m, tris[0], C(1))]);
+    const atO = sectors.find((s) => s.index === 0)!;
+    expect(atO.preview.existingDeg).toBeCloseTo(180, 9);
+    expect(atO.preview.addedDeg).toBeCloseTo(120, 9);
+    expect(atO.preview.sumDeg).toBeCloseTo(300, 9);
+    expect(atO.preview.closesRing).toBe(true);
+    expect(atO.status).toBe('bad');
+    expect(atO.coplanar).toBe(true); // in the plane: the panel overlaps T2 and T3
+    expect([...atO.preview.linkIds].sort()).toEqual(tris.map((t) => t.id).sort());
+    // the far corners are shared by two panels only and stay neutral
+    for (const s of sectors.filter((x) => x.index > 0)) expect(s.status).toBe('neutral');
+  });
+
+  it('the closing face of a pyramid has a red label too, but is not coplanar, so it is joined (a folded vertex)', () => {
+    const { m, faces, apex, base } = threeRegularPyramid({ join: true });
+    const pts: Vec3[] = [apex, base[3], base[0]];
+    const [s] = sketchSectors(m, pts, [vertexAt(m, faces[0], apex), null, null]);
+    expect(s.status).toBe('bad');
+    expect(s.coplanar).toBe(false);
+  });
+
+  it('an edge is a crease between two panels only: the overlapping triangle gets one crease and a pin, never two creases on one edge', () => {
+    const { m, tris } = threeRegularFlat();
+    for (const t of tris.slice(1)) join(m, t);
+    const t4 = addPolygonFromPoints(m, [O, C(3), C(1)], { onPlaneId: 'plane_top', name: 'T4' });
+    const created = join(m, t4);
+    expect(created.length).toBe(2);
+    expect(created.filter((j) => j.a.kind === 'edge').length).toBe(1); // T4–T3 on O–C3; O–C1 is already the crease T1–T2
+    expect(created.filter((j) => j.a.kind === 'vertex').length).toBe(1); // C1 pinned to the merged vertex once
+    expect(creases(m).length).toBe(3);
+    const edgeCreases = (x: ID, y: ID) => creases(m).filter((j) => j.pairs!.flat().includes(x) && j.pairs!.flat().includes(y)).length;
+    expect(edgeCreases(t4.pointIds[0], t4.pointIds[2])).toBe(0);
+    expect(currentViolation(m)).toBeLessThan(1e-9);
+  });
+
+  it('a refused automatic join says why: a 2-D polygon pinned to a ground vertex off its plane (needs 3-D), model restored', () => {
+    const m = createModel();
+    const prism = addPrism(m, [0, 0, 0], [0, 0, 1], 1, 4, 1);
+    setGround(m, prism.id);
+    const top = prism.pointIds[4]; // z = 1
+    const c: Vec3 = [3, 0, 0];
+    const p = m.points[top].pos;
+    const link = addPolygon(m, c, [0, 0, 1], dist(c, p), 4, { xDir: [p[0] - c[0], p[1] - c[1], p[2] - c[2]], onPlaneId: m.settings.sketchPlaneId });
+    const before = serializeModel(m);
+    const r = autoJoinCoincident(m, link, link.pointIds, { defaultJoint: m.settings.defaultJoint, axis: [0, 0, 1], extraPairs: [[link.pointIds[0], top]] });
+    expect(r.joints).toEqual([]);
+    expect(r.refused).not.toBeNull();
+    expect(r.refused!.kind).toBe('needs3d');
+    expect(serializeModel(m)).toBe(before);
+    expect(bodyPlaneJoint(m, link.id)).not.toBeNull();
+    expect(currentViolation(m)).toBeLessThan(1e-9);
+    // nothing coincident is not a refusal
+    const far = addPolygon(m, [9, 9, 0], [0, 0, 1], 1, 3, { onPlaneId: m.settings.sketchPlaneId });
+    expect(autoJoinCoincident(m, far, far.pointIds, { defaultJoint: 'revolute', axis: [0, 0, 1] })).toEqual({ joints: [], refused: null });
+  });
+
   it('Polygon tool core path: a regular triangle whose first and second vertices land on an existing triangle becomes a crease', () => {
     // T1 as the Polygon tool draws it: centre at the centroid of O, C(0), C(1), first vertex typed at C(1)
     const m = createModel();
@@ -249,7 +372,7 @@ describe('coincident vertices (Panel and Polygon tools join typed and snapped ve
     const t2 = addPolygon(m, c1, [0, 0, 1], dist(c1, O), 3, { xDir: [O[0] - c1[0], O[1] - c1[1], 0], onPlaneId: 'plane_top', name: 'T2' });
     expect(dist(m.points[t2.pointIds[0]].pos, O)).toBeLessThan(1e-12);
     expect(dist(m.points[t2.pointIds[1]].pos, C(1))).toBeLessThan(1e-12);
-    const joints = autoJoinCoincident(m, t2, t2.pointIds, { defaultJoint: 'revolute', axis: [0, 0, 1], extraPairs: [[t2.pointIds[0], t1.pointIds[1]]] });
+    const joints = autoJoinCoincident(m, t2, t2.pointIds, { defaultJoint: 'revolute', axis: [0, 0, 1], extraPairs: [[t2.pointIds[0], t1.pointIds[1]]] }).joints;
     expect(joints.length).toBe(1);
     expect(joints[0].type).toBe('revolute');
     expect(joints[0].a.kind).toBe('edge');
@@ -257,7 +380,7 @@ describe('coincident vertices (Panel and Polygon tools join typed and snapped ve
     expect(currentViolation(m)).toBeLessThan(1e-9);
     // a snapped first vertex that nothing else touches is still pinned through the extra pair (the old behaviour)
     const t3 = addPolygon(m, [5, 5, 0], [0, 0, 1], 1, 3, { xDir: [1, 0, 0], onPlaneId: 'plane_top', name: 'T3' });
-    const pin = autoJoinCoincident(m, t3, t3.pointIds, { defaultJoint: 'revolute', axis: [0, 0, 1], extraPairs: [[t3.pointIds[0], t1.pointIds[2]]] });
+    const pin = autoJoinCoincident(m, t3, t3.pointIds, { defaultJoint: 'revolute', axis: [0, 0, 1], extraPairs: [[t3.pointIds[0], t1.pointIds[2]]] }).joints;
     expect(pin.length).toBe(1);
     expect(pin[0].a.kind).toBe('vertex');
     expect(dist(m.points[t3.pointIds[0]].pos, C(0))).toBeLessThan(1e-7); // the solve pulled T3 onto the pinned vertex

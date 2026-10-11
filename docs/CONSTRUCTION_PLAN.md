@@ -345,6 +345,33 @@ link twice.
   the hint to Fold; the sector label at the centre reads 360° in green on the
   closing panel; four regular triangles show a red label at the centre on the
   fourth panel and the join is refused with the sector message.
+- *Implemented with these differences.* Four regular triangles cannot close
+  a ring in the plane: three span 180°, a fourth that continues the fan
+  (O, C3, C4) shows a neutral 240° label and joins with one crease, and the
+  only fourth panels that close the ring are degenerate (O, C3, C0: a
+  straight corner, red label, refused as collinear) or overlapping (O, C3,
+  C1: red 300° label). The red-label / refused-join acceptance is therefore
+  met by the overlapping panel: a red label at a shared vertex while the
+  sketch and every panel around that vertex lie in one plane means an overlap
+  (in a plane the corners around a vertex tile exactly 360°), and the Panel
+  tool refuses to create it, with the sector message in the status bar and
+  the Mechanism panel and nothing changed (`sketchSectors` in
+  `src/core/sector.ts`). A ring that closes at another sum in 3-D (the fourth
+  face of a square pyramid, 240°) shows the red label too but is joined, since
+  it is a consistent folded vertex; the "refused with the sector message"
+  outcome for a non-developable vertex remains the Joint tool's (0b, smoke
+  step 18) when the free edges of the fan are joined. The angle the new panel
+  adds is its true interior angle about the sketch's winding normal (a reflex
+  corner of an L-shaped panel counts 270°, so an L closing the ring around a
+  square reads 360° in green), and a collinear corner is red. An edge is a
+  crease between two panels only: the automatic join never puts two creases
+  on one edge, and a refused automatic join (the re-solve for the new joints
+  not accepted, model restored) is reported with its diagnosis instead of
+  silently. The Polygon tool's snapped first vertex, when it lies off the
+  sketch plane, tilts the polygon's plane to meet it exactly (the plane
+  through the centre and that vertex closest to the sketch plane, no 2-D
+  constraint, the status bar says so). Tests: `tests/sector.test.ts`,
+  `tests/tools.test.ts`; smoke steps 18d, 19, 20 and 23.
 
 **2c. 3-D placement on the sketch plane.** With "Place on sketch plane (2-D)"
 off, free clicks are placed where the pointer ray meets the active sketch

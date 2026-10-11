@@ -338,7 +338,17 @@ export function compile(m: Model, opts: CompileOptions): CompiledSystem {
       if (!c) return;
       if (j.type === 'planar') {
         if (c.kind !== 'plane' || !c.dir) return;
-        if (axisAlignedIndex(c.dir) >= 0) return; // frozen coordinates handle it
+        if (axisAlignedIndex(c.dir) >= 0) {
+          // frozen coordinates hold every variable group on the plane; a constant group (a ground vertex, a point
+          // pinned to a datum point) merged into this link is not frozen, so its distance from the plane is emitted
+          // as a column-free residual: a 2-D link pinned to a vertex off its plane is a violation the DOF chip and
+          // the pre-flight solves must see, not a constraint silently dropped (as the frozen–frozen distance, 0c)
+          for (const pid of j.a.pointIds) {
+            const r = R(k, pid);
+            if (isConst(r)) constraints.push(pointOnPlane(r, c.origin, c.dir, 1, true, tag));
+          }
+          return;
+        }
         for (const pid of j.a.pointIds) {
           const r = R(k, pid);
           if (!isConst(r)) constraints.push(pointOnPlane(r, c.origin, c.dir, 1, true, tag));

@@ -207,14 +207,21 @@ export class ModelRenderer {
     group.add(this.cylinder(a, b, Math.max(radius, minR), proxyMat, pick));
   }
 
-  private label(text: string, at: Vec3, cls = 'label'): void {
+  /** A CSS2D label at a world position; CSS2DRenderer stacks labels by `renderOrder` first, then by camera distance. */
+  private label(text: string, at: Vec3, cls = 'label', renderOrder = 0): void {
     const div = document.createElement('div');
     div.className = cls;
     div.textContent = text;
     const obj = new CSS2DObject(div);
     obj.position.copy(v(at));
+    obj.renderOrder = renderOrder;
     this.labels.push(obj);
     this.vp.groups.labels.add(obj);
+  }
+
+  /** Is a tool label (overlay) pinned at this world position? The model label there is left out so the two do not overlap. */
+  private overlayLabelAt(state: RenderState, p: Vec3): boolean {
+    return (state.overlay.labels ?? []).some((l) => dist(l.pos, p) < 1e-6);
   }
 
   // ---------------------------------------------------------------------------
@@ -228,6 +235,9 @@ export class ModelRenderer {
     for (const c of Object.values(model.construction)) {
       const selected = this.isSelected(state, 'construction', c.id);
       const hovered = this.isHovered(state, 'construction', c.id);
+      // a datum plane or axis lights up only for a hover the user asked for (the query cycle, a tree row): the plain
+      // pointer hovers the sketch plane wherever the canvas is empty, and lighting it would flood the view
+      const hot = hovered && !!state.hover?.queried;
       const color = selected ? settings.colors.selection : settings.colors.construction;
       const emissive = hovered ? settings.colors.selection : undefined;
       if (c.kind === 'point') {
@@ -237,13 +247,13 @@ export class ModelRenderer {
         m.userData = { type: 'construction', id: c.id, sub: 0 } as Partial<PickResult> & { sub: number };
         this.pickables.push(m);
         g.add(m);
-        if (settings.showLabels) this.label(c.name, add(c.origin, [0, 0, r * 4]), 'label label--construction');
+        if (settings.showLabels && !this.overlayLabelAt(state, c.origin)) this.label(c.name, add(c.origin, [0, 0, r * 4]), 'label label--construction');
       } else if (c.kind === 'axis' && c.dir) {
         const half = c.size ?? 10;
         const a = add(c.origin, scale(c.dir, -half));
         const b = add(c.origin, scale(c.dir, half));
         // a dashed line has no emissive term: the hover highlight (query cycle) is the selection colour at full opacity
-        const mat = this.track(new THREE.LineDashedMaterial({ color: hovered ? settings.colors.selection : color, dashSize: 0.35, gapSize: 0.18, transparent: true, opacity: hovered || selected ? 1 : c.builtin ? 0.45 : 0.9 }));
+        const mat = this.track(new THREE.LineDashedMaterial({ color: hot ? settings.colors.selection : color, dashSize: 0.35, gapSize: 0.18, transparent: true, opacity: hot || selected ? 1 : c.builtin ? 0.45 : 0.9 }));
         const geo = this.track(new THREE.BufferGeometry().setFromPoints([v(a), v(b)]));
         const line = new THREE.Line(geo, mat);
         line.computeLineDistances();
@@ -255,8 +265,8 @@ export class ModelRenderer {
       } else if (c.kind === 'plane' && c.dir) {
         const s = c.size ?? 6;
         const geo = this.track(new THREE.PlaneGeometry(2 * s, 2 * s));
-        // hovered (query cycle): selection colour and a denser fill, since the translucent plane has no emissive term
-        const mat = this.track(new THREE.MeshBasicMaterial({ color: hovered ? settings.colors.selection : color, transparent: true, opacity: hovered ? 0.3 : selected ? 0.2 : c.builtin ? 0.04 : 0.12, side: THREE.DoubleSide, depthWrite: false }));
+        // hovered through the query cycle: selection colour and a denser fill, since the translucent plane has no emissive term
+        const mat = this.track(new THREE.MeshBasicMaterial({ color: hot ? settings.colors.selection : color, transparent: true, opacity: hot ? 0.3 : selected ? 0.2 : c.builtin ? 0.04 : 0.12, side: THREE.DoubleSide, depthWrite: false }));
         const mesh = new THREE.Mesh(geo, mat);
         mesh.position.copy(v(c.origin));
         mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), v(c.dir));
@@ -265,7 +275,7 @@ export class ModelRenderer {
         this.pickables.push(mesh);
         g.add(mesh);
         const edges = this.track(new THREE.EdgesGeometry(geo));
-        const lmat = this.track(new THREE.LineBasicMaterial({ color: hovered ? settings.colors.selection : color, transparent: true, opacity: hovered || selected ? 1 : c.builtin ? 0.35 : 0.9 }));
+        const lmat = this.track(new THREE.LineBasicMaterial({ color: hot ? settings.colors.selection : color, transparent: true, opacity: hot || selected ? 1 : c.builtin ? 0.35 : 0.9 }));
         const border = new THREE.LineSegments(edges, lmat);
         border.position.copy(mesh.position);
         border.quaternion.copy(mesh.quaternion);
@@ -632,8 +642,9 @@ export class ModelRenderer {
     if (o.marker) {
       g.add(this.sphere(o.marker, r * 1.1, this.material(col, { flat: true })));
     }
-    // tool labels sit at their world position; the stylesheet offsets them from the vertex they annotate
-    for (const l of o.labels ?? []) this.label(l.text, l.pos, l.cls);
+    // tool labels sit at their world position (the stylesheet offsets them from the vertex they annotate) and are
+    // stacked above the model labels, so a sector sum is never hidden under a datum or link name
+    for (const l of o.labels ?? []) this.label(l.text, l.pos, l.cls, 1);
   }
 }
 

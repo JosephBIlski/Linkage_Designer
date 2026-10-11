@@ -79,7 +79,7 @@ describe('auto-joining coincident vertices (sketching the fourth origami panel)'
   it('turns shared edges into creases and yields a 1-DOF rigid vertex', () => {
     const { m, panels, folded } = threePanels();
     const fourth = addPolygonFromPoints(m, folded[3], { name: 'Panel 4' });
-    const created = autoJoinCoincident(m, fourth, fourth.pointIds, { defaultJoint: 'revolute', axis: [0, 0, 1] });
+    const created = autoJoinCoincident(m, fourth, fourth.pointIds, { defaultJoint: 'revolute', axis: [0, 0, 1] }).joints;
     // shares edge O–p0 with panel 3 and edge O–p1 with panel 1: two creases, no vertex pins
     expect(created.length).toBe(2);
     expect(created.every((j) => j.type === 'revolute' && j.a.kind === 'edge' && j.pairs?.length === 2)).toBe(true);
@@ -92,10 +92,10 @@ describe('auto-joining coincident vertices (sketching the fourth origami panel)'
   it('replaces existing vertex pins by a crease and does not duplicate joints', () => {
     const { m, folded } = threePanels();
     const fourth = addPolygonFromPoints(m, folded[3], { name: 'Panel 4' });
-    const first = autoJoinCoincident(m, fourth, [fourth.pointIds[1]], { defaultJoint: 'revolute', axis: [0, 0, 1] });
+    const first = autoJoinCoincident(m, fourth, [fourth.pointIds[1]], { defaultJoint: 'revolute', axis: [0, 0, 1] }).joints;
     expect(first.length).toBe(1); // a single vertex pin (different sketch planes → spherical)
     expect(first[0].type).toBe('spherical');
-    const second = autoJoinCoincident(m, fourth, fourth.pointIds, { defaultJoint: 'revolute', axis: [0, 0, 1] });
+    const second = autoJoinCoincident(m, fourth, fourth.pointIds, { defaultJoint: 'revolute', axis: [0, 0, 1] }).joints;
     expect(second.length).toBe(2);
     expect(Object.values(m.joints).filter((j) => j.a.kind === 'vertex').length).toBe(0); // the pin was upgraded to a crease
     expect(computeMobility(m).dof).toBe(1);
@@ -188,7 +188,7 @@ describe('edit tool: joint helpers, hinge axes and re-framing (verification find
     setGround(m, A.id);
     const Y = addBar(m, [0, 0, 0], [-1, -1, 0], { onPlaneId: 'plane_top' });
     const B = addPolygonFromPoints(m, [[0, 0, 0], [2, 0, 0], [2, -2, 0], [0, -2, 0]], { onPlaneId: 'plane_top' });
-    const created = autoJoinCoincident(m, B, B.pointIds, { defaultJoint: 'revolute', axis: [0, 0, 1] });
+    const created = autoJoinCoincident(m, B, B.pointIds, { defaultJoint: 'revolute', axis: [0, 0, 1] }).joints;
     const types = created.map((j) => `${j.type}:${j.a.kind}`).sort();
     expect(types).toEqual(['revolute:edge', 'revolute:vertex']); // crease with A plus a pin to Y
     const toY = created.find((j) => !('constructionId' in j.b) && (j.b as { linkId: string }).linkId === Y.id);
@@ -334,6 +334,24 @@ describe('3-D placement on the sketch plane (plan 2c: placementOnPlane)', () => 
     expect(low[1]).toBeCloseTo(-15 + 1 / 0.3, 9);
   });
 
+  it('2-D mode (minCos 0): a grazing ray still lands on the sketch plane, a ray from a camera on the plane falls back', () => {
+    const top = { o: [0, 0, 0] as Vec3, n: [0, 0, 1] as Vec3 };
+    const fallback: Vec3 = [7, 7, 7];
+    // grazing: 5° above the plane from 1 unit up: the plane is met far out, and 2-D mode wants it there
+    const grazing = { o: [0, 0, 1] as Vec3, d: [Math.cos(0.0873), 0, -Math.sin(0.0873)] as Vec3 };
+    expect(placementOnPlane(grazing, top.o, top.n, fallback)).toEqual(fallback); // 3-D mode: grazing → fallback
+    const hit = placementOnPlane(grazing, top.o, top.n, fallback, 0);
+    expect(Math.abs(hit[2])).toBeLessThan(1e-9);
+    expect(hit[0]).toBeCloseTo(1 / Math.tan(0.0873), 6);
+    // the Front view: the camera sits on the TOP plane, so every off-centre ray meets it at depth 0, at the camera
+    const front = { o: [0, -10, 0] as Vec3, d: [0.12, 1, 0.06] as Vec3 };
+    const view: Vec3 = [1.2, 0, 0.6];
+    expect(placementOnPlane(front, top.o, top.n, view, 0)).toEqual(view);
+    // parallel and behind-the-camera rays fall back as well
+    expect(placementOnPlane({ o: [0, -10, 1], d: [0, 1, 0] }, top.o, top.n, view, 0)).toEqual(view);
+    expect(placementOnPlane({ o: [0, -10, 1], d: [0, 1, 0.3] }, top.o, top.n, view, 0)).toEqual(view);
+  });
+
   it('keeps placeOnFittedPlane as the same rule with the orthogonal projection as the fallback', () => {
     const p: Vec3 = [0.3, 0.2, 1];
     const grazing = { o: [0, 0, 1] as Vec3, d: [1, 0, -0.01] as Vec3 };
@@ -370,5 +388,27 @@ describe('edits that require the hinge axis to tilt', () => {
       const off = [0, 1, 2].map((i) => m.points[h].pos[i] - m.points[base].pos[i]);
       expect(Math.abs(off[0] * b2[0] + off[1] * b2[1] + off[2] * b2[2])).toBeLessThan(1e-6);
     }
+  });
+});
+
+describe('sketch-plane (2-D) constraint on constant points (compile)', () => {
+  it('a ground vertex off its axis-aligned sketch plane is a violation, not a dropped constraint', () => {
+    const m = createModel();
+    const bar = addBar(m, [0, 0, 0], [2, 0, 0], { onPlaneId: 'plane_top' });
+    setGround(m, bar.id);
+    expect(currentViolation(m)).toBeLessThan(1e-12);
+    m.points[bar.pointIds[1]].pos = [2, 0, 0.3];
+    expect(currentViolation(m)).toBeCloseTo(0.3, 9);
+    // the ground is free to move in a sketch solve: the constraint has columns again and pulls the point back
+    const res = solveSketch(m, { allowGroundMove: true });
+    expect(Math.abs(res.positions.get(bar.pointIds[1])![2])).toBeLessThan(1e-6);
+  });
+
+  it('a vertex pinned to a datum point off the plane is a violation too', () => {
+    const m = createModel();
+    const bar = addBar(m, [0, 0, 0], [2, 0, 0], { onPlaneId: 'plane_top' });
+    const pnt = addConstructionPoint(m, [0, 0, 0.5], 'PNT');
+    addJoint(m, 'spherical', { linkId: bar.id, kind: 'vertex', pointIds: [bar.pointIds[0]] }, { constructionId: pnt.id });
+    expect(currentViolation(m)).toBeCloseTo(0.5, 9);
   });
 });

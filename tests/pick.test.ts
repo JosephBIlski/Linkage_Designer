@@ -77,6 +77,19 @@ describe('rankPickCandidates', () => {
     expect(names(rankPickCandidates([behind, ...front], 5))).toEqual(['vertex:P9[z]', 'edge:P1[a,b]', 'face:P1[a,b,c]#0']);
   });
 
+  it('reports the depth band of every model feature; datum geometry carries none', () => {
+    const front = [hit('face', 'P1', { pointIds: ['a', 'b', 'c'], faceIndex: 0, distance: 10 }), hit('edge', 'P1', { pointIds: ['a', 'b'], distance: 10.01 })];
+    const behind = hit('vertex', 'P9', { pointId: 'z', pointIds: ['z'], distance: 12 });
+    const farther = hit('edge', 'P7', { pointIds: ['q', 'r'], distance: 14 });
+    const plane = hit('construction', 'TOP', { sub: 2, distance: 9 });
+    const ranked = rankPickCandidates([plane, farther, behind, ...front], 0.1);
+    expect(ranked.map((r) => `${r.id}:${r.band ?? '-'}`)).toEqual(['P1:0', 'P1:0', 'P9:1', 'P7:2', 'TOP:-']);
+    // the input objects are not annotated
+    expect(behind.band).toBeUndefined();
+    // the hover identity ignores the band and the queried tag
+    expect(samePick(ranked[2], { ...behind, band: 5, queried: true })).toBe(true);
+  });
+
   it('opens a new depth band from the first feature outside the previous band', () => {
     const rs = [hit('face', 'A', { pointIds: ['a'], faceIndex: 0, distance: 1 }), hit('face', 'B', { pointIds: ['b'], faceIndex: 0, distance: 1.08 }), hit('vertex', 'C', { pointId: 'c', pointIds: ['c'], distance: 1.16 }), hit('vertex', 'D', { pointId: 'd', pointIds: ['d'], distance: 1.24 })];
     // bands of width 0.1 anchored at 1: [A, B] then [C, D]

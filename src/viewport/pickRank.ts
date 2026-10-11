@@ -20,6 +20,17 @@ export interface PickResult {
   sub?: number;
   /** Hit by the exact pointer ray (not only by the ring of rays sampled around the pointer). */
   exact?: boolean;
+  /**
+   * Depth band of a ranked model feature (rankPickCandidates): 0 for the features within the pick tolerance of the
+   * nearest hit, 1 for the next band behind them, and so on. Undefined for datum geometry and unranked results.
+   */
+  band?: number;
+  /**
+   * The user named this feature explicitly (the query cycle, a model-tree row), not merely moved the pointer over
+   * it. Datum planes and axes light up only for such hovers, so an idle pointer over an empty spot of the canvas
+   * does not flood the whole sketch plane with the selection colour. Not part of the feature identity (pickKey).
+   */
+  queried?: boolean;
   point: Vec3;
   distance: number;
 }
@@ -60,7 +71,8 @@ export function samePick(a: PickResult | null, b: PickResult | null): boolean {
  * before the panel); within a band features are ordered by PICK_PRIORITY, then
  * exact-ray hits before ring hits, then by distance. Datum geometry comes
  * last, points before axes before planes (`sub`), then exact before ring, then
- * by distance. Ties keep the input order.
+ * by distance. Ties keep the input order. Each model result carries its band
+ * index in `band`.
  */
 export function rankPickCandidates(results: PickResult[], tolerance: number): PickResult[] {
   const byKey = new Map<string, PickResult>();
@@ -86,6 +98,8 @@ export function rankPickCandidates(results: PickResult[], tolerance: number): Pi
   }
   const ring = (r: PickResult): number => (r.exact ? 0 : 1);
   model.sort((a, b) => band.get(a)! - band.get(b)! || PICK_PRIORITY[a.type] - PICK_PRIORITY[b.type] || ring(a) - ring(b) || a.distance - b.distance);
+  // the band is reported so that callers can confine a choice to the front band (the Joint tool's substitution)
+  for (const r of model) r.band = band.get(r);
   datum.sort((a, b) => (a.sub ?? 9) - (b.sub ?? 9) || ring(a) - ring(b) || a.distance - b.distance);
   return [...model, ...datum];
 }

@@ -320,7 +320,7 @@ export const STATUS = {
   dof: 'DOF',
   violated: 'Constraints violated',
   coordPlaceholder: 'x,y[,z]  |  @dx,dy  |  length<angle  |  length',
-  coordHelp: 'Type a coordinate and press Enter while placing points.',
+  coordHelp: 'Type a coordinate and press Enter while placing points; Enter on the empty box closes a panel.',
   snapped: 'snapped to',
   pose: 'pose',
   solving: 'solving…',
@@ -382,6 +382,12 @@ export const STATUS = {
   sketchNotPlanar: 'Vertices must lie on one plane; the point was projected onto the sketch plane.',
   sketchOffPlane: 'The snapped vertices define a plane off the sketch plane; the polygon was placed on that plane (no 2-D constraint).',
   sketchDegenerate: 'Three consecutive vertices are collinear; move or remove one (Backspace removes the last vertex).',
+  // Panel tool: a panel whose sector label is red while it lies in the plane of the panels around that vertex would
+  // overlap them (in a plane the corner angles around a vertex tile exactly 360°), so it is not created
+  sketchRefusedSector: (vertexName: string, sumDeg: number): string =>
+    `Panel not created: the corner angles of the panels around vertex ${vertexName}, this one included, add up to ${sumDeg.toFixed(1)}°, not 360°, so in this plane they would overlap. Change the panel's shape (Backspace removes the last vertex), or build the vertex in its folded shape by sketching onto vertices out of the plane. Nothing was changed.`,
+  // Panel / Polygon tools: the automatic join of the snapped vertices was refused (autoJoinCoincident rolled it back)
+  autoJoinRefused: (reason: string): string => `The link was created, but its snapped vertices were not joined: ${reason}`,
   editUnreachable: 'The vertex cannot reach that position with its current joints. Remove a joint or pick a destination it can reach.',
   editPickTarget: 'Now click the destination (a vertex, a datum point) or type coordinates.',
   editDone: 'Vertex moved',

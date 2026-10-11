@@ -4,7 +4,7 @@
  * the Edit and Sketch tools).
  */
 import { add, cross, dist, dot, len, normalize, perpendicular, scale, sub } from './geometry';
-import { adaptationLimit, isReleaseAccepted, restore } from './feasibility';
+import { adaptationLimit, diagnoseJoint, isReleaseAccepted, linkPath, mergedPointGroups, restore, type Diagnosis } from './feasibility';
 import { applyPositions, commitSketch, modelSize, solveSketch, solveSketchWithRelease } from './kinematics';
 import {
   addJoint,
@@ -88,7 +88,7 @@ export function moveVertex(m: Model, pointId: ID, dest: Vec3, opts: MoveVertexOp
   commitSketch(m, res, free);
   rebuildShapeRigidity(m, link.id);
   reattachHelpers(m, m.links[link.id], affected);
-  const joints = autoJoinCoincident(m, m.links[link.id], [pointId], { defaultJoint: m.settings.defaultJoint, axis: sketchNormal(m), extraPairs: opts.joinTo ? [[pointId, opts.joinTo]] : [] });
+  const { joints } = autoJoinCoincident(m, m.links[link.id], [pointId], { defaultJoint: m.settings.defaultJoint, axis: sketchNormal(m), extraPairs: opts.joinTo ? [[pointId, opts.joinTo]] : [] });
   return { ok: true, residual: res.residual, joints };
 }
 
@@ -185,22 +185,38 @@ export interface AutoJoinOptions {
   tol?: number;
 }
 
+export interface AutoJoinResult {
+  /** The joints created (empty when nothing coincided or when the join was refused). */
+  joints: Joint[];
+  /**
+   * Why the joints could not be kept: the re-solve for them was not accepted, the model was restored to its state
+   * before the call and `joints` is empty. Null when nothing was refused (joints may still be empty: nothing to
+   * join). The diagnosis is made for the first joint created, as the Joint tool's pre-flight does.
+   */
+  refused: Diagnosis | null;
+}
+
 /**
  * Join vertices of `link` (restricted to `vertexIds`) to coincident vertices of
  * other links:
  *  - two consecutive vertices of `link` that coincide with the two ends of an
  *    edge of one other link become ONE edge–edge revolute joint (a crease);
- *    vertex pins already present on that pair are replaced;
+ *    vertex pins already present on that pair are replaced. An edge is a
+ *    crease between two panels only: when the other link's edge already is a
+ *    crease with a third link, or this edge of `link` has just been creased
+ *    with another link, no second crease is made on it;
  *  - any other coincident vertex gets the default joint (hinge axis = the
  *    normal of the sketch plane both links share) or, when the links are not
- *    on a common sketch plane, a spherical joint. A link that is already
- *    attached to a crease vertex through one of the crease partners is not
- *    pinned again.
+ *    on a common sketch plane, a spherical joint. A vertex that is already
+ *    merged with the other link's vertex (directly, or through the creases
+ *    and pins of its neighbours: mergedPointGroups) is not pinned again.
  * Returns the created joints. When the re-solve for the new joints is not
  * accepted (never expected for vertices that already coincide, but a violated
- * pose is never committed) the model is restored as it was and [] is returned.
+ * pose is never committed) the model is restored as it was, `joints` is empty
+ * and `refused` names the reason (diagnoseJoint on the rigid step of the
+ * solve), so the calling tool can say why the link stayed unjoined.
  */
-export function autoJoinCoincident(m: Model, link: Link, vertexIds: ID[], opts: AutoJoinOptions): Joint[] {
+export function autoJoinCoincident(m: Model, link: Link, vertexIds: ID[], opts: AutoJoinOptions): AutoJoinResult {
   const tol = opts.tol ?? coincidenceTolerance(m);
   const snapshot = serializeModel(m);
   const wanted = new Set(vertexIds);
@@ -236,13 +252,16 @@ export function autoJoinCoincident(m: Model, link: Link, vertexIds: ID[], opts: 
       if (!qb) continue;
       const isEdge = linkEdges(m, other).some(([x, y]) => (x === qa && y === qb) || (x === qb && y === qa));
       if (!isEdge) continue;
+      const alreadyCrease = Object.values(m.joints).some((j) => j.type === 'revolute' && j.pairs && j.pairs.length === 2 && j.pairs.every(([x, y]) => ([a, b].includes(x) && [qa, qb].includes(y)) || ([a, b].includes(y) && [qa, qb].includes(x))));
+      // an edge is a crease between two panels only: a third panel on an edge that is already a crease (the other
+      // link's, or this one creased a moment ago with another link) is not creased again
+      if (!alreadyCrease && (edgeCreased(m, qa, qb) || edgeCreased(m, a, b))) continue;
       // replace vertex pins on these pairs by one crease
       for (const [v, q] of [[a, qa], [b, qb]] as [ID, ID][]) {
         for (const j of jointsAtPoint(m, v)) {
           if (j.a.kind === 'vertex' && !isConstructionRef(j.b) && j.b.kind === 'vertex' && j.pairs?.some(([x, y]) => (x === v && y === q) || (x === q && y === v))) removeJoint(m, j.id);
         }
       }
-      const alreadyCrease = Object.values(m.joints).some((j) => j.type === 'revolute' && j.pairs && j.pairs.length === 2 && j.pairs.every(([x, y]) => ([a, b].includes(x) && [qa, qb].includes(y)) || ([a, b].includes(y) && [qa, qb].includes(x))));
       if (!alreadyCrease) {
         const j = addJoint(m, 'revolute', { linkId: link.id, kind: 'edge', pointIds: [a, b] }, { linkId: other.id, kind: 'edge', pointIds: [qa, qb] });
         if (j) created.push(j);
@@ -266,6 +285,9 @@ export function autoJoinCoincident(m: Model, link: Link, vertexIds: ID[], opts: 
         return !isConstructionRef(otherSide) && partners.has(otherSide.linkId);
       });
       if (viaPartner) continue;
+      // already one merged vertex with q through the creases and pins made so far (its neighbours' included)?
+      const groups = mergedPointGroups(m);
+      if (groups.root(v) === groups.root(q)) continue;
       const shared = sharedSketchPlane(m, link.id, other.id);
       const type: JointType = shared ? opts.defaultJoint : 'spherical';
       const axis = shared?.dir ?? opts.axis;
@@ -279,12 +301,26 @@ export function autoJoinCoincident(m: Model, link: Link, vertexIds: ID[], opts: 
     const free = new Set(created.flatMap((j) => creaseReleasePoints(m, j, link.id)));
     const res = solveSketchWithRelease(m, free, { maxIter: 60 });
     if (!isReleaseAccepted(m, res, adaptationLimit(m, created))) {
+      // diagnosed on the rigid step before the restore, as the Joint tool's pre-flight does; the loop is the chain
+      // that connects the two links without this joint (the other joints just made included)
+      const first = created[0];
+      const loop = isConstructionRef(first.b) ? null : linkPath(m, first.a.linkId, first.b.linkId, first.id);
+      const refused = diagnoseJoint(m, first, res.rigid.residual, loop);
       restore(m, snapshot);
-      return [];
+      return { joints: [], refused };
     }
     commitSketch(m, res, free);
   }
-  return created;
+  return { joints: created, refused: null };
+}
+
+/** Is the edge between the two points (either order) already a crease: an edge–edge revolute whose two merged pairs contain both? */
+function edgeCreased(m: Model, x: ID, y: ID): boolean {
+  return Object.values(m.joints).some((j) => {
+    if (j.type !== 'revolute' || j.pairs?.length !== 2) return false;
+    const ids = j.pairs.flat();
+    return ids.includes(x) && ids.includes(y);
+  });
 }
 
 /** The construction plane both links are sketched on, if they share one. */

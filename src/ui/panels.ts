@@ -18,7 +18,8 @@ import { isConstructionRef } from '../core/types';
 import { createColorPicker } from './colorPicker';
 import { icon } from './icons';
 import { DEFAULT_SETTINGS, type AppSettings } from './settings';
-import { APP, EXAMPLES, HELP, JOINTS, MENU, MODES, PANEL, POPUP, PREVIEW, SETTINGS, SIM, STATUS, TOOLS, TOOL_OPTIONS, TREE, creaseLabel, jointRefusedMessage } from './strings';
+import { APP, EXAMPLES, HELP, JOINTS, MENU, MODES, PANEL, POPUP, PREVIEW, SETTINGS, SIM, STATUS, TOOLS, TOOL_OPTIONS, TREE, jointRefusedMessage } from './strings';
+import { jointDescription, jointEnds, jointLabel } from './labels';
 import { duplicateLink, extrudePolygon, translation } from '../core/patterns';
 import { currentViolation, modelSize } from '../core/kinematics';
 import { bodyPlaneJoint, setBodyPlane } from '../core/model';
@@ -183,8 +184,8 @@ export class UI {
       [MENU.viewOrtho, () => app.updateSettings({ orthographic: true })],
       [MENU.viewPersp, () => app.updateSettings({ orthographic: false })],
     ]));
-    this.undoBtn = button('', () => app.undo(), { icon: 'undo', title: MENU.undo, cls: 'btn--icon' });
-    this.redoBtn = button('', () => app.redo(), { icon: 'redo', title: MENU.redo, cls: 'btn--icon' });
+    this.undoBtn = button('', () => this.undo(), { icon: 'undo', title: MENU.undo, cls: 'btn--icon' });
+    this.redoBtn = button('', () => this.redo(), { icon: 'redo', title: MENU.redo, cls: 'btn--icon' });
     menus.appendChild(this.undoBtn);
     menus.appendChild(this.redoBtn);
     menus.appendChild(button('', () => app.zoomToFit(), { icon: 'fit', title: MENU.viewFit, cls: 'btn--icon' }));
@@ -222,6 +223,10 @@ export class UI {
         if (tp) {
           this.tools.applyTyped(tp);
           this.coordInput.value = '';
+        } else if (this.coordInput.value.trim() === '' && app.mode === 'construction') {
+          // Enter on the empty box is the "press Enter to close it" of the Panel hint, as Enter on the canvas is
+          // (finishSketch is a no-op for every other tool); unparsable text is simply kept
+          this.tools.finishSketch();
         }
         e.stopPropagation();
       }
@@ -419,7 +424,7 @@ export class UI {
     group('joints', TREE.joints, joints.length, (list) => {
       for (const j of joints) {
         list.appendChild(
-          item(`${this.jointLabel(j)} · ${this.jointEnds(j)}`, sel?.type === 'joint' && sel.id === j.id, () => app.select({ type: 'joint', id: j.id }), {
+          item(jointDescription(m, j, true), sel?.type === 'joint' && sel.id === j.id, () => app.select({ type: 'joint', id: j.id }), {
             iconName: j.type,
             hover: () => app.setHover({ type: 'joint', id: j.id, point: [0, 0, 0], distance: 0 }),
           }),
@@ -433,7 +438,8 @@ export class UI {
           item(`${c.name} (${c.kind})`, sel?.type === 'construction' && sel.id === c.id, () => app.select({ type: 'construction', id: c.id }), {
             iconName: c.kind === 'point' ? 'cpoint' : c.kind === 'axis' ? 'caxis' : 'cplane',
             badges: m.settings.sketchPlaneId === c.id ? [PANEL.isSketchPlane] : [],
-            hover: () => app.setHover({ type: 'construction', id: c.id, point: [0, 0, 0], distance: 0 }),
+            // a tree row is an explicit choice: the datum lights up (queried), unlike a pointer idling over a plane
+            hover: () => app.setHover({ type: 'construction', id: c.id, point: [0, 0, 0], distance: 0, queried: true }),
             rename: c.builtin
               ? undefined
               : (v) => {
@@ -631,18 +637,25 @@ export class UI {
     return s;
   }
 
-  /** Short label of a joint for the tree: the type letter, or "Crease M 160°" for a crease (construction pose). */
+  /** Short label of a joint for the tree: the type letter, or "Crease M 160°" for a crease (construction pose); shared with the status bar (labels.ts). */
   private jointLabel(j: Joint): string {
-    const m = this.app.model;
-    return isCrease(m, j) ? creaseLabel(creaseMV(m, j), creaseDihedralDeg(m, j)) : JOINTS[j.type].short;
+    return jointLabel(this.app.model, j, true);
   }
 
   /** "<link A> ↔ <link B or datum>" for a joint, used by the tree and the status bar. */
   private jointEnds(j: Joint): string {
-    const m = this.app.model;
-    const a = m.links[j.a.linkId]?.name ?? '';
-    const b = isConstructionRef(j.b) ? m.construction[j.b.constructionId]?.name ?? '' : m.links[j.b.linkId]?.name ?? '';
-    return `${a} ↔ ${b}`;
+    return jointEnds(this.app.model, j);
+  }
+
+  /** Undo / redo (buttons and keys): a running query cycle is ended first, so its highlight and instructions do not outlive the model they named. */
+  private undo(): void {
+    this.tools.endQuery();
+    this.app.undo();
+  }
+
+  private redo(): void {
+    this.tools.endQuery();
+    this.app.redo();
   }
 
   /**
@@ -1315,11 +1328,11 @@ export class UI {
       if (app.selection) this.tools.deletePick({ type: app.selection.type, id: app.selection.id, pointId: app.selection.pointId, pose: app.selection.pose });
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
       e.preventDefault();
-      if (e.shiftKey) app.redo();
-      else app.undo();
+      if (e.shiftKey) this.redo();
+      else this.undo();
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
       e.preventDefault();
-      app.redo();
+      this.redo();
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c' && app.mode === 'construction') {
       e.preventDefault();
       this.copySelected();

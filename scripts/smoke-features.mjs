@@ -418,9 +418,8 @@ await page.waitForTimeout(300);
 //     on the coincident edge of Polygon 2 ("2 of N"); a left-click then uses it and the two edges become one crease.
 //     A 60 px right-drag must still orbit the camera and must not start a cycle.
 await freshTopView([[-1, -4.5, 0], [3, 3, 0]]);
-// Enter inside the coordinate box only submits a coordinate (its keydown handler stops propagation), so the box is blurred
-// before the Enter that closes the panel reaches the document
-const closeSketch = async () => { await page.evaluate(() => document.activeElement?.blur()); await page.keyboard.press('Enter'); await page.waitForTimeout(300); };
+// Enter in the (still focused, now empty) coordinate box closes the panel, as the Panel hint promises a typing user
+const closeSketch = async () => { await page.press('.coord__input', 'Enter'); await page.waitForTimeout(300); };
 await page.click('button[title^="Panel"]');
 for (const c of ['0.5,0.5', '2.5,0.5', '1.5,2']) await typeCoord(c);
 await closeSketch();
@@ -447,10 +446,42 @@ const post20 = await workflowState();
 const ok20 = /Polygon 1/.test(first20) && /Polygon 2/.test(cycled20) && /right-click: next/.test(cycled20) && cycleHover20.active && cycleHover20.hover?.type === 'edge' && cycleHover20.hover?.link === 'Polygon 2' && /Joint created/.test(joined20) && pre20.creases === 0 && post20.creases === 1 && post20.joints === 1 && !post20.status.startsWith('2 of');
 console.log('query pick: right-click cycles to the coincident edge of the other panel', JSON.stringify({ first: first20.slice(0, 40), cycled: cycled20.slice(0, 70), hover: cycleHover20, joined: joined20.slice(0, 30), creases: [pre20.creases, post20.creases] }), ok20 ? 'OK' : 'FAIL');
 await page.screenshot({ path: `${OUT}/13-query-pick.png` });
-// right-drag of 60 px orbits (OrbitControls on the same element) and is not a query click. In the top view the camera
-// sits at the pole of OrbitControls' spherical frame (its up quaternion is fixed at construction), where a rightward /
-// downward drag does not move it, so the drag is made in the iso view.
-await page.evaluate(() => { const { app } = window.linkageDesigner; app.viewport.setView('iso'); app.viewport.fit([[-1, -4.5, 0], [3, 3, 0]]); });
+// 20b. A left-click through the cycle with a tool that writes no status (Select) leaves the plain feature description,
+//      not the cycle's "left-click: use it" instructions; the pointer leaving the canvas clears them as well.
+await page.click('button[title^="Select —"]');
+await page.mouse.move(s20.x, s20.y);
+await waitStatus(/^(edge|Crease)/);
+await page.mouse.click(s20.x, s20.y, { button: 'right' });
+const cycled20b = await waitStatus(/^2 of \d+ · /);
+await page.mouse.click(s20.x, s20.y);
+await page.waitForTimeout(300);
+const after20b = await page.evaluate(() => { const { app, tools } = window.linkageDesigner; return { status: app.status, cycling: tools.queryActive, selection: app.selection?.type ?? null }; });
+await page.mouse.click(s20.x, s20.y, { button: 'right' });
+await waitStatus(/^\d+ of \d+ · /);
+await page.mouse.move(5, 5); // the top bar: off the canvas
+await page.waitForTimeout(300);
+const left20b = await page.evaluate(() => { const { app, tools } = window.linkageDesigner; return { status: app.status, cycling: tools.queryActive, hover: app.hover }; });
+const ok20b = /^2 of/.test(cycled20b) && !after20b.cycling && !/^\d+ of \d+ · /.test(after20b.status) && !/left-click: use it/.test(after20b.status) && after20b.selection !== null && !left20b.cycling && left20b.status === '' && left20b.hover === null;
+console.log('cycle instructions leave the status bar with the click and with the pointer', JSON.stringify({ cycled: cycled20b.slice(0, 30), afterClick: after20b, afterLeave: { status: left20b.status, cycling: left20b.cycling } }), ok20b ? 'OK' : 'FAIL');
+// 20c. The TOP datum plane is hovered wherever the canvas is empty, which must not colour it (the hover is silent);
+//      a right-click query on it is an explicit choice and lights it in the selection colour.
+const planeMat = () => page.evaluate(() => { const { app } = window.linkageDesigner; const mesh = app.viewport.groups.construction.children.find((o) => o.userData?.id === 'plane_top' && o.userData.plane); return mesh ? { color: '#' + mesh.material.color.getHexString(), opacity: mesh.material.opacity, hover: app.hover?.id ?? null, queried: !!app.hover?.queried } : null; });
+const empty20c = await W([-0.5, -3, 0]);
+await page.mouse.move(empty20c.x, empty20c.y);
+await page.waitForTimeout(300);
+const idle20c = await planeMat();
+await page.mouse.click(empty20c.x, empty20c.y, { button: 'right' });
+await waitStatus(/^\d+ of \d+ · TOP/);
+await page.waitForTimeout(200);
+const lit20c = await planeMat();
+await page.keyboard.press('Escape');
+await page.waitForTimeout(200);
+const colors20c = await page.evaluate(() => ({ construction: window.linkageDesigner.app.settings.colors.construction.toLowerCase(), selection: window.linkageDesigner.app.settings.colors.selection.toLowerCase() }));
+const ok20c = idle20c?.hover === 'plane_top' && !idle20c.queried && idle20c.color === colors20c.construction && idle20c.opacity === 0.04 && lit20c?.hover === 'plane_top' && lit20c.queried && lit20c.color === colors20c.selection && lit20c.opacity === 0.3;
+console.log('datum plane: silent under the idle pointer, lit by a query click', JSON.stringify({ idle: idle20c, lit: lit20c, colors: colors20c }), ok20c ? 'OK' : 'FAIL');
+// 20d. A right-drag of 60 px orbits (OrbitControls on the same element) and is not a query click, in the top view too
+//      (the controls are rebuilt with the view's up vector, so the top view is no longer at the pole of a Z-up frame).
+await page.evaluate(() => { const { app } = window.linkageDesigner; app.viewport.setView('top'); app.viewport.fit([[-1, -4.5, 0], [3, 3, 0]]); });
 await page.waitForTimeout(300);
 const camBefore20 = await page.evaluate(() => window.linkageDesigner.app.viewport.camera.position.toArray());
 const o20 = await W([1.5, -1, 0]);
@@ -461,7 +492,21 @@ await page.mouse.up({ button: 'right' });
 await page.waitForTimeout(300);
 const drag20 = await page.evaluate(() => { const { app, tools } = window.linkageDesigner; return { cam: app.viewport.camera.position.toArray(), status: app.status, cycling: tools.queryActive }; });
 const orbited20 = Math.hypot(...[0, 1, 2].map((i) => drag20.cam[i] - camBefore20[i]));
-console.log('right-drag still orbits, no query cycle', JSON.stringify({ cameraMoved: +orbited20.toFixed(3), cycling: drag20.cycling, status: drag20.status.slice(0, 40) }), orbited20 > 1e-3 && !drag20.cycling && !/^\d+ of \d+ · /.test(drag20.status) ? 'OK' : 'FAIL');
+console.log('right-drag still orbits (top view), no query cycle', JSON.stringify({ cameraMoved: +orbited20.toFixed(3), cycling: drag20.cycling, status: drag20.status.slice(0, 40) }), orbited20 > 1e-3 && !drag20.cycling && !/^\d+ of \d+ · /.test(drag20.status) ? 'OK' : 'FAIL');
+// 20e. A right-drag that swings out and comes back to its press position is still a drag, not a query click
+await page.evaluate(() => { const { app } = window.linkageDesigner; app.viewport.setView('iso'); app.viewport.fit([[-1, -4.5, 0], [3, 3, 0]]); });
+await page.waitForTimeout(300);
+const camBefore20e = await page.evaluate(() => window.linkageDesigner.app.viewport.camera.position.toArray());
+const o20e = await W([1.5, 0.8, 0]);
+await page.mouse.move(o20e.x, o20e.y);
+await page.mouse.down({ button: 'right' });
+for (let i = 1; i <= 6; i++) { await page.mouse.move(o20e.x + i * 10, o20e.y + i * 2); await page.waitForTimeout(40); }
+for (let i = 5; i >= 0; i--) { await page.mouse.move(o20e.x + i * 10, o20e.y + i * 2); await page.waitForTimeout(40); }
+await page.mouse.up({ button: 'right' });
+await page.waitForTimeout(300);
+const drag20e = await page.evaluate(() => { const { app, tools } = window.linkageDesigner; return { cam: app.viewport.camera.position.toArray(), status: app.status, cycling: tools.queryActive }; });
+const orbited20e = Math.hypot(...[0, 1, 2].map((i) => drag20e.cam[i] - camBefore20e[i]));
+console.log('out-and-back right-drag: orbited, no query cycle', JSON.stringify({ cameraMoved: +orbited20e.toFixed(3), cycling: drag20e.cycling, status: drag20e.status.slice(0, 40) }), orbited20e > 1e-3 && !drag20e.cycling && !/^\d+ of \d+ · /.test(drag20e.status) ? 'OK' : 'FAIL');
 // 21. 3-D placement (plan 2c): with "Place on sketch plane (2-D)" unticked, a bar clicked at two screen points in the
 //     default (isometric-ish) view still gets both ends on the sketch plane TOP (z = 0), under the clicked points, but
 //     carries no 2-D constraint (previously the ends landed on the view plane through the origin / previous point,
@@ -483,6 +528,46 @@ const underPointer21 = !!bar21 && bar21.ends.every((e, i) => Math.hypot(e[0] - e
 const ok21 = !view21.mode2d && Math.abs(view21.dir[2]) > 0.15 && onPlane21 && underPointer21 && bar21.bodyJoints === 0 && bar21.links === 1 && restored21;
 console.log('3-D mode: a clicked bar lies on the sketch plane without the 2-D constraint', JSON.stringify({ mode2d: view21.mode2d, viewDirZ: +view21.dir[2].toFixed(3), ends: bar21?.ends.map((e) => e.map((v) => +v.toFixed(4))), onPlane: onPlane21, underPointer: underPointer21, bodyJoints: bar21?.bodyJoints, restored: restored21 }), ok21 ? 'OK' : 'FAIL');
 await page.screenshot({ path: `${OUT}/14-3d-placement.png` });
+// 22. Front view with "Place on sketch plane (2-D)" ticked: the camera sits on the TOP plane, so every off-centre ray
+//     meets it at the camera; such a hit is a miss and the clicks land on the view plane through the previous point
+//     (y = 0) instead of putting a point at the camera (previously nothing was created).
+await page.evaluate(() => window.linkageDesigner.app.newModel());
+await page.waitForTimeout(400);
+await page.evaluate(() => window.linkageDesigner.app.viewport.setView('front'));
+await page.waitForTimeout(300);
+await page.click('button[title^="Link —"]');
+const cam22 = await page.evaluate(() => window.linkageDesigner.app.viewport.camera.position.toArray());
+const centre22 = await page.evaluate(() => { const r = document.querySelector('.viewport-canvas').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; });
+await page.mouse.click(centre22.x + 120, centre22.y + 60);
+await page.waitForTimeout(150);
+await page.mouse.click(centre22.x + 200, centre22.y + 100);
+const bar22 = await waitFor(() => { const { app } = window.linkageDesigner; const m = app.model; const l = Object.values(m.links).find((x) => x.kind === 'bar'); return l ? { ends: l.pointIds.map((id) => [...m.points[id].pos]), links: Object.keys(m.links).length, mode2d: app.toolOptions.mode2d } : null; }, 3000);
+const ok22 = !!bar22 && bar22.mode2d && bar22.links === 1 && bar22.ends.every((e) => Math.hypot(e[0] - cam22[0], e[1] - cam22[1], e[2] - cam22[2]) > 1 && Math.abs(e[1]) < 1e-6);
+console.log('front view, 2-D mode: off-centre clicks make a bar on the view plane, no point at the camera', JSON.stringify({ camera: cam22.map((v) => +v.toFixed(3)), bar: bar22 && { ...bar22, ends: bar22.ends.map((e) => e.map((v) => +v.toFixed(3))) } }), ok22 ? 'OK' : 'FAIL');
+// 23. Polygon tool in 2-D mode with its circumcircle point snapped to a vertex off the sketch plane (the top of a
+//     prism): the snapped vertex is authoritative, so the polygon is built in the plane through its centre and that
+//     vertex, joined there exactly (one spherical pin), without a 2-D constraint, and the status bar says so.
+await page.evaluate(() => window.linkageDesigner.app.newModel());
+await page.waitForTimeout(400);
+await page.evaluate(() => { const { app } = window.linkageDesigner; app.viewport.setView('iso'); app.viewport.fit([[-2, -2, 0], [5, 2, 1]]); });
+await page.waitForTimeout(300);
+await page.click('button[title^="Prism"]');
+await clickWorld([0, 0, 0]);
+await clickWorld([1, 0, 0]);
+const prism23 = await waitFor(() => { const { app } = window.linkageDesigner; const m = app.model; const l = Object.values(m.links).find((x) => x.kind === 'prism'); return l ? { id: l.id, tops: l.pointIds.slice(4).map((id) => [...m.points[id].pos]) } : null; }, 3000);
+await page.click('button[title^="Polygon —"]');
+await page.evaluate(() => window.linkageDesigner.app.setStatus(''));
+await clickWorld([3.5, 0, 0]);
+const topVertex23 = prism23.tops.reduce((b, p) => (p[0] - p[1] > b[0] - b[1] ? p : b), prism23.tops[0]); // the one nearest the iso camera
+await clickWorld(topVertex23);
+const status23 = await waitStatus(/Joint created/);
+await page.waitForTimeout(300);
+const poly23 = await page.evaluate(() => { const { app } = window.linkageDesigner; const m = app.model; const l = Object.values(m.links).find((x) => x.kind === 'polygon'); if (!l) return null; const pts = l.pointIds.map((id) => [...m.points[id].pos]); return { pts, bodyJoints: Object.values(m.joints).filter((j) => j.a.kind === 'body' && j.a.linkId === l.id).length, joints: Object.values(m.joints).filter((j) => j.a.kind !== 'body').map((j) => j.type), violation: app.sim.violation }; });
+const onVertex23 = !!poly23 && poly23.pts.some((p) => Math.hypot(p[0] - topVertex23[0], p[1] - topVertex23[1], p[2] - topVertex23[2]) < 1e-6);
+const tilted23 = !!poly23 && poly23.pts.some((p) => Math.abs(p[2]) > 0.1) && poly23.pts.some((p) => Math.abs(p[2]) < 1e-6);
+const ok23 = /Joint created \(1\)/.test(status23) && /no 2-D constraint/.test(status23) && onVertex23 && tilted23 && poly23.bodyJoints === 0 && poly23.joints.length === 1 && poly23.violation < 1e-8;
+console.log('polygon snapped to an off-plane vertex in 2-D mode: tilted to meet it, joined, no 2-D constraint', JSON.stringify({ status: status23.slice(0, 120), onVertex: onVertex23, tilted: tilted23, bodyJoints: poly23?.bodyJoints, joints: poly23?.joints, violation: poly23?.violation }), ok23 ? 'OK' : 'FAIL');
+await page.screenshot({ path: `${OUT}/15-polygon-off-plane.png` });
 console.log('errors:', errors.length ? errors.join('\n') : 'none');
 await browser.close();
 server.kill();

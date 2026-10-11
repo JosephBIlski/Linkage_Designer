@@ -624,7 +624,7 @@ describe('autoJoinCoincident never commits a refused solve', () => {
     const m = createModel();
     const A = addPolygonFromPoints(m, [[0, 0, 0], [2, 0, 0], [1, 1.5, 0]], { name: 'A' });
     const B = addPolygonFromPoints(m, [[0, 0, 0], [2, 0, 0], [1, -1.5, 0]], { name: 'B' });
-    const created = autoJoinCoincident(m, B, B.pointIds, { defaultJoint: 'revolute', axis: [0, 0, 1] });
+    const created = autoJoinCoincident(m, B, B.pointIds, { defaultJoint: 'revolute', axis: [0, 0, 1] }).joints;
     expect(created.length).toBe(1);
     expect(currentViolation(m)).toBeLessThan(1e-9);
     void A;

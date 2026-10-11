@@ -355,7 +355,7 @@ describe('autoJoinCoincident with edges that coincide only within the snap toler
     const A = addPolygonFromPoints(m, [[0, 0, 0], [L, 0, 0], [L / 2, H, 0]], { name: 'A' });
     const B = addPolygonFromPoints(m, [[0, 0, 0], [L + 2e-7, 0, 0], [L / 2, -H, 0]], { name: 'B' });
     const restA = JSON.stringify(A.rigidity);
-    const created = autoJoinCoincident(m, B, B.pointIds, { defaultJoint: 'revolute', axis: [0, 0, 1] });
+    const created = autoJoinCoincident(m, B, B.pointIds, { defaultJoint: 'revolute', axis: [0, 0, 1] }).joints;
     expect(created.length).toBe(1);
     expect(created[0].type).toBe('revolute');
     expect(created[0].pairs?.length).toBe(2);
