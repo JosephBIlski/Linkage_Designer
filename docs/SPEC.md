@@ -1,12 +1,12 @@
-# Linkage Designer — detailed feature specification (prototype v0.3)
+# Linkage Designer — detailed feature specification (prototype v0.4)
 
 This document specifies each implemented feature in detail. Each section
 quotes the relevant line of the [original specification](ORIGINAL_SPEC.md)
 and marks **Deviations** where the prototype departs from it (with the
 reason). Rationale and references are in
 [DESIGN_DECISIONS.md](DESIGN_DECISIONS.md); the diagnosis and the plan behind
-the v0.3 joining / folding work (§17) are in
-[CONSTRUCTION_PLAN.md](CONSTRUCTION_PLAN.md).
+the v0.3 joining / folding work (§17) and the v0.4 construction workflow
+(§18) are in [CONSTRUCTION_PLAN.md](CONSTRUCTION_PLAN.md).
 
 Conventions: world units are unit-less (the grid step is 1); angles are shown
 in degrees; the default up axis is +Z and the default sketch plane is TOP (XY).
@@ -26,22 +26,34 @@ editing window along with tools …"
 - Viewport: light grey background (`#e4e6e8`), 40×40 grid in the TOP plane
   with contrasting minor (`#c3c7cb`) and major (`#9aa0a6`) lines, hemisphere +
   directional lighting, labels (CSS overlays) for links, vertices of bars,
-  displayed points, construction geometry and hovered joints.
-- Navigation: right-drag orbit, middle-drag pan, wheel zoom-to-cursor;
+  displayed points, construction geometry and hovered joints, and the Panel
+  tool's sector-angle labels (§18.2), which are drawn above the others.
+- Mouse: left-click picks with the active tool (the feature under the
+  pointer is highlighted and named in the status bar as the pointer moves);
+  **right-click without dragging** cycles through everything under the
+  pointer (the *query cycle*, §18.1); right-drag orbits (in every view, the
+  Top view included), middle-drag or Shift+right-drag pans, wheel zooms to
+  the cursor. The browser's context menu is suppressed over the viewport.
   View menu: Top / Front / Right / Isometric, zoom to fit (`F`),
   orthographic / perspective.
 - Undo / redo (`Ctrl+Z`, `Ctrl+Y` / `Ctrl+Shift+Z`) by whole-model snapshots;
   `Esc` during a drag restores the pre-drag model without touching history.
   A refused edit (§17.1) records no undo entry.
-- Status bar: shows the last status message or the tool hint; its tooltip
-  carries the whole text, since long diagnoses are clipped in the bar.
+- Status bar: shows the last status message or the tool hint — the feature
+  under the pointer as it moves, and the query cycle's count and
+  instructions while one runs (§18.1); its tooltip carries the whole text,
+  since long diagnoses are clipped in the bar.
   Refusals (a refused joint, edit, fold, Solidify or Save) are also kept as a
   **notice** in the Mechanism panel, with a *Dismiss* button, until dismissed
   or until the next change goes through (undo, redo and loading a file clear
   it as well).
-- Keyboard: `Esc` cancel tool, `Del` delete selection, `1` select, `2` link,
-  `3` polygon, `4` prism, `5` cylinder, `G` ground, `J` joint, `D` driver,
-  `Space` play/pause in Preview.
+- Keyboard: `Esc` ends a running query cycle, otherwise cancels the tool;
+  `Del` delete selection; `1` select, `2` link, `3` polygon, `4` prism,
+  `5` cylinder, `S` panel (sketch polygon), `E` edit points, `G` ground,
+  `J` joint, `D` driver, `M` mirror, `P` pattern, `F` zoom to fit;
+  `Enter` closes the panel being sketched (on the canvas or in the empty
+  coordinate box) and `Backspace` removes its last vertex; `Ctrl+C` /
+  `Ctrl+V` copy / paste a link; `Space` play/pause in Preview.
 - All user-visible text is in `src/ui/strings.ts`; colours and display
   defaults in `src/ui/settings.ts` (`DEFAULT_SETTINGS`).
 
@@ -70,9 +82,13 @@ should constrain that link to the newly created one. Links should also be able
 to be placed by specifying a second point through coordinates, length and
 angle, or just a length and clicking to place the second point."
 
-- Tool **Link**: click the first point, then the second. Points are placed on
-  the active sketch plane (option *Place on sketch plane (2-D)*), otherwise on
-  a view-aligned plane through the previous point. Optional grid snapping.
+- Tool **Link**: click the first point, then the second. A free click lands
+  where the pointer ray meets the active sketch plane, whether or not *Place
+  on sketch plane (2-D)* is ticked; the option decides whether the bar is
+  then *kept* on that plane (§17.4). Only when the ray grazes the plane
+  (3-D mode), misses it, or meets it at the camera is the click placed on
+  the view-aligned plane through the previous point (§18.3). Optional grid
+  snapping.
 - Snapping: hovering an existing vertex (or construction point) snaps and
   shows a ring; clicking it joins the new end to that vertex with the
   **default joint** (Revolute, axis = sketch-plane normal; Spherical can be
@@ -98,6 +114,23 @@ constraints."
   plane; vertices can then be dragged to any (planar) shape.
 - Tool **Prism (3-D polygon)**: same input plus *Height*; a right prism with
   2n vertices, two end faces and n side faces.
+- **Automatic joins** (since v0.4): every vertex of the new polygon or prism
+  that lands on a vertex of another link — the snapped circumcircle point,
+  and any further vertex that the regular shape puts on an existing vertex
+  (typed coordinates, grid snapping) — is joined with the rules of §13.1:
+  two coincident vertices on one existing edge give a crease, a single one a
+  pin, and the status bar reads "Joint created (n)". The clicked
+  circumcircle point stays joined to the vertex it was snapped to even when
+  rounding leaves it slightly off, and the join is re-solved and verified
+  like every other edit (§17.1); a refused re-solve leaves the link unjoined
+  and says why ("The link was created, but its snapped vertices were not
+  joined: …"). When the snapped circumcircle point lies off the sketch plane
+  (the top vertex of a prism, say) the polygon or prism is built in the plane
+  through its centre and that vertex that is closest to the sketch plane, so
+  the vertex is met exactly; a polygon then carries no 2-D constraint and
+  the status bar adds "The snapped vertices define a plane off the sketch
+  plane; the polygon was placed on that plane (no 2-D constraint)." Until
+  v0.3 only the circumcircle point was pinned, without a solve.
 - Features: every **vertex**, **edge** (side) and **face** is pickable and can
   be used by the Joint tool (see §5 for compatibility).
 - Rigidity: frame-triangle rule (3 distances for the frame, 3 distances or
@@ -150,8 +183,9 @@ creation."
   the whole mechanism. Planar links drag in their sketch plane (in the view
   plane when the sketch plane is seen edge-on), others in the view plane.
 - Picking is tolerant: bars and edges can be grabbed within about 10 px, and
-  datum planes / axes never steal a pick from model geometry. Clicking on
-  empty space or a datum with the Select tool explains what can be dragged.
+  datum planes / axes never steal a pick from model geometry; where features
+  coincide, a right-click cycles through them (§18.1). Clicking on empty
+  space or a datum with the Select tool explains what can be dragged.
 - Dragging a link **end** rubber-bands it: the link's own design distances
   touching that vertex are released, so its length / shape changes while all
   joints stay satisfied. Releasing the end on another link's vertex joins them
@@ -203,6 +237,19 @@ same way: an incompatible or unsatisfiable type leaves the joint as it was),
 axis, pitch (screw), compliant-hinge settings (revolute), delete; a crease has
 the additional controls of §17.2.
 
+Picking the second feature where edges or vertices coincide (since v0.4):
+when the feature under the pointer belongs to the first link again (two
+panels drawn edge on edge, a shared vertex), the tool uses the best-ranked
+compatible feature of *another* link at the same spot — among the features
+within the pick tolerance of the nearest hit, never geometry hidden behind
+the clicked panel and never datum geometry — and prefixes its status with
+"Used edge V0-V1 of Polygon 2 (the feature under the pointer was on the first
+link)"; only when there is none does it say "That feature belongs to the
+first link too. Pick a feature on a different link (right-click cycles
+through everything under the pointer)." A feature named explicitly through
+the query cycle (§18.1) is never substituted; the cycle steps through every
+feature under the pointer, so either of two coincident edges can be chosen.
+
 | Joint | DOF | Compatible features (A ↔ B) | Equations |
 | --- | --- | --- | --- |
 | Spherical | 3 | vertex ↔ vertex; vertex ↔ datum point | coincidence (merged variable) |
@@ -248,6 +295,9 @@ should be able to see the degrees of freedom of their mechanism."
   sketch plane' in Properties, or use Fold.") and the chip carries the same
   text as its tooltip; see §17.4. A flat origami vertex is also announced
   there, with the Fold button (§17.3).
+- Every **interior vertex** (a vertex whose panels close a ring of creases)
+  is listed in a *Crease pattern* block under the hints, with its
+  developability, Kawasaki and Maekawa checks (§18.4).
 
 ## 7. Construction geometry (datums)
 
@@ -264,7 +314,10 @@ the mechanism geometry … similarly to Creo's geometry creation workflow."
   cylindrical / prismatic / screw about a datum axis, planar on a datum plane)
   and through **editing-point targets** (§8.5).
 - Datums are rendered in the construction colour; large translucent planes
-  never steal picks from real geometry.
+  never steal picks from real geometry. A datum plane or axis is highlighted
+  only when it is named explicitly — through the query cycle (§18.1) or a
+  model-tree row — since the idle pointer rests on the sketch plane wherever
+  the canvas is empty (the status bar names it, nothing lights up).
 
 **Deviation:** Creo's full datum feature set (plane through axis at angle,
 tangent planes, etc.) is reduced to the three creation methods above.
@@ -445,30 +498,51 @@ status bar says so.
 
 ## 13. Sketching and editing geometry (added in v0.2)
 
-### 13.1 Sketch tool (free polygon) and extrusion
+### 13.1 Panel tool (sketch polygon) and extrusion
 
-- Tool **Sketch polygon** (`S`): click any sequence of vertices on the active
-  sketch plane (points are projected onto the plane, so the polygon is always
-  planar); a dashed preview follows the pointer. Close the polygon by clicking
-  the first vertex again, double-clicking, or pressing `Enter`; `Backspace`
-  removes the last vertex. At least three non-collinear vertices are
-  required. Coordinates can also be typed in the status bar.
-- **Snapping and joining**: vertices snapped onto existing link vertices are
-  joined when the polygon is closed. Two consecutive snapped vertices that
-  coincide with an edge of one existing link become a single edge–edge
-  revolute joint (a crease); an isolated snapped vertex gets the default joint
-  (hinge axis = the normal of the sketch plane both links share) when both
-  links share a sketch plane, otherwise a spherical joint; a link that is
-  already attached to a crease vertex through one of the crease partners is
-  not pinned again. A vertex snapped onto a datum point is pinned to it. Free
-  vertices of a polygon whose snapped vertices define a plane off the sketch
-  plane are placed where the click ray meets that plane. This is how the last
-  panel of an origami vertex is "filled in": sketch it by clicking the
-  existing vertices. Edges that coincide only within the snap tolerance become
-  creases whose sketched edge takes the existing edge's length (the polygon
-  being sketched adapts, never the existing geometry; §17.1). The re-solve for
-  the automatic joints is verified like every other edit: when it is not
-  accepted, the polygon is created unjoined instead of with a violated pose.
+- Tool **Panel (sketch polygon)** (`S`; called *Sketch polygon* until v0.3):
+  click any sequence of vertices on the active sketch plane (points are
+  projected onto the plane, so the polygon is always planar); a dashed
+  preview follows the pointer. Close the panel by clicking the first vertex
+  again, double-clicking, or pressing `Enter` (on the canvas or in the empty
+  coordinate box); `Backspace` removes the last vertex and the preview drops
+  it at once. At least three non-collinear vertices are required.
+  Coordinates can also be typed in the status bar.
+- **Snapping and joining**: every vertex of the panel that lies on an
+  existing vertex of another link is joined when the panel is closed — a
+  vertex snapped onto it and, since v0.4, also a vertex typed in the
+  coordinate box or placed by a grid-snapped click that lands on one within
+  the coincidence tolerance (one part in a million of the model size, never
+  below 1e-6 units; the tolerance of the automatic join). Such a vertex is
+  treated exactly like a snapped one: it takes the existing vertex's
+  position (a typed 3-D coordinate on a vertex off the sketch plane is not
+  projected onto the plane) and defines the panel's plane together with the
+  other snapped vertices. Two consecutive such vertices that coincide with
+  an edge of one existing link become a single edge–edge revolute joint (a
+  crease); an isolated one gets the default joint (hinge axis = the normal of
+  the sketch plane both links share) when both links share a sketch plane,
+  otherwise a spherical joint; a vertex already merged with the other link's
+  vertex (directly, or through the creases and pins of its neighbours) is
+  not pinned again. An edge is a crease between two panels only: a third
+  panel laid on an edge that is already a crease gets a pin at a shared
+  vertex where one applies, never a second crease on that edge. A vertex
+  snapped onto a datum point is pinned to it. Free vertices of a panel whose
+  snapped vertices define a plane off the sketch plane are placed where the
+  click ray meets that plane (the placement rule of §18.3, with the
+  orthogonal projection as its fallback). This is how the last panel of an
+  origami vertex is "filled in": sketch it by clicking the existing
+  vertices. Edges that coincide only within the snap tolerance become
+  creases whose sketched edge takes the existing edge's length (the panel
+  being sketched adapts, never the existing geometry; §17.1). The status bar
+  reads "Joint created (n)". The re-solve for the automatic joints is
+  verified like every other edit: when it is not accepted, the panel is
+  created unjoined and the refusal is reported in the status bar and as a
+  Mechanism-panel notice ("The link was created, but its snapped vertices
+  were not joined: <diagnosis of §17.1>").
+- **Sector-angle labels and the overlap refusal** are specified in §18.2:
+  while the panel is drawn, every vertex that sits on an existing vertex
+  shows the running sum of the corner angles around it, and a panel that
+  would overlap its neighbours in their plane is not created.
 - **Extrude to prism** (Properties of a polygon): enter a height and press
   *Extrude*. The polygon becomes a prism of that height along the normal of
   its sketch plane (so the direction does not depend on the vertex winding;
@@ -484,7 +558,8 @@ status bar says so.
 - Tool **Edit points** (`E`): click a vertex of existing geometry, then click
   its destination: another link's vertex (the two are joined with the default
   joint type shown in the tool options), a datum point, any position on the
-  sketch plane, or typed coordinates.
+  sketch plane (placed by the rule of §18.3, in 3-D mode too), or typed
+  coordinates.
 - The vertex is first made a dependent point of its link's rigidity (so the
   rest of the link keeps its shape), then released from its own shape
   constraints, every other constraint is re-solved, and the link's rest
@@ -494,7 +569,7 @@ status bar says so.
   pinned to a datum point, or its joints forbid it) nothing changes and the
   status bar says so. Joint helper attachments that depend on the moved vertex
   are released and rebuilt, so a hinged bar or panel can be lifted out of its
-  plane. Coincident vertices are joined with the same rules as the Sketch tool
+  plane. Coincident vertices are joined with the same rules as the Panel tool
   (shared edges become creases, replacing earlier pins; the edited link adapts
   when the edge lengths differ slightly; a refused re-solve of the automatic
   joints leaves the vertex moved but unjoined); a vertex dropped on a datum
@@ -517,8 +592,8 @@ sketch-plane constraint is copied only when the copy still lies on that plane.
   a datum plane; a mirror image is created (edge lengths preserved; the
   polygon's vertex order is kept).
 - **Pattern** (`P`): click a link (or select it in the model tree first), then
-  - *Linear array*: click two points defining the spacing vector; *Copies*
-    sets how many copies are added;
+  - *Linear array*: click two points defining the spacing vector (placed
+    like any free click, §18.3); *Copies* sets how many copies are added;
   - *Polar array*: click a datum axis (rotation about it) or a datum point /
     any position (rotation about the sketch-plane normal through it);
     *Copies* and *Total angle* (360° spreads copies evenly around the circle).
@@ -537,9 +612,12 @@ Joints are listed by their type letter and ends ("R · Link 1 ↔ Link 2");
 creases read "Crease M 160° · Panel 1 ↔ Panel 2", the fold angle and
 mountain / valley class following the construction pose (the entry updates
 when the angle changes by a degree or the class changes), and a fold driver on
-a crease reads "Crease · fold". Click selects (Drivers: makes it the active
-driver), hovering highlights the item in the viewport, double-click renames
-links and user datums. Hidden links are neither drawn nor pickable but still
+a crease reads "Crease · fold". The same description, with the type spelled
+out ("Revolute joint · Link 1 ↔ Link 2"), names a joint in the status bar
+and in the query cycle (§18.1). Click selects (Drivers: makes it the active
+driver), hovering highlights the item in the viewport (a datum plane or axis
+lights up for a row hover, unlike for the idle pointer, §7), double-click
+renames links and user datums. Hidden links are neither drawn nor pickable but still
 take part in the solve (useful for scaffolding geometry).
 
 ## 16. Out of scope for this prototype
@@ -576,7 +654,7 @@ matters. Then:
   lengths differ by more than floating-point noise (relative difference above
   1e-9, `CREASE_EXACT_TOLERANCE`) one panel takes the other's edge length: the
   link of the second-picked feature adapts unless it is ground or locked,
-  otherwise the first (when the Sketch or Edit tool joins coincident edges
+  otherwise the first (when the Panel or Edit tool joins coincident edges
   the link being sketched or edited is the one that adapts). The adapting
   link is first carried rigidly onto its partner and then only its shared
   edge changes length; its rest geometry is updated. No vertex moves by more
@@ -677,16 +755,22 @@ applied."; the Properties panel is rebuilt from the restored model, so the
 widget shows the model's value rather than the refused one and the next edit
 reaches the live model (this holds for every path that replaces the model
 while a widget has focus: a refusal, undo, redo, load). The automatic joining
-of the Sketch and Edit tools (§13) verifies its re-solve too: when it is not
-accepted, the polygon is created (or the vertex moved) unjoined.
+of the Panel, Polygon, Prism and Edit tools (§3.2, §13) verifies its re-solve
+too: when it is not accepted, the link is created (or the vertex moved)
+unjoined; the Panel, Polygon and Prism tools report the diagnosis ("The link
+was created, but its snapped vertices were not joined: …", §13.1), the Edit
+tool stays silent.
 
 **Internals.** `src/core/feasibility.ts`: `tryAddJoint` and
 `tryChangeJointType` (snapshot → edit → `solveSketchWithRelease` → accept, or
 `restore` + `diagnoseJoint`), `trySolveCommit` for the other edits,
 `linkPath` (breadth-first search over link–link joints; a joint between
 already connected links closes a loop, and the links on the shortest path are
-the loop the diagnoses look at), `sectorSumAt` / `interiorAngleDeg`,
-`closesWithout2d`, `adaptationLimit` / `isReleaseAccepted`.
+the loop the diagnoses look at), `sectorSumAt` / `interiorAngleDeg` over
+`mergedPointGroups` (the union-find over merged point pairs, shared since
+v0.4 with the crease-loop detection of §17.3, the Panel tool's sector
+preview of §18.2 and the validator of §18.4), `closesWithout2d`,
+`adaptationLimit` / `isReleaseAccepted`.
 `src/core/kinematics.ts`: `solveSketchWithRelease` (a rigid projection, then
 a projection warm-started from it with the design distances of the released
 end points freed, returning the rigid step and the `releaseDrift`),
@@ -719,7 +803,7 @@ presentation and its controls.
   rounded to whole degrees (180° = flat, 0° = fully closed).
 - **Mountain / valley convention.** Take the face normal of the crease's
   *first* panel given by its vertex winding (for panels drawn
-  counter-clockwise on the sketch plane, as the Polygon and Sketch tools draw
+  counter-clockwise on the sketch plane, as the Polygon and Panel tools draw
   them, this is the sketch-plane normal). The crease is a **valley** when the
   second panel is bent toward the side that normal points to (the panels form
   a trough seen from that side) and a **mountain** when it is bent away (a
@@ -861,9 +945,9 @@ self-contained. Fold handles one vertex per press (the first flat loop); a
 sheet with several flat vertices needs Fold once per vertex, and a vertex
 where more than one cycle of panels meets is not detected as a loop.
 
-**Internals.** `src/core/fold.ts`: `isCrease`, `findCreaseLoops` (union-find
-over merged points, a cycle walk over the panels, `collinearPairs` measured
-in the current pose), `loopNormal` (the construction plane of a loop panel
+**Internals.** `src/core/fold.ts`: `isCrease`, `findCreaseLoops`
+(`mergedPointGroups` over the merged points, a cycle walk over the panels,
+`collinearPairs` measured in the current pose), `loopNormal` (the construction plane of a loop panel
 when there is one, else the fitted vertex plane oriented along the active
 sketch normal), `prefoldVertex` (candidate order, both signs, the acceptance
 test, byte-for-byte restore on failure), `foldCreaseTo` (one forward solve
@@ -914,6 +998,15 @@ vertex drawn in 2-D reports DOF 0 although every crease is a hinge.
   released). The count is recomputed with the DOF after every edit. Hinges
   between edges of different length (slide-locked) and creases whose panels
   are on two different planes are not counted.
+- **Constant points** (since v0.4). The compiler holds a link kept on an
+  axis-aligned plane there by freezing coordinates, but a vertex merged with
+  a constant point — a ground vertex, a vertex pinned to a datum point — is
+  not a variable, and until v0.4 its distance from the plane was silently
+  dropped. It now counts as a residual without variable columns, like the
+  frozen–frozen rest distance of §17.5: a 2-D polygon pinned to a ground
+  vertex off its plane shows the mismatch in the DOF chip, and the pre-flight
+  solves see it (such a join is refused with the needs-3-D diagnosis instead
+  of reading a violation of 0).
 
 **Internals.** `setBodyPlane(m, linkId, planeId | null)` in
 `src/core/model.ts` adds, replaces or removes the body planar joint (drawing
@@ -934,8 +1027,9 @@ largest hard-constraint residual (`currentViolation`) is at most
 chip's "Constraints violated" flag uses this same tolerance (§6), so the chip
 warns exactly when the operations below refuse. A rest distance between two
 frozen points (both ends pinned, merged with the ground, or a locked link
-joined to the ground) counts like any other constraint: the chip shows its
-mismatch, the Length editor refuses a rest length a bar pinned at both ends
+joined to the ground) counts like any other constraint — as does, since
+v0.4, the sketch-plane constraint on a constant point (§17.4): the chip
+shows its mismatch, the Length editor refuses a rest length a bar pinned at both ends
 cannot take, and joining a 2.2-unit edge corner by corner to a 2.0-unit
 ground edge is refused as infeasible (gap 0.2).
 
@@ -958,7 +1052,7 @@ ground edge is refused as infeasible (gap 0.2).
   refreshes the rest geometry of released links only when the result is
   accepted, and tells the caller; every committing path (the Joint tool,
   joint type changes, the Length and Position editors, the drag release, the
-  2-D checkbox, the Sketch and Edit tools) verifies acceptance before
+  2-D checkbox, the Panel, Polygon and Edit tools) verifies acceptance before
   committing and rolls the model back otherwise (§17.1).
 
 **Deviation:** a violated pose is not solidified on Save; the file keeps the
@@ -966,3 +1060,300 @@ last consistent design together with the positions on screen, and the status
 bar says so. Copy / paste, mirror and pattern (§14) build a *new* link's
 rigidity from the visible geometry and are not guarded, since they never
 change an existing link's design.
+
+## 18. Construction workflow (added in v0.4)
+
+**Original:** "Creating … a 4 bar link, should be done by selecting a 'Link'
+tool, and clicking points in the 3D space"; "a UI similar to CAD software
+(such as Creo or Rhino)"; "Each vertex/surface/side should be able to be
+constrained with compatible constraints." The brief does not say how one of
+two coincident edges is picked, how a panel is attached to the panels already
+drawn, where a click lands in 3-D, or how a crease pattern is checked before
+it is folded. Phase 2 of [CONSTRUCTION_PLAN.md](CONSTRUCTION_PLAN.md) §5
+(items 2a–2d) answers the four; this section specifies the behaviour as
+implemented and names the deviations from the plan.
+
+### 18.1 Query pick: right-click cycles through everything under the pointer
+
+The single pick under the pointer (the hover) returns one feature, chosen by
+priority — editing points, vertices, joints and creases, edges, cylinder
+axes, faces, then datum geometry — among the hits within the pick tolerance
+of the nearest one; two coincident edges can therefore never both be reached
+by hovering, and the Joint tool kept finding the first link again. As with
+Creo's *query select*, a **right-click** now steps through the candidates.
+
+- **Query click.** A right-click counts as a query click when the pointer
+  never strayed more than 4 px (`QUERY_CLICK_PX`) from the press while the
+  button was down; a right-drag — even one that swings out and returns to
+  its start — orbits as before and starts no cycle. A right-click during a
+  left drag is ignored. The context menu stays suppressed.
+- **Candidates and their order.** The viewport collects every feature hit by
+  the exact pointer ray and by the ring of rays the normal pick samples
+  (radii 5 and 10 px, eight rays each), de-duplicates them (a feature hit by
+  several rays counts once, at its closest hit) and ranks them: model
+  features first, in **depth bands** — the nearest hit opens a band that
+  takes every feature within the pick depth tolerance (twice the pick radius
+  in world units) behind it, the next feature behind that opens the next
+  band, and so on — so a vertex far behind the panel under the pointer is
+  listed after that panel's features; within a band by pick priority,
+  exact-ray hits before ring hits, then nearest first; datum geometry last
+  (points, then axes, then planes). Datum geometry never occludes model
+  geometry.
+- **The cycle.** The first right-click highlights the first candidate that
+  is not the current hover, so it always shows something new; each further
+  right-click at the same spot advances and wraps around. The candidate
+  replaces the hover (the usual highlight; the hovered edge or face of a
+  polygon or prism is lit more strongly than the rest of its link, and datum
+  axes and planes light up in the selection colour) and the status bar reads
+  "2 of 3 · edge V0-V1 of Polygon 2 · right-click: next · left-click: use it
+  · Esc: stop" (a lone candidate: "1 of 1 · … · the only feature here ·
+  left-click: use it"; nothing under the pointer: "Nothing under the pointer
+  to cycle through."). A joint or crease is described exactly as the model
+  tree describes it ("Crease V 146° · Panel 1 ↔ Panel 2", "Revolute joint ·
+  Link 1 ↔ Link 2"), a datum by its name.
+- **Using and leaving it.** A left-click while the cycle is active uses the
+  highlighted candidate as the pick of the active tool — Select, Joint, Edit,
+  Ground, Driver, Delete, Mirror, Pattern, and the vertex / datum-point snap
+  of the creation and Panel tools all read the same pick — so any feature
+  under the pointer can be chosen; afterwards the status bar shows the plain
+  description of the feature used unless the tool writes its own status (the
+  Joint tool does). A candidate that no longer exists (deleted or undone
+  meanwhile) is ignored and the normal pick is used. Pointer motion within
+  4 px keeps the highlighted candidate and the tool's preview follows it;
+  moving farther, the pointer leaving the viewport (status cleared), the
+  first `Esc` (a second `Esc` cancels the tool), a tool switch, undo / redo
+  and any model replacement (New, Open, an example) end the cycle, and the
+  normal hover, its description in the status bar and the active tool's
+  preview (snap ring, marker, polyline, labels) return.
+- **Highlighting datums.** Datum planes and axes are highlighted only for a
+  hover the user asked for — the query cycle or a model-tree row — because
+  the plain pointer rests on the sketch plane wherever the canvas is empty
+  (the status bar names it; nothing lights up).
+- **Joint tool.** When the second click's feature belongs to the first link
+  again, the best-ranked compatible feature of another link in the front
+  depth band is used and the status says so (§5); a feature named through
+  the cycle is never substituted.
+
+Acceptance (plan 2a): two triangles with exactly coincident edges are joined
+through the UI by left-click, right-click ("2 of N", the other polygon's
+edge), left-click → "Joint created" and one crease; a 60 px right-drag still
+orbits, in the Top view too.
+
+**Deviation / note:** the plan ordered candidates by priority and distance
+only; depth bands were added so that hidden geometry is not offered before
+the panel under the pointer (with a tolerance larger than the depth spread
+the ranking degenerates to priority, then distance). The plan ended the cycle
+on pointer movement and `Esc`; leaving the viewport, a tool switch, undo /
+redo and a model replacement end it as well, and `Esc` ends only the cycle
+first so that a Joint tool with its first feature picked is not reset. The
+single pick (hover) is unchanged. The orbit controls are rebuilt whenever a
+view changes the camera's up vector, which lets a right-drag orbit out of the
+Top view (previously it sat at the pole of a Z-up frame); orbiting out of the
+Top view keeps Y as screen-up until another view is chosen.
+
+**Internals.** `src/viewport/pickRank.ts` (DOM-free: `PickResult` with
+`exact`, `sub`, `band` and `queried`, `PICK_PRIORITY`, `pickKey` /
+`samePick` — the feature identity includes the point ids and the face index,
+since every edge and face of a polygon carries the same link id —
+`rankPickCandidates`), `src/viewport/pickCycle.ts` (`PickCycle`, the state
+machine, `QUERY_CLICK_PX`), `Viewport.pickCandidates` / `castAll`
+(`src/viewport/scene.ts`; the `query` pointer event is emitted before the
+matching `up`), `ToolManager.queryClick` / `endCycle` / `endQuery` /
+`otherLinkCandidate` (`src/viewport/tools.ts`), `src/ui/labels.ts`
+(`jointDescription`, shared by the tree, the status bar and the cycle), the
+hover highlights in `src/viewport/render.ts`. `App.setHover` compares the
+full feature identity (`pickKey`), so stepping between the edges of one link
+re-renders.
+
+### 18.2 Panel tool: sector-angle feedback and the overlap refusal
+
+The Sketch tool is presented as **Panel (sketch polygon)**: its job is to
+build an origami vertex panel by panel onto the vertices already there, so
+that shared edges become creases without the Joint tool (§13.1 specifies the
+joins; the Polygon and Prism tools join their coincident vertices the same
+way, §3.2). While a panel is drawn the tool shows whether the panels around
+each shared vertex can lie flat.
+
+- **Sector-angle labels.** From the second placed vertex on (a polyline of at
+  least three points, the cursor included), every sketch vertex that sits on
+  an existing vertex — snapped, typed or grid-snapped onto it, the vertex
+  under the cursor included when it is snapped — carries a label "S° (+A°)",
+  one decimal each: A is the angle the new panel adds at that vertex between
+  its two adjacent sketch edges (the open edge follows the cursor), measured
+  as the true interior angle about the sketch's winding normal, so a reflex
+  corner of an L-shaped panel counts 270°; S is A plus the sum of the
+  interior angles of every existing polygon or prism that has a vertex there
+  (joined through creases or pins, or merely coincident; bars have no sector
+  angle). The label is **green** ("closes at 360°") when both adjacent sketch
+  edges coincide with existing panel edges at that vertex, i.e. the panel
+  completes the ring, and S is within 0.5° of 360° (the sector tolerance of
+  §17.1); **red** when S exceeds 360.5°, when the ring closes at any other
+  sum, or when the corner is collinear (a straight or zero corner, since such
+  a panel is refused as degenerate); neutral (white) otherwise. No label is
+  shown at a vertex whose adjacent edge has zero length, nor for a cursor
+  resting on the first vertex (about to close the panel); labels are shown
+  whatever *Show labels* says and are drawn above the datum and link-name
+  labels, and a datum point's name label is omitted while a sector label
+  sits at that point (ORIGIN under a closing vertex).
+- **Overlap refusal.** In a plane the corners of the panels around a vertex
+  tile exactly 360°, so a red label at a shared vertex while the sketch and
+  every existing panel around that vertex lie in one plane means the new
+  panel would overlap its neighbours. On closing, such a panel is not
+  created: the status bar and the Mechanism-panel notice read "Panel not
+  created: the corner angles of the panels around vertex T1 V0, this one
+  included, add up to 300.0°, not 360°, so in this plane they would overlap.
+  Change the panel's shape (Backspace removes the last vertex), or build the
+  vertex in its folded shape by sketching onto vertices out of the plane.
+  Nothing was changed.", the sketch is kept for correction and nothing
+  changes. A ring that closes at another sum in 3-D — the fourth face of a
+  square pyramid, four 60° sectors, 240° — shows the red label too but is
+  joined, since it is a legitimate folded vertex. A straight or zero corner
+  is refused as degenerate before the overlap test ("Three consecutive
+  vertices are collinear …").
+- **Examples.** Three developable triangles (60°, 60°, 120°) flat on the
+  sketch plane and the fourth panel drawn onto the centre and the two free
+  corners: the centre label reads "360.0° (+120.0°)" in green while the
+  cursor rests on the closing vertex, and closing gives two creases ("Joint
+  created (2)"), four creases in all, DOF 0 with the locked-creases hint and
+  the Fold button (§17.3). Three regular triangles in a flat fan and a fourth
+  continuing it: a neutral "240.0° (+60.0°)" with the ring still open, one
+  crease; the only fourth regular triangles that close the ring in the plane
+  are degenerate (a straight corner: red, refused as collinear) or overlap
+  the fan (a 300° label, refused with the message above). Four regular
+  triangles therefore cannot form a flat vertex, which §17.1's Joint-tool
+  acceptance states from the other side.
+
+**Deviation / note:** the plan expected "four regular triangles show a red
+label at the centre on the fourth panel and the join is refused with the
+sector message". In a plane a closed ring always sums to 360°, so the fourth
+regular triangle either continues the fan (neutral 240°, joined) or overlaps
+the fan (red, refused by the overlap rule above); the sector-message refusal
+of a non-developable *closed* vertex remains the Joint tool's (§17.1), and a
+red closed-ring label arises only in 3-D. The plan's "snapped or typed" join
+is implemented through one coincidence tolerance shared with the automatic
+join (`coincidenceTolerance`); the colours use the 0.5° sector tolerance of
+the joint diagnoses, and the validator of §18.4 reads the same sum once the
+panel exists.
+
+**Internals.** `src/core/sector.ts` (`sectorPreview`: the merged-point group
+of the vertex plus merely coincident vertices, `interiorAngleDeg` per panel,
+the signed corner about the Newell normal of the sketch, `closesRing` as a
+positional test on existing panel edges; `sectorStatus`; `sketchSectors`
+with its `coplanar` flag — the one computation behind the labels and the
+refusal), `src/core/edit.ts` (`coincidenceTolerance`, `coincidentVertex`,
+`autoJoinCoincident` returning `{ joints, refused }` with the diagnosis of
+§17.1 made on the rigid step before the model is restored, `edgeCreased`),
+`ToolManager.withCoincidence` / `sectorLabels` / `finishSketch`
+(`src/viewport/tools.ts`), the `labels` of `OverlayView` drawn with a higher
+render order (`src/viewport/render.ts`), the `OVERLAY.sectorSum`,
+`STATUS.sketchRefusedSector` and `STATUS.autoJoinRefused` strings.
+
+### 18.3 3-D placement on the sketch plane
+
+Until v0.3 a free click with *Place on sketch plane (2-D)* unticked landed
+on the view-aligned plane through the previous point, at a depth that
+depended on the camera, so geometry built in 3-D mode was rarely where it
+looked. Now:
+
+- In both modes a free click is placed where the pointer ray meets the
+  active sketch plane. With the option ticked the link is also kept there by
+  the 2-D constraint (§17.4); unticked, it is built on the plane but free to
+  leave it.
+- The view-aligned plane through the previous point (through the origin
+  before the first point) is the fallback only when the ray makes less than
+  about 8.6° with the sketch plane (|cos| < 0.15, `PLACEMENT_MIN_COS`; a
+  grazing ray would fling the point far across the plane), when it misses
+  the plane (parallel, or the hit behind the camera), or when it meets the
+  plane at the camera itself — in the Front and Right views the camera lies
+  on the TOP plane, so every off-centre ray hits it at depth 0 ("at the
+  camera" is a depth below a thousandth of the fallback's depth, the
+  distance the user is working at). With the option ticked, and for the
+  datum and Panel tools, which always use the sketch plane, grazing rays
+  still land on it: only a miss or a hit at the camera falls back, so
+  off-centre clicks in the Front view make points on the view plane instead
+  of at the camera (previously nothing usable was created).
+- Typed coordinates, grid snapping, a pending length ("L" then click) and
+  snapped vertices / datum points are unchanged; grid snap and the pending
+  length are applied to the placed position as before.
+- The option is one setting shared by every click-placed tool, so the Prism
+  and Cylinder tools, the destination of the Edit tool and the spacing points
+  of the Pattern tool follow the same rule (previously the view plane when
+  the option was off). The option row's tooltip explains the two modes.
+
+**Deviation / note:** the plan said "the view plane is used only when the
+ray grazes the sketch plane"; a miss and a hit at the camera were added as
+fallback cases, and the grazing threshold is 0 in 2-D mode. §3.1's former
+"otherwise on a view-aligned plane through the previous point" is superseded.
+The free-vertex placement of the Panel tool on a fitted plane (§13.1) is the
+same rule with the same threshold and the orthogonal projection as its
+fallback.
+
+**Internals.** `placementOnPlane(ray, origin, normal, fallback, minCos)` and
+`PLACEMENT_MIN_COS` in `src/core/edit.ts` (`placeOnFittedPlane` is built on
+it); `ToolManager.place` computes the pointer ray once and passes the
+view-plane hit as the fallback (`src/viewport/tools.ts`);
+`TOOL_OPTIONS.mode2dHelp` in `src/ui/strings.ts`.
+
+### 18.4 Crease-pattern validator
+
+**Interior vertex.** A merged vertex whose panels close a ring of creases:
+exactly a crease loop of §17.3 (at least three creases, each panel carrying
+two of them, one cycle). Open fans, bars and loops that run through a bar or
+a cylinder axis (which have no sector angle) are not reported.
+
+**The checks.** For each interior vertex the Mechanism panel's summary shows,
+in every mode under the DOF readout, the hints and the Fold button, a
+**Crease pattern** block (its tooltip explains the checks) with one line per
+vertex:
+
+> Polygon 1 V0 · 4 panels · 360.0° developable ✓ · Kawasaki 0.0° ✓ · M/V 3:1 ✓
+
+- The vertex is named by the loop's vertex point, on the ground panel when
+  one is in the ring; *n panels* is its degree.
+- **Developable**: the sum S of the panels' interior angles at the vertex
+  (one decimal) is within 0.5° of 360°, so the panels can lie flat in a
+  plane (a pyramid apex sums to less, a saddle to more).
+- **Kawasaki**: the magnitude K of the alternating sum α₁ − α₂ + α₃ − … of
+  the sector angles in the cyclic order of the loop is within 0.5° of 0°,
+  the condition for a vertex of even degree to fold flat; a vertex of odd
+  degree never folds flat and reads "Kawasaki ✗ odd degree".
+- **M/V**: the numbers of mountain and valley creases, read from the
+  construction pose in the convention of §17.2; "M/V not assigned" while any
+  crease of the loop is flat (within 1° of 180°) or unmeasurable, otherwise
+  checked against **Maekawa**'s condition |M − V| = 2.
+
+Each check is independent: a square-pyramid apex (four equilateral faces)
+reads "240.0° developable ✗ · Kawasaki 0.0° ✓ · M/V 4:0 ✗"; a vertex folds
+flat only when it is developable and passes Kawasaki. A line whose vertex
+fails a check is drawn in the warning colour and followed by a hint naming
+each failed check with its measured value: "D1 V0: its sector angles sum to
+240.0°, not 360°, so the panels cannot lie flat; it has 4 mountain and 0
+valley creases; a flat-folded vertex needs them to differ by two (Maekawa).",
+"…: the alternating sum of its sector angles is 20.0°, not 0°, so it cannot
+fold flat (Kawasaki).", "…: 3 creases meet there, an odd number, so it cannot
+fold flat." Examples: the developable vertex (60°, 60°, 120°, 120°) built
+flat reads "360.0° developable ✓ · Kawasaki 0.0° ✓ · M/V not assigned" and
+after Fold "… M/V 3:1 ✓" (or 1:3); the X vertex passes both angle checks and
+keeps "M/V not assigned", since it cannot be pre-folded; the Miura example
+reads "Panel 1 V0 · 4 panels · 360.0° developable ✓ · Kawasaki 0.0° ✓ · M/V
+3:1 ✓"; a (90°, 90°, 60°, 120°) vertex is developable with Kawasaki off by
+60°, and (90°, 90°, 100°, 80°) by 20°.
+
+The reports are recomputed with the DOF after every change and are not part
+of the model tree or the file.
+
+**Deviation / note:** the plan asked for the Kawasaki condition "as
+flat-foldability"; the report's `flatFoldable` is the Kawasaki test alone
+(even degree and |alternating sum| ≤ 0.5°) and developability is a separate
+mark, so the two are never conflated in one verdict. The plan's example of a
+Kawasaki failure, (90°, 90°, 60°, 120°), has an alternating sum of 60°, not
+the 20° its text stated; both figures are tested. Odd-degree vertices are
+reported (NaN alternating sum, not flat-foldable), and loops through bars or
+cylinder axes are skipped rather than shown with a missing sector.
+
+**Internals.** `src/core/validate.ts` (`validateCreasePattern(m, tolDeg =
+0.5)` → `VertexReport[]` over `findCreaseLoops`, `interiorAngleDeg` and
+`creaseMV`; `kawasakiSumDeg`), `SimState.vertexReports` (`src/app.ts`,
+cached with the DOF), the block at the end of the Mechanism summary
+(`src/ui/panels.ts`), `SIM.vertexReport` / `SIM.vertexFails` /
+`SIM.creasePatternHelp` (`src/ui/strings.ts`).

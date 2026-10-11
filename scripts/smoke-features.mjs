@@ -464,9 +464,10 @@ const left20b = await page.evaluate(() => { const { app, tools } = window.linkag
 const ok20b = /^2 of/.test(cycled20b) && !after20b.cycling && !/^\d+ of \d+ · /.test(after20b.status) && !/left-click: use it/.test(after20b.status) && after20b.selection !== null && !left20b.cycling && left20b.status === '' && left20b.hover === null;
 console.log('cycle instructions leave the status bar with the click and with the pointer', JSON.stringify({ cycled: cycled20b.slice(0, 30), afterClick: after20b, afterLeave: { status: left20b.status, cycling: left20b.cycling } }), ok20b ? 'OK' : 'FAIL');
 // 20c. The TOP datum plane is hovered wherever the canvas is empty, which must not colour it (the hover is silent);
-//      a right-click query on it is an explicit choice and lights it in the selection colour.
+//      a right-click query on it is an explicit choice and lights it in the selection colour. The spot is clear of the
+//      RIGHT and FRONT planes, which the perspective top view projects as wedges over x < 0 and y > 0.
 const planeMat = () => page.evaluate(() => { const { app } = window.linkageDesigner; const mesh = app.viewport.groups.construction.children.find((o) => o.userData?.id === 'plane_top' && o.userData.plane); return mesh ? { color: '#' + mesh.material.color.getHexString(), opacity: mesh.material.opacity, hover: app.hover?.id ?? null, queried: !!app.hover?.queried } : null; });
-const empty20c = await W([-0.5, -3, 0]);
+const empty20c = await W([2.5, -3.5, 0]);
 await page.mouse.move(empty20c.x, empty20c.y);
 await page.waitForTimeout(300);
 const idle20c = await planeMat();
@@ -501,12 +502,15 @@ const o20e = await W([1.5, 0.8, 0]);
 await page.mouse.move(o20e.x, o20e.y);
 await page.mouse.down({ button: 'right' });
 for (let i = 1; i <= 6; i++) { await page.mouse.move(o20e.x + i * 10, o20e.y + i * 2); await page.waitForTimeout(40); }
+// the orbit is measured at the far end of the swing: the way back undoes it, so the camera ends where it started
+const camFar20e = await page.evaluate(() => window.linkageDesigner.app.viewport.camera.position.toArray());
 for (let i = 5; i >= 0; i--) { await page.mouse.move(o20e.x + i * 10, o20e.y + i * 2); await page.waitForTimeout(40); }
 await page.mouse.up({ button: 'right' });
 await page.waitForTimeout(300);
 const drag20e = await page.evaluate(() => { const { app, tools } = window.linkageDesigner; return { cam: app.viewport.camera.position.toArray(), status: app.status, cycling: tools.queryActive }; });
-const orbited20e = Math.hypot(...[0, 1, 2].map((i) => drag20e.cam[i] - camBefore20e[i]));
-console.log('out-and-back right-drag: orbited, no query cycle', JSON.stringify({ cameraMoved: +orbited20e.toFixed(3), cycling: drag20e.cycling, status: drag20e.status.slice(0, 40) }), orbited20e > 1e-3 && !drag20e.cycling && !/^\d+ of \d+ · /.test(drag20e.status) ? 'OK' : 'FAIL');
+const orbited20e = Math.hypot(...[0, 1, 2].map((i) => camFar20e[i] - camBefore20e[i]));
+const returned20e = Math.hypot(...[0, 1, 2].map((i) => drag20e.cam[i] - camBefore20e[i]));
+console.log('out-and-back right-drag: orbited and came back, no query cycle', JSON.stringify({ cameraMovedMidDrag: +orbited20e.toFixed(3), cameraOffAtEnd: +returned20e.toFixed(3), cycling: drag20e.cycling, status: drag20e.status.slice(0, 40) }), orbited20e > 1e-3 && returned20e < 1e-3 && !drag20e.cycling && !/^\d+ of \d+ · /.test(drag20e.status) ? 'OK' : 'FAIL');
 // 21. 3-D placement (plan 2c): with "Place on sketch plane (2-D)" unticked, a bar clicked at two screen points in the
 //     default (isometric-ish) view still gets both ends on the sketch plane TOP (z = 0), under the clicked points, but
 //     carries no 2-D constraint (previously the ends landed on the view plane through the origin / previous point,
@@ -564,9 +568,11 @@ const status23 = await waitStatus(/Joint created/);
 await page.waitForTimeout(300);
 const poly23 = await page.evaluate(() => { const { app } = window.linkageDesigner; const m = app.model; const l = Object.values(m.links).find((x) => x.kind === 'polygon'); if (!l) return null; const pts = l.pointIds.map((id) => [...m.points[id].pos]); return { pts, bodyJoints: Object.values(m.joints).filter((j) => j.a.kind === 'body' && j.a.linkId === l.id).length, joints: Object.values(m.joints).filter((j) => j.a.kind !== 'body').map((j) => j.type), violation: app.sim.violation }; });
 const onVertex23 = !!poly23 && poly23.pts.some((p) => Math.hypot(p[0] - topVertex23[0], p[1] - topVertex23[1], p[2] - topVertex23[2]) < 1e-6);
-const tilted23 = !!poly23 && poly23.pts.some((p) => Math.abs(p[2]) > 0.1) && poly23.pts.some((p) => Math.abs(p[2]) < 1e-6);
+// a regular polygon's centroid is its centre, clicked on the sketch plane (z = 0); the vertices then spread above and below it
+const centroidZ23 = poly23 ? poly23.pts.reduce((s, p) => s + p[2], 0) / poly23.pts.length : NaN;
+const tilted23 = !!poly23 && Math.abs(centroidZ23) < 1e-6 && Math.max(...poly23.pts.map((p) => Math.abs(p[2]))) > 0.1;
 const ok23 = /Joint created \(1\)/.test(status23) && /no 2-D constraint/.test(status23) && onVertex23 && tilted23 && poly23.bodyJoints === 0 && poly23.joints.length === 1 && poly23.violation < 1e-8;
-console.log('polygon snapped to an off-plane vertex in 2-D mode: tilted to meet it, joined, no 2-D constraint', JSON.stringify({ status: status23.slice(0, 120), onVertex: onVertex23, tilted: tilted23, bodyJoints: poly23?.bodyJoints, joints: poly23?.joints, violation: poly23?.violation }), ok23 ? 'OK' : 'FAIL');
+console.log('polygon snapped to an off-plane vertex in 2-D mode: tilted to meet it, joined, no 2-D constraint', JSON.stringify({ status: status23.slice(0, 120), onVertex: onVertex23, tilted: tilted23, sides: poly23?.pts.length, centroidZ: +centroidZ23.toFixed(6), bodyJoints: poly23?.bodyJoints, joints: poly23?.joints, violation: poly23?.violation }), ok23 ? 'OK' : 'FAIL');
 await page.screenshot({ path: `${OUT}/15-polygon-off-plane.png` });
 console.log('errors:', errors.length ? errors.join('\n') : 'none');
 await browser.close();

@@ -7,8 +7,9 @@
 import { describe, expect, it } from 'vitest';
 import type { App, ToolName } from '../src/app';
 import { rayPlane } from '../src/core/edit';
-import { dist, normalize } from '../src/core/geometry';
-import { addBar, addPolygonFromPoints, createModel, parseModel, serializeModel, setGround } from '../src/core/model';
+import { dist, dot, normalize, scale, sub } from '../src/core/geometry';
+import { addBar, addPolygonFromPoints, addPrism, bodyPlaneJoint, createModel, parseModel, serializeModel, setGround } from '../src/core/model';
+import { currentViolation } from '../src/core/kinematics';
 import { autoJoinCoincident } from '../src/core/edit';
 import type { ID, Link, Model, Vec3 } from '../src/core/types';
 import { LINK_NAMES, STATUS } from '../src/ui/strings';
@@ -386,5 +387,71 @@ describe('placement in 2-D mode from a camera on the sketch plane (Front view)',
     expect(ends[0][2]).toBeCloseTo(-0.6, 6);
     expect(ends[1][0]).toBeCloseTo(2, 6);
     expect(ends[1][2]).toBeCloseTo(-1, 6);
+  });
+});
+
+describe('Polygon tool in 2-D mode with its circumcircle point snapped to a vertex off the sketch plane', () => {
+  /** A grounded or free unit prism on TOP; the polygon's centre is clicked on the plane and its first vertex snapped to a top vertex (z = 1). */
+  function draw(ground: boolean) {
+    const m = createModel();
+    const prism = addPrism(m, [0, 0, 0], [0, 0, 1], 1, 4, 1);
+    if (ground) setGround(m, prism.id);
+    const topId = prism.pointIds[4];
+    const top = [...m.points[topId].pos] as Vec3;
+    expect(top[2]).toBeCloseTo(1, 9);
+    const { app, vp, tools } = fakeApp(m);
+    tools.setTool('polygon');
+    expect(app.toolOptions.mode2d).toBe(true);
+    const c: Vec3 = [3, 0, 0];
+    const sc = vp.worldToScreen(c);
+    tools.handle(ev('down', sc.x, sc.y, null));
+    const st = vp.worldToScreen(top);
+    tools.handle(ev('down', st.x, st.y, vertexOf(m, prism, 4)));
+    const poly = Object.values(app.model.links).find((l) => l.kind === 'polygon')!;
+    return { m: app.model, app, prism, poly, c, top, topId };
+  }
+
+  it('tilts the polygon to meet the snapped vertex exactly, joins it there and drops the 2-D constraint, saying so', () => {
+    const { m, app, poly, c, top } = draw(true);
+    expect(poly).toBeDefined();
+    expect(bodyPlaneJoint(m, poly.id)).toBeNull(); // no "Keep on sketch plane" joint on a tilted polygon
+    expect(dist(m.points[poly.pointIds[0]].pos, top)).toBeLessThan(1e-9);
+    const pins = Object.values(m.joints).filter((j) => j.a.kind === 'vertex');
+    expect(pins.length).toBe(1);
+    expect(pins[0].type).toBe('spherical');
+    expect(app.status).toBe(`${STATUS.jointCreated} (1) · ${STATUS.sketchOffPlane}`);
+    expect(currentViolation(m)).toBeLessThan(1e-9);
+    // the polygon's plane passes through the centre and the snapped vertex, and is the one closest to the sketch plane
+    const pts = poly.pointIds.map((id) => m.points[id].pos);
+    const e = normalize(sub(top, c));
+    const n = normalize(sub([0, 0, 1], scale(e, e[2])));
+    for (const p of pts) expect(Math.abs(dot(sub(p, c), n))).toBeLessThan(1e-9);
+    expect(pts.some((p) => Math.abs(p[2]) > 0.1)).toBe(true);
+    // the ground stayed where it was: nothing was pulled towards the polygon
+    for (const p of pts) expect(dist(p, c)).toBeCloseTo(dist(top, c), 9);
+    expect(m.points[poly.pointIds[0]].pos[2]).toBeCloseTo(1, 9);
+  });
+
+  it('does the same on a free prism, which is not dragged out of shape by the join', () => {
+    const { m, prism, poly, top } = draw(false);
+    expect(bodyPlaneJoint(m, poly.id)).toBeNull();
+    expect(dist(m.points[poly.pointIds[0]].pos, top)).toBeLessThan(1e-9);
+    for (const id of prism.pointIds.slice(4)) expect(m.points[id].pos[2]).toBeCloseTo(1, 9);
+    for (const id of prism.pointIds.slice(0, 4)) expect(m.points[id].pos[2]).toBeCloseTo(0, 9);
+    expect(currentViolation(m)).toBeLessThan(1e-9);
+  });
+
+  it('a snapped vertex on the sketch plane keeps the 2-D constraint as before', () => {
+    const m = createModel();
+    const bar = addBar(m, [3, 0, 0], [5, 0, 0], { onPlaneId: 'plane_top' });
+    const { app, vp, tools } = fakeApp(m);
+    tools.setTool('polygon');
+    const sc = vp.worldToScreen([2, 0, 0]);
+    tools.handle(ev('down', sc.x, sc.y, null));
+    const sv = vp.worldToScreen([3, 0, 0]);
+    tools.handle(ev('down', sv.x, sv.y, vertexOf(m, bar, 0)));
+    const poly = Object.values(app.model.links).find((l) => l.kind === 'polygon')!;
+    expect(bodyPlaneJoint(app.model, poly.id)).not.toBeNull();
+    expect(app.status).toBe(`${STATUS.jointCreated} (1)`);
   });
 });

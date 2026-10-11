@@ -3,7 +3,7 @@
 This document records *why* the prototype is built the way it is. The
 feature-level behaviour is specified in [SPEC.md](SPEC.md); the original brief
 is in [ORIGINAL_SPEC.md](ORIGINAL_SPEC.md); the diagnosis and plan behind the
-v0.3 joining / folding work are in
+v0.3 joining / folding work and the v0.4 construction workflow are in
 [CONSTRUCTION_PLAN.md](CONSTRUCTION_PLAN.md).
 
 ## 1. Point-based constraint formulation (the "Crane" idea)
@@ -206,9 +206,55 @@ damping dynamics.
   in `localStorage`. Defaults live in `src/ui/settings.ts`. Creases follow the
   origami convention of red mountain / blue valley (Lang 2018; the Origami
   Simulator of Ghassaei et al.), configurable like every other colour.
+- **Right-click query select (v0.4).** Where edges or vertices coincide —
+  two panels drawn edge on edge, the vertex a fan of panels shares — one
+  pick per pointer position cannot reach every feature, and the Joint tool
+  kept finding the first link again. Creo resolves this with *query select*:
+  the pointer pre-highlights one candidate, right-clicking steps through the
+  others, and the left-click confirms. That convention was chosen over
+  Rhino's pop-up selection menu because it keeps the eye on the geometry,
+  needs no extra widget and composes with every tool (all of them read the
+  same pick), and because the right button is already the orbit button, so a
+  click without a drag is free. Candidates are ranked in depth bands (the
+  rule the single pick already used, applied to successive bands) rather
+  than by priority alone, so a vertex hidden behind the panel under the
+  pointer is offered after that panel's features; datum geometry comes last
+  and lights up only when named through the cycle or the model tree, since
+  the idle pointer rests on the sketch plane wherever the canvas is empty and
+  a highlighted sketch plane floods the view. The Joint tool's substitution
+  of a feature on another link is confined to the front band: a mis-click on
+  the first link must never silently join to geometry behind the clicked
+  panel, while the cycle still reaches it.
+- **Free clicks land on the sketch plane in 3-D mode too (v0.4).** The
+  view-aligned plane through the previous point put 3-D geometry at a depth
+  that depended on the camera, so a bar built in the default view floated
+  above the grid it seemed to be drawn on. CAD sketching happens on a plane;
+  the 2-D option now only decides whether the link is *kept* there. The view
+  plane remains the fallback for a ray that grazes the sketch plane
+  (|cos| < 0.15: a pixel of pointer motion would sweep the point far across
+  the plane), misses it, or meets it at the camera, which the Front and
+  Right views of the TOP plane do for every off-centre ray.
+- **Panels are built onto existing vertices, with live sector-angle
+  feedback (v0.4).** Option D of CONSTRUCTION_PLAN.md §4: a panel sketched
+  onto the vertices already there needs no loop closure by the Joint tool,
+  so the Sketch tool is presented as *Panel* and joins every coincident
+  vertex, typed or snapped, under one coincidence tolerance (1e-6 of the
+  model size, which separates floating-point noise from a near miss by many
+  orders of magnitude). The label at a shared vertex shows the running sector
+  sum in the user's terms (degrees; green at 360°, red when the panels cannot
+  lie flat), and a panel that would overlap its neighbours in their plane is
+  refused with the vocabulary of the Joint tool's sector message, so the
+  impossibility of four regular triangles is seen on the fourth panel rather
+  than at the fourth joint.
+- **The crease-pattern checks live in the Mechanism panel** next to the DOF
+  readout, as plain lines with ✓ / ✗ and the measured numbers, because they
+  are properties of the current geometry recomputed with the DOF, not model
+  data; each classical condition (developability, Kawasaki, Maekawa; Hull
+  1994) is reported on its own, so a pyramid apex reads "developable ✗ ·
+  Kawasaki 0.0° ✓" rather than one opaque verdict.
 - All strings live in `src/ui/strings.ts`.
 
-## 8. Lessons from testing (v0.2 and v0.3)
+## 8. Lessons from testing (v0.2 – v0.4)
 
 **Degree-4 vertex example (Miura).** The first version used sector angles
 (α, π−α, α, π−α), which makes *both* crease pairs collinear: an "X" vertex,
@@ -380,6 +426,64 @@ assignment on the folded pose, so a preference on a collinear crease, which
 is never driven first, is honoured through the sign of the crease that is
 driven; contradictory preferences on the bent pair are refused.
 
+**Picking coincident features (v0.4).** Two lessons from the query cycle.
+First, the identity of a pickable feature must include its point ids and
+face index: every edge and face of a polygon carries the same link id, so a
+hover comparison on type and id alone collapsed all edges of one panel into
+one candidate and the cycle appeared not to move. Second, "the nearest
+feature wins" and "priority wins within the depth tolerance" are one rule
+applied once; applied to successive depth bands it ranks every hit along the
+ray without offering hidden geometry before the panel under the pointer. A
+right-click is a drag as soon as the pointer has strayed beyond 4 px at any
+time while the button was down — an orbit that swings out and returns to its
+press position must not start a cycle — so the excursion is tracked, not the
+end position.
+
+**The camera can sit on the sketch plane (v0.4).** The Front and Right views
+look along the TOP plane with the camera *on* it, so every off-centre ray
+meets the plane at parameter 0: a mathematically valid hit at the camera,
+which `rayPlane` and three's `intersectPlane` both accept. Placing points
+there produced geometry at the eye, invisible and unusable. A hit now counts
+as a miss when its depth is below a thousandth of the working distance (the
+depth of the view-plane fallback), a relative threshold that scales with the
+model. Related: OrbitControls fixes its orbit axis to the camera's up vector
+when it is created, so the Top view, whose up vector is Y, sat at the pole of
+a Z-up frame where a sideways right-drag could not orbit; the controls are
+rebuilt whenever a view changes the up vector.
+
+**A closed ring in a plane always sums to 360° (v0.4).** The plan expected a
+red sector label and a refused join when the fourth regular triangle closes
+the flat fan; but in a plane the corner angles around a vertex tile exactly
+360°, so a fourth regular triangle either continues the fan (240°, ring
+open) or overlaps it. A red closed-ring label is therefore a 3-D phenomenon
+(the apex of a square pyramid, 240°), the plane case is an *overlap* and is
+refused as such, and the test for the former uses exact 3-D geometry. Two
+corrections fell out of the same scrutiny: the corner the new panel adds must
+be the signed interior angle about the sketch's winding normal (an L closing
+the ring around a square has a 270° corner, which the unsigned angle reads as
+90° and colours red), and an edge is a crease between two panels only — the
+automatic join put a second crease on an edge that already was one when a
+third panel was laid on it.
+
+**Constraints without variable columns, again (v0.4).** The sketch-plane
+constraint of a 2-D link is compiled into frozen coordinates, but a vertex
+merged with a constant point (a ground vertex, a datum-point pin) is not a
+variable, and its distance from the plane was dropped: a 2-D polygon pinned
+to a ground vertex off its plane read violation 0 and the pre-flight solve
+accepted it. The cure is the one of "Never commit a non-converged pose"
+above: emit the residual without columns so that the chip and every verified
+edit see it. The Polygon tool now treats a snapped off-plane vertex as
+authoritative instead (the polygon tilts to meet it and carries no 2-D
+constraint), so the refusal is rarely reached.
+
+**Check the plan's arithmetic (v0.4).** The plan's example of a Kawasaki
+failure, sectors (90°, 90°, 60°, 120°), has an alternating sum of 60°, not
+the 20° its text stated; the test asserts 60° and adds (90°, 90°, 100°, 80°)
+for a 20° defect. Headless steps were wrong before the code was, too: an
+"empty" spot of the canvas lay inside the perspective wedge of the RIGHT
+plane, and an out-and-back orbit returns the camera to its start, so the
+orbit has to be measured mid-drag.
+
 ## 9. Known limitations (prototype)
 
 - Patterning copies one link at a time; joints between copies are not
@@ -407,6 +511,23 @@ driven; contradictory preferences on the bent pair are refused.
 - Mountain / valley classes of creases whose first panel is a bar or a
   cylinder use the cross-product normal of the stored edge, so they can flip
   with the edge direction.
+- The query cycle lists what the exact ray and a 10 px ring of rays hit; a
+  feature farther from the pointer is not offered. The Joint tool's
+  other-link substitution looks only in the front depth band and never at
+  datum geometry.
+- The Panel tool's sector labels appear only at sketch vertices that sit on
+  existing vertices, and the overlap refusal applies only while the sketch
+  and the panels around the vertex are coplanar (a red closed ring in 3-D is
+  joined as a folded vertex). The Edit tool still reports a refused
+  automatic join silently.
+- The crease-pattern validator reports single-cycle crease loops only (as
+  the Fold command detects them), skips loops through bars or cylinder axes,
+  reads mountain / valley classes from the construction pose and checks the
+  local conditions only — no global flat-foldability (layer ordering,
+  self-intersection).
+- "Place on sketch plane (2-D)" is one setting for every click-placed tool;
+  there is no per-tool placement plane, and no tool places on the view plane
+  except as the fallback.
 - No collision detection, no dynamics.
 
 ## References
@@ -427,6 +548,14 @@ driven; contradictory preferences on the bent pair are refused.
 - E. D. Demaine, J. O'Rourke. *Geometric Folding Algorithms: Linkages,
   Origami, Polyhedra.* Cambridge University Press, 2007 (developability:
   sector angles sum to 2π; flat-foldability conditions).
+- T. Hull. *On the Mathematics of Flat Origamis.* Congressus Numerantium
+  100, 1994, 215–224 (Kawasaki's and Maekawa's theorems for a flat-foldable
+  vertex: the alternating sector sum vanishes; mountains and valleys differ
+  by two).
+- T. Kawasaki. *On the Relation between Mountain-Creases and
+  Valley-Creases of a Flat Origami.* In H. Huzita (ed.), Proceedings of the
+  First International Meeting of Origami Science and Technology, 1989,
+  229–237.
 - E. L. Allgower, K. Georg. *Numerical Continuation Methods: An
   Introduction.* Springer, 1990 (predictor steps, branch switching at
   bifurcations).

@@ -1,16 +1,17 @@
-# Mechanism construction workflow: diagnosis and plan (v0.3)
+# Mechanism construction workflow: diagnosis and plan (v0.3 – v0.4)
 
-Status: Phase 0 and Phase 1 are implemented (v0.3). Phases 2 and 3 remain
-planned.
+Status: Phases 0 and 1 are implemented (v0.3) and Phase 2 is implemented
+(v0.4). Phase 3 remains planned.
 
 This document records why a user could not build a degree-4 origami vertex
 from four triangles with the Joint tool, what the evidence showed, which
 options were weighed, and the phased plan that was chosen. It is the
-specification for the v0.3 changes; `docs/SPEC.md` §17 describes the
-behaviour of each feature as implemented and `docs/DESIGN_DECISIONS.md` §8
-keeps the lessons learned. The *Implemented* note under each phase in §5
-records where the implementation differs from the plan; §2 (evidence) and §4
-(options) are left as they were written.
+specification for the v0.3 and v0.4 changes; `docs/SPEC.md` §17 (Phases
+0–1) and §18 (Phase 2) describe the behaviour of each feature as implemented,
+and `docs/DESIGN_DECISIONS.md` §6 and §8 keep the decisions and the lessons
+learned. The *Implemented* note under each phase in §5 records where the
+implementation differs from the plan; §2 (evidence) and §4 (options) are
+left as they were written.
 
 ## 1. The report
 
@@ -296,7 +297,7 @@ inverse design and compliant hinges keep working unchanged.
   only the viewport colours the rendered (preview) pose. Tests:
   `tests/crease.test.ts`.
 
-### Phase 2: construction workflow (medium, in progress)
+### Phase 2: construction workflow (medium, implemented in v0.4)
 
 **2a. Query pick: right-click cycles through everything under the pointer
 (Creo-style).** Picking today returns one feature per pointer position, so two
@@ -325,6 +326,44 @@ link twice.
   the Joint tool through the UI (headless test); right-drag still orbits; the
   candidate ranking is unit-tested (priority order, de-duplication, datum
   geometry last); the help text documents the right-click.
+- *Implemented with these differences.* A right-click counts as a query
+  click only when the pointer never strayed more than 4 px (`QUERY_CLICK_PX`)
+  from the press while the button was down, so an orbit drag that swings out
+  and returns to its start is still a drag. Candidates are ranked by depth
+  band first (every feature within the pick tolerance of the nearest hit is
+  band 0, the next band lies behind it, and so on), then by pick priority,
+  exact-ray hits before ring hits, then distance; datum geometry comes last
+  (points, axes, planes). The Joint tool's preference for a feature on
+  another link is confined to band 0, so a mis-click on the first link never
+  joins to geometry hidden behind the clicked panel (the cycle still reaches
+  it). The candidate named through the cycle, like a model-tree row, is
+  tagged `queried`, and datum planes and axes light up only for such hovers,
+  since the idle pointer hovers the sketch plane wherever the canvas is
+  empty. The cycle ends, restoring the normal hover, the plain feature
+  description in the status bar and the tool's preview, on the first Esc (a
+  second Esc cancels the tool), a move of more than 4 px, the pointer leaving
+  the canvas, a tool switch, undo / redo and any model replacement (New,
+  Open, an example); a left-click through it leaves the description of the
+  feature used unless the tool writes its own status, and a candidate that
+  no longer exists (deleted or undone meanwhile) is ignored in favour of the
+  normal pick. A joint or crease candidate is described as the tree
+  describes it ("Crease V 146° · Panel 1 ↔ Panel 2", `src/ui/labels.ts`);
+  the status reads "2 of 3 · edge V0-V1 of Polygon 2 · right-click: next ·
+  left-click: use it · Esc: stop" ("1 of 1 · … · the only feature here ·
+  left-click: use it" for a lone candidate, "Nothing under the pointer to
+  cycle through." for none). The hovered edge or face of a polygon or prism
+  is lit more strongly than the rest of its link so that the cycle can tell
+  them apart; the feature identity (`pickKey`) includes the point ids and
+  the face index for the same reason, and `PickType` / `PickResult` /
+  `PICK_PRIORITY` moved into the DOM-free `src/viewport/pickRank.ts`
+  (`PickResult` gained `sub`, `exact`, `band` and `queried`). The Joint
+  tool's substitution prefixes its status ("Used edge V0-V1 of Polygon 2
+  (the feature under the pointer was on the first link) · Joint created")
+  and the same-link refusal points at the right-click. The orbit controls
+  are rebuilt whenever a view changes the camera's up vector, so a
+  right-drag orbits in the Top view too. The help text and the Select /
+  Joint tool hints document the right-click. Tests: `tests/pick.test.ts`,
+  `tests/tools.test.ts`; smoke step 20 (a–e). Specified in SPEC.md §18.1.
 
 **2b. Panel tool and polygon joins.**
 - The Sketch tool is presented as "Panel (sketch polygon)" and joins *every*
@@ -345,8 +384,23 @@ link twice.
   the hint to Fold; the sector label at the centre reads 360° in green on the
   closing panel; four regular triangles show a red label at the centre on the
   fourth panel and the join is refused with the sector message.
-- *Implemented with these differences.* Four regular triangles cannot close
-  a ring in the plane: three span 180°, a fourth that continues the fan
+- *Implemented with these differences.* A vertex typed in the coordinate
+  box or placed by a grid-snapped click that lands on an existing vertex
+  within `coincidenceTolerance` (1e-6 of the model size, never below 1e-6
+  units: the tolerance the automatic join already used, now shared and
+  documented) is treated exactly like a snapped one: it keeps that vertex's
+  position (a typed 3-D coordinate on an off-plane vertex is not projected
+  onto the sketch plane), takes part in the plane fit and is joined when
+  the panel is closed; the coincidence is resolved both when a typed point
+  is entered and again when the panel is closed or previewed. The label
+  reads "S° (+A°)" with one decimal each, appears from the second placed
+  vertex on, is omitted at a degenerate (zero-length) corner and for a
+  cursor resting on the first vertex, is shown whatever *Show labels* says
+  and is drawn above the datum and link-name labels (a datum point's name
+  yields to it). `Enter` in the empty coordinate box closes the panel like
+  `Enter` on the canvas, and `Backspace` updates the polyline and the labels
+  at once. Four regular triangles cannot close a ring in the plane: three
+  span 180°, a fourth that continues the fan
   (O, C3, C4) shows a neutral 240° label and joins with one crease, and the
   only fourth panels that close the ring are degenerate (O, C3, C0: a
   straight corner, red label, refused as collinear) or overlapping (O, C3,
@@ -367,17 +421,52 @@ link twice.
   crease between two panels only: the automatic join never puts two creases
   on one edge, and a refused automatic join (the re-solve for the new joints
   not accepted, model restored) is reported with its diagnosis instead of
-  silently. The Polygon tool's snapped first vertex, when it lies off the
+  silently ("The link was created, but its snapped vertices were not
+  joined: …"; `autoJoinCoincident` returns `{ joints, refused }`). The
+  Polygon and Prism tools join every coincident vertex through the same
+  automatic join, with the snapped circumcircle point kept as an extra pair
+  (so the previous first-vertex pin survives even when the regular shape
+  leaves it slightly off), and that join is now solved and verified like
+  every other edit (previously the pin was added without a solve). The
+  Polygon tool's snapped first vertex, when it lies off the
   sketch plane, tilts the polygon's plane to meet it exactly (the plane
   through the centre and that vertex closest to the sketch plane, no 2-D
-  constraint, the status bar says so). Tests: `tests/sector.test.ts`,
-  `tests/tools.test.ts`; smoke steps 18d, 19, 20 and 23.
+  constraint, the status bar says so); the compiler now emits a column-free
+  residual for a constant point of an axis-aligned planar joint, so a 2-D
+  polygon pinned to a ground vertex off its plane can no longer read a
+  violation of 0. Tests: `tests/sector.test.ts`, `tests/tools.test.ts`;
+  smoke steps 18d, 19, 20 and 23. Specified in SPEC.md §3.2, §13.1 and
+  §18.2.
 
 **2c. 3-D placement on the sketch plane.** With "Place on sketch plane (2-D)"
 off, free clicks are placed where the pointer ray meets the active sketch
 plane (the view plane is used only when the ray grazes the sketch plane),
 so geometry in 3-D mode is still built on a predictable plane. Typed
 coordinates and snapped points are unchanged.
+- *Implemented with these differences.* The view plane through the previous
+  point is the fallback when the ray grazes the sketch plane (|cos| below
+  `PLACEMENT_MIN_COS` = 0.15), misses it, or meets it at the camera (the
+  Front and Right views look along TOP, so every off-centre ray hits it at
+  depth 0). With "Place on sketch plane (2-D)" on, and for the datum and
+  Panel tools, the grazing threshold is 0: such rays still land on the sketch
+  plane, and only a miss or a hit at the camera falls back, so an off-centre
+  click in the Front view makes a point on the view plane instead of one at
+  the camera. A hit "at the camera" is a depth along the ray below a
+  thousandth of the fallback's depth (the user's working distance), a
+  relative threshold that scales with the model. The helper
+  `placementOnPlane(ray, origin, normal, fallback, minCos)` takes the
+  fallback as a position, and `placeOnFittedPlane` (free sketch vertices on
+  a fitted plane) was refactored onto it, so both placements share one rule
+  and one threshold; the 2-D path computes the same intersections in the
+  same order as before. Because the option is one setting shared by every
+  click-placed tool, the Prism and Cylinder tools, the destination of the
+  Edit tool and the spacing points of the Pattern tool also build on the
+  sketch plane with 2-D off (previously the view plane); the datum and
+  Panel tools always used the sketch plane. The option keeps its label
+  "Place on sketch plane (2-D)" and explains the two modes in a tooltip on
+  its row (`TOOL_OPTIONS.mode2dHelp`). Tests: `tests/edit.test.ts`
+  (`placementOnPlane`), `tests/tools.test.ts`; smoke steps 21 and 22.
+  Specified in SPEC.md §3.1 and §18.3.
 
 **2d. Crease-pattern validator.** For every interior vertex (a merged vertex
 group whose panels form a closed ring of creases) the Mechanism panel reports
@@ -387,6 +476,31 @@ mountain/valley classes are assigned, the Maekawa condition (|M − V| = 2),
 each as pass or fail with the measured numbers. The checks live in a pure
 core module with unit tests on the developable, X and regular-triangle
 vertices.
+- *Implemented as planned, with these notes.* Flat-foldability is the
+  Kawasaki condition alone (Maekawa needs the M/V classes, which read "not
+  assigned" while any crease of the loop is flat within 1° or unmeasurable;
+  they are read from the construction pose with `creaseMV`, the convention
+  of the crease display); a vertex of odd degree has no alternating sum
+  (NaN) and is reported as not flat-foldable ("Kawasaki ✗ odd degree"); the
+  interior vertices are exactly the crease loops of `findCreaseLoops`, and
+  a loop through a bar or a cylinder axis (no sector angle) is skipped. The
+  block is the last element of the Mechanism summary (after the Fold
+  button) in every mode, one line per vertex ("Polygon 1 V0 · 4 panels ·
+  360.0° developable ✓ · Kawasaki 0.0° ✓ · M/V 3:1 ✓", the vertex named on
+  the ground panel when one is in the ring), failing lines in the warning
+  colour with a hint naming each failed check and its value, and the block
+  carries the explanatory tooltip; the reports live in
+  `SimState.vertexReports`, recomputed with the DOF, not in the model or
+  the file. `mergedPointGroups` (`src/core/feasibility.ts`) became the
+  single union-find over merged pairs, shared by the sector-sum diagnosis,
+  the Panel-tool preview, the crease-loop detection and the validator. The
+  plan's example of a Kawasaki failure, (90°, 90°, 60°, 120°), has an
+  alternating sum of 60°, not 20°. The unit tests
+  use the developable (60°, 60°, 120°, 120°) and X vertices, the
+  square-pyramid apex (240°, a closed ring that is not developable), a
+  (90°, 90°, 60°, 120°) vertex (developable, Kawasaki off by 60°) and
+  (90°, 90°, 100°, 80°) (off by 20°). Tests: `tests/validate.test.ts`;
+  smoke step 19. Specified in SPEC.md §18.4.
 
 ### Phase 3: crease-pattern-first (large, planned)
 
@@ -404,6 +518,7 @@ vertices.
 | `Joint.fold?: { target?, mv? }` | 1b | Optional field; absent in old files. |
 | Settings colours `mountain`, `valley` | 1b | Defaults applied when missing. |
 | `Joint.b` of an unequal-length hinge stored with its end points in the order matching `Joint.a` | 0a | Order only, no new field; existing files load unchanged. |
+| — | 2 | No model or file change: the validator's reports are transient (`SimState.vertexReports`), and `PickResult` gained viewport-only fields (`sub`, `exact`, `band`, `queried`). |
 
 No change to `Model.version` is needed: all additions are optional.
 
@@ -419,14 +534,28 @@ No change to `Model.version` is needed: all additions are optional.
   vertices, DOF before / after, sweep motion, preferences),
   `tests/crease.test.ts` (1b: M/V convention, persistence, Fold to target,
   Drive this crease, labels and colours), `tests/solver.test.ts` (damping
-  floor). 165 tests in all.
-- Headless browser (`scripts/smoke-features.mjs`, steps 18–19): four regular
+  floor), `tests/pick.test.ts` (2a: candidate ranking, depth bands, feature
+  identity), `tests/sector.test.ts` (2b: sector preview and labels, the
+  in-plane overlap refusal, the automatic joins and their refusal),
+  `tests/tools.test.ts` (2a–2c, the ToolManager over a fake viewport: the
+  query cycle's life cycle, the Joint tool's front-band substitution, the
+  Panel tool's refusal, 2-D placement from a camera on the sketch plane, the
+  Polygon tool's tilted join), `tests/edit.test.ts` (2c: `placementOnPlane`;
+  the 2-D constraint on constant points), `tests/validate.test.ts` (2d).
+  243 tests in all.
+- Headless browser (`scripts/smoke-features.mjs`, steps 18–23): four regular
   triangles placed exactly and by mouse end with a refused fourth joint, the
   sector-angle message, an unchanged model and no undo entry; a refused
-  Length edit leaves no stale widget; a developable vertex sketched flat
-  shows the hints and the Fold button, Fold gives DOF 1 and the 3 : 1
-  pattern, the crease is pickable with its Properties, and Preview moves
-  every panel.
+  Length edit leaves no stale widget; the Polygon tool joins typed triangles
+  (18d); a developable vertex sketched flat shows the sector labels, the
+  hints and the Fold button, Fold gives DOF 1 and the 3 : 1 pattern, the
+  crease is pickable with its Properties, and Preview moves every panel
+  (19); the query cycle joins exactly coincident edges, its instructions
+  leave the status bar with the click and with the pointer, the datum plane
+  stays silent under the idle pointer, and plain, top-view and out-and-back
+  right-drags orbit without a cycle (20); 3-D placement lands on the sketch
+  plane and the Front view's 2-D clicks on the view plane (21, 22); the
+  Polygon tool tilts to a snapped off-plane vertex (23).
 - Regression: all existing tests, `npm run build`, both smoke scripts.
 
 ## 8. Decisions taken (formerly open)
@@ -441,6 +570,13 @@ No change to `Model.version` is needed: all additions are optional.
 - Mountain/valley colours: red mountain (`#d9342b`), blue valley (`#2f6fd6`),
   following Lang and the Origami Simulator convention; configurable in
   Settings.
+- Phase 2 constants, none of them Settings: a query click moves at most 4 px
+  (`QUERY_CLICK_PX`, `src/viewport/pickCycle.ts`); a ray is grazing below
+  |cos| = 0.15 (`PLACEMENT_MIN_COS`, `src/core/edit.ts`); vertices coincide
+  within 1e-6 of the model size (`coincidenceTolerance`); the sector labels
+  and the validator use the 0.5° sector tolerance of the joint diagnoses
+  (`SECTOR_SUM_TOLERANCE_DEG`); the validator's flat-foldability is the
+  Kawasaki condition alone, developability a separate mark.
 
 ## 9. References
 
@@ -457,3 +593,5 @@ No change to `Model.version` is needed: all additions are optional.
   Maekawa conditions, mountain/valley conventions.
 - E. Demaine, J. O'Rourke, *Geometric Folding Algorithms* (2007):
   developability (sector angles sum to 2π) and flat-foldability conditions.
+- T. Hull, "On the Mathematics of Flat Origamis", Congressus Numerantium 100
+  (1994): Kawasaki's and Maekawa's theorems, used by the validator (2d).
