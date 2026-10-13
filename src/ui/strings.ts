@@ -20,6 +20,13 @@ export const APP = {
   untitled: 'Untitled mechanism',
 };
 
+/** Version badge in the top-right corner of the top bar (what build is deployed). */
+export const VERSION = {
+  badge: (version: string, commit: string, date: string): string => `v${version} · ${commit}${date ? ` · ${date}` : ''}`,
+  tooltip: (version: string, commit: string, branch: string, builtAt: string): string =>
+    `Deployed build: version ${version}, commit ${commit} on ${branch}${builtAt ? `, built ${builtAt}` : ''}.`,
+};
+
 export const MODES = {
   construction: 'Construction',
   simulation: 'Simulation',

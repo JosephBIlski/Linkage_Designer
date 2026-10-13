@@ -11,6 +11,14 @@ const errors = [];
 page.on('console', (msg) => { if (msg.type() === 'error') errors.push(`${msg.type()}: ${msg.text()}`); });
 page.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
 await page.goto('http://localhost:4173/');
+// version badge (top-right): package version · short commit · build date
+{
+  const pkg = JSON.parse(await import('node:fs').then((fs) => fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')));
+  const badge = (await page.textContent('.version-badge')) ?? '';
+  const ok = badge.startsWith(`v${pkg.version} · `) && /· [0-9a-f]{7} · \d{4}-\d{2}-\d{2}$/.test(badge);
+  console.log('version badge', JSON.stringify({ badge, title: await page.getAttribute('.version-badge', 'title') }), ok ? 'OK' : 'MISMATCH');
+  if (!ok) errors.push(`version badge mismatch: ${badge}`);
+}
 await page.waitForTimeout(2500);
 await page.screenshot({ path: `${OUT}/01-construction.png` });
 const info1 = await page.evaluate(() => {

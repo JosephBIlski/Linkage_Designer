@@ -4,6 +4,7 @@
  * input, link-end constraint pop-up, settings dialog and help.
  * All text comes from strings.ts.
  */
+import { BUILD_INFO, buildDate } from '../buildInfo';
 import type { App, Mode, ToolName } from '../app';
 import {
   barLength,
@@ -19,7 +20,7 @@ import { isConstructionRef } from '../core/types';
 import { createColorPicker } from './colorPicker';
 import { icon } from './icons';
 import { DEFAULT_SETTINGS, type AppSettings } from './settings';
-import { APP, EXAMPLES, HELP, JOINTS, MENU, MODES, PANEL, PATTERN, POPUP, PREVIEW, SETTINGS, SIM, STATUS, TOOLS, TOOL_OPTIONS, TREE, jointRefusedMessage } from './strings';
+import { APP, EXAMPLES, HELP, JOINTS, MENU, MODES, PANEL, PATTERN, POPUP, PREVIEW, SETTINGS, SIM, STATUS, TOOLS, TOOL_OPTIONS, TREE, jointRefusedMessage, VERSION } from './strings';
 import { jointDescription, jointEnds, jointLabel } from './labels';
 import { duplicateLink, extrudePolygon, translation } from '../core/patterns';
 import { currentViolation, modelSize } from '../core/kinematics';
@@ -195,6 +196,10 @@ export class UI {
     menus.appendChild(button('', () => this.openSettings(), { icon: 'settings', title: MENU.settings, cls: 'btn--icon' }));
     menus.appendChild(button('', () => this.openHelp(), { icon: 'help', title: MENU.help, cls: 'btn--icon' }));
     top.appendChild(menus);
+    // version badge: which build is deployed (package version · short commit · build date)
+    const badge = el('span', 'version-badge', VERSION.badge(BUILD_INFO.version, BUILD_INFO.commit, buildDate()));
+    badge.title = VERSION.tooltip(BUILD_INFO.version, BUILD_INFO.commit, BUILD_INFO.branch, BUILD_INFO.builtAt);
+    top.appendChild(badge);
 
     this.toolbar = el('nav', 'toolbar');
     for (const t of TOOL_LIST) {

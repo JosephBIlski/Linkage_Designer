@@ -63,6 +63,13 @@ editing window along with tools …"
 - All user-visible text is in `src/ui/strings.ts`; colours and display
   defaults in `src/ui/settings.ts` (`DEFAULT_SETTINGS`).
 
+**Version badge.** The right end of the top bar shows which build is running
+as `v<version> · <commit> · <date>` (package version, short commit hash and
+build date); its tooltip adds the branch and the exact build time. The values
+are injected at build time by `vite.config.ts` (from `package.json`, git or
+the GitHub Actions environment), so the deployed site can be checked against
+the repository at a glance.
+
 ## 2. Modes
 
 **Original:** Construction / Simulation / Preview modes as described.

@@ -32,6 +32,9 @@ node scripts/smoke.mjs            # headless-browser smoke test of the built app
 node scripts/smoke-features.mjs   # same for the Panel / Polygon / Edit / Pattern / Crease pattern tools, the query cycle, 3-D placement, the model tree, the origami workflow and the Miura-ori sheet
 ```
 
+The top-right version badge shows the deployed package version, commit and
+build date (injected at build time).
+
 Node 22 is assumed (`.nvmrc`). The built app is static and can be served from
 any path (GitHub Pages workflow included in `.github/workflows/ci.yml`).
 

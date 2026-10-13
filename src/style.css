@@ -36,6 +36,7 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); }
 .mode-tab { background: transparent; border: none; color: var(--fg-dim); padding: 6px 14px; border-radius: 6px; cursor: pointer; font-weight: 600; }
 .mode-tab.active { background: var(--accent); color: #fff; }
 .menus { margin-left: auto; display: flex; align-items: center; gap: 4px; }
+.version-badge { margin-left: 8px; font-size: 10.5px; color: var(--fg-dim); background: var(--bg-3); border: 1px solid var(--border); border-radius: 6px; padding: 2px 7px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .menu { position: relative; }
 .menu__button { background: transparent; border: 1px solid transparent; }
 .menu__list { display: none; position: absolute; top: 100%; right: 0; min-width: 260px; background: var(--bg-3); border: 1px solid var(--border); border-radius: var(--radius); padding: 4px; z-index: 50; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
