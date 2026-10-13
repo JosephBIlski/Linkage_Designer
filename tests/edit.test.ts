@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { addBar, addJoint, addPolygon, addPolygonFromPoints, bodyPlaneJoint, createModel, serializeModel, setGround } from '../src/core/model';
-import { autoJoinCoincident, fitSketchPlane, moveVertex, placeOnFittedPlane, projectToPlane, rayPlane } from '../src/core/edit';
+import { PLACEMENT_MIN_COS, autoJoinCoincident, fitSketchPlane, moveVertex, placeOnFittedPlane, placementOnPlane, projectToPlane, rayPlane } from '../src/core/edit';
 import { addConstructionAxis, addConstructionPoint } from '../src/core/model';
 import { commitSketch, solveSketch } from '../src/core/kinematics';
 import { computeMobility, currentViolation } from '../src/core/kinematics';
@@ -79,7 +79,7 @@ describe('auto-joining coincident vertices (sketching the fourth origami panel)'
   it('turns shared edges into creases and yields a 1-DOF rigid vertex', () => {
     const { m, panels, folded } = threePanels();
     const fourth = addPolygonFromPoints(m, folded[3], { name: 'Panel 4' });
-    const created = autoJoinCoincident(m, fourth, fourth.pointIds, { defaultJoint: 'revolute', axis: [0, 0, 1] });
+    const created = autoJoinCoincident(m, fourth, fourth.pointIds, { defaultJoint: 'revolute', axis: [0, 0, 1] }).joints;
     // shares edge O–p0 with panel 3 and edge O–p1 with panel 1: two creases, no vertex pins
     expect(created.length).toBe(2);
     expect(created.every((j) => j.type === 'revolute' && j.a.kind === 'edge' && j.pairs?.length === 2)).toBe(true);
@@ -92,10 +92,10 @@ describe('auto-joining coincident vertices (sketching the fourth origami panel)'
   it('replaces existing vertex pins by a crease and does not duplicate joints', () => {
     const { m, folded } = threePanels();
     const fourth = addPolygonFromPoints(m, folded[3], { name: 'Panel 4' });
-    const first = autoJoinCoincident(m, fourth, [fourth.pointIds[1]], { defaultJoint: 'revolute', axis: [0, 0, 1] });
+    const first = autoJoinCoincident(m, fourth, [fourth.pointIds[1]], { defaultJoint: 'revolute', axis: [0, 0, 1] }).joints;
     expect(first.length).toBe(1); // a single vertex pin (different sketch planes → spherical)
     expect(first[0].type).toBe('spherical');
-    const second = autoJoinCoincident(m, fourth, fourth.pointIds, { defaultJoint: 'revolute', axis: [0, 0, 1] });
+    const second = autoJoinCoincident(m, fourth, fourth.pointIds, { defaultJoint: 'revolute', axis: [0, 0, 1] }).joints;
     expect(second.length).toBe(2);
     expect(Object.values(m.joints).filter((j) => j.a.kind === 'vertex').length).toBe(0); // the pin was upgraded to a crease
     expect(computeMobility(m).dof).toBe(1);
@@ -188,7 +188,7 @@ describe('edit tool: joint helpers, hinge axes and re-framing (verification find
     setGround(m, A.id);
     const Y = addBar(m, [0, 0, 0], [-1, -1, 0], { onPlaneId: 'plane_top' });
     const B = addPolygonFromPoints(m, [[0, 0, 0], [2, 0, 0], [2, -2, 0], [0, -2, 0]], { onPlaneId: 'plane_top' });
-    const created = autoJoinCoincident(m, B, B.pointIds, { defaultJoint: 'revolute', axis: [0, 0, 1] });
+    const created = autoJoinCoincident(m, B, B.pointIds, { defaultJoint: 'revolute', axis: [0, 0, 1] }).joints;
     const types = created.map((j) => `${j.type}:${j.a.kind}`).sort();
     expect(types).toEqual(['revolute:edge', 'revolute:vertex']); // crease with A plus a pin to Y
     const toY = created.find((j) => !('constructionId' in j.b) && (j.b as { linkId: string }).linkId === Y.id);
@@ -283,6 +283,85 @@ describe('re-verification follow-ups', () => {
   });
 });
 
+describe('3-D placement on the sketch plane (plan 2c: placementOnPlane)', () => {
+  const origin: Vec3 = [0, 0, 0];
+  const normal: Vec3 = [0, 0, 1];
+  const fallback: Vec3 = [5, 5, 5];
+
+  it('places a ray that meets the plane squarely at the hit, not at the fallback', () => {
+    // the default isometric-ish view: direction (1, -1, 0.9) reversed, 15 units from the origin
+    const o: Vec3 = [7, -7, 6.3];
+    const d: Vec3 = [-0.4, 0.6, -0.9]; // not normalised: the helper normalises
+    const hit = placementOnPlane({ o, d }, origin, normal, fallback);
+    expect(hit[2]).toBeCloseTo(0, 12);
+    expect(dist(hit, [4.2, -2.8, 0])).toBeLessThan(1e-9); // o + 7·d
+    // an off-origin plane with an unnormalised normal
+    const hit2 = placementOnPlane({ o: [0, 0, 5], d: [1, 0, -1] }, [9, 9, 2], [0, 0, 4], fallback);
+    expect(dist(hit2, [3, 0, 2])).toBeLessThan(1e-9);
+  });
+
+  it('returns the fallback for a grazing ray (|cos| below 0.15) and places at exactly the threshold', () => {
+    const grazing = { o: [0, 0, 1] as Vec3, d: [1, 0, -0.1] as Vec3 }; // cos ≈ 0.0995
+    expect(placementOnPlane(grazing, origin, normal, fallback)).toEqual(fallback);
+    const c = PLACEMENT_MIN_COS;
+    const atThreshold = { o: [0, 0, 1] as Vec3, d: [Math.sqrt(1 - c * c), 0, -c] as Vec3 }; // |cos| = minCos: not grazing
+    expect(placementOnPlane(atThreshold, origin, normal, fallback)[2]).toBeCloseTo(0, 12);
+    // the threshold is a parameter
+    expect(placementOnPlane(atThreshold, origin, normal, fallback, 0.2)).toEqual(fallback);
+  });
+
+  it('returns the fallback for a ray parallel to the plane', () => {
+    expect(placementOnPlane({ o: [0, 0, 1], d: [1, 0, 0] }, origin, normal, fallback)).toEqual(fallback);
+    // the TOP plane seen exactly edge-on from the Front view (orthographic rays), its origin on the plane
+    expect(placementOnPlane({ o: [0, -15, 0], d: [0, 1, 0] }, origin, normal, fallback)).toEqual(fallback);
+  });
+
+  it('returns the fallback when the plane lies behind the ray origin', () => {
+    expect(placementOnPlane({ o: [0, 0, 1], d: [0, 0, 1] }, origin, normal, fallback)).toEqual(fallback); // straight up: cos = 1
+    expect(placementOnPlane({ o: [0, 0, 1], d: [1, 0, 0.5] }, origin, normal, fallback)).toEqual(fallback);
+  });
+
+  it('treats a hit at the camera as a miss (Front view: the camera sits on the TOP plane, off-centre rays are not grazing)', () => {
+    const view: Vec3 = [0, 0, 0]; // the view plane through the origin, 15 units ahead
+    const up = { o: [0, -15, 0] as Vec3, d: [0, 1, 0.3] as Vec3 }; // cos ≈ 0.29 with the TOP normal: not grazing, meets the plane at t = 0
+    expect(rayPlane(up.o, up.d, origin, normal)).toEqual(up.o);
+    expect(placementOnPlane(up, origin, normal, view)).toEqual(view);
+    // a camera a hair below the plane: the hit is a few millimetres in front of it, still "at the camera"
+    expect(placementOnPlane({ o: [0, -15, -0.001], d: [0, 1, 0.3] }, origin, normal, view)).toEqual(view);
+    // a low view from height 1 clicking below the horizon hits the plane 3.5 units ahead: a real placement
+    const low = placementOnPlane({ o: [0, -15, 1], d: [0, 1, -0.3] }, origin, normal, view);
+    expect(low[2]).toBeCloseTo(0, 12);
+    expect(low[1]).toBeCloseTo(-15 + 1 / 0.3, 9);
+  });
+
+  it('2-D mode (minCos 0): a grazing ray still lands on the sketch plane, a ray from a camera on the plane falls back', () => {
+    const top = { o: [0, 0, 0] as Vec3, n: [0, 0, 1] as Vec3 };
+    const fallback: Vec3 = [7, 7, 7];
+    // grazing: 5° above the plane from 1 unit up: the plane is met far out, and 2-D mode wants it there
+    const grazing = { o: [0, 0, 1] as Vec3, d: [Math.cos(0.0873), 0, -Math.sin(0.0873)] as Vec3 };
+    expect(placementOnPlane(grazing, top.o, top.n, fallback)).toEqual(fallback); // 3-D mode: grazing → fallback
+    const hit = placementOnPlane(grazing, top.o, top.n, fallback, 0);
+    expect(Math.abs(hit[2])).toBeLessThan(1e-9);
+    expect(hit[0]).toBeCloseTo(1 / Math.tan(0.0873), 6);
+    // the Front view: the camera sits on the TOP plane, so every off-centre ray meets it at depth 0, at the camera
+    const front = { o: [0, -10, 0] as Vec3, d: [0.12, 1, 0.06] as Vec3 };
+    const view: Vec3 = [1.2, 0, 0.6];
+    expect(placementOnPlane(front, top.o, top.n, view, 0)).toEqual(view);
+    // parallel and behind-the-camera rays fall back as well
+    expect(placementOnPlane({ o: [0, -10, 1], d: [0, 1, 0] }, top.o, top.n, view, 0)).toEqual(view);
+    expect(placementOnPlane({ o: [0, -10, 1], d: [0, 1, 0.3] }, top.o, top.n, view, 0)).toEqual(view);
+  });
+
+  it('keeps placeOnFittedPlane as the same rule with the orthogonal projection as the fallback', () => {
+    const p: Vec3 = [0.3, 0.2, 1];
+    const grazing = { o: [0, 0, 1] as Vec3, d: [1, 0, -0.01] as Vec3 };
+    expect(placeOnFittedPlane(p, grazing, origin, normal)).toEqual(placementOnPlane(grazing, origin, normal, projectToPlane(p, origin, normal)));
+    const good = { o: [0, 0, 1] as Vec3, d: [1, 0, -1] as Vec3 };
+    expect(placeOnFittedPlane([9, 9, 9], good, origin, normal)).toEqual(placementOnPlane(good, origin, normal, [9, 9, 0]));
+    expect(placeOnFittedPlane(p, undefined, origin, normal)).toEqual([0.3, 0.2, 0]);
+  });
+});
+
 describe('edits that require the hinge axis to tilt', () => {
   it('succeeds when the joint axis must rotate with a spatially constrained partner link', () => {
     const m = createModel();
@@ -309,5 +388,27 @@ describe('edits that require the hinge axis to tilt', () => {
       const off = [0, 1, 2].map((i) => m.points[h].pos[i] - m.points[base].pos[i]);
       expect(Math.abs(off[0] * b2[0] + off[1] * b2[1] + off[2] * b2[2])).toBeLessThan(1e-6);
     }
+  });
+});
+
+describe('sketch-plane (2-D) constraint on constant points (compile)', () => {
+  it('a ground vertex off its axis-aligned sketch plane is a violation, not a dropped constraint', () => {
+    const m = createModel();
+    const bar = addBar(m, [0, 0, 0], [2, 0, 0], { onPlaneId: 'plane_top' });
+    setGround(m, bar.id);
+    expect(currentViolation(m)).toBeLessThan(1e-12);
+    m.points[bar.pointIds[1]].pos = [2, 0, 0.3];
+    expect(currentViolation(m)).toBeCloseTo(0.3, 9);
+    // the ground is free to move in a sketch solve: the constraint has columns again and pulls the point back
+    const res = solveSketch(m, { allowGroundMove: true });
+    expect(Math.abs(res.positions.get(bar.pointIds[1])![2])).toBeLessThan(1e-6);
+  });
+
+  it('a vertex pinned to a datum point off the plane is a violation too', () => {
+    const m = createModel();
+    const bar = addBar(m, [0, 0, 0], [2, 0, 0], { onPlaneId: 'plane_top' });
+    const pnt = addConstructionPoint(m, [0, 0, 0.5], 'PNT');
+    addJoint(m, 'spherical', { linkId: bar.id, kind: 'vertex', pointIds: [bar.pointIds[0]] }, { constructionId: pnt.id });
+    expect(currentViolation(m)).toBeCloseTo(0.5, 9);
   });
 });

@@ -3,7 +3,9 @@
  * Names/labels shown in the UI come from src/ui/strings.ts (EXAMPLES).
  */
 import { addAngleDriver, addBar, addConstructionAxis, addFoldDriver, addJoint, addPolygon, addPolygonFromPoints, createModel, setGround } from './model';
-import type { Feature, Model, Vec3 } from './types';
+import { generatePanels, miuraPattern } from './creasePattern';
+import { prefoldPattern } from './fold';
+import type { Feature, ID, Model, Vec3 } from './types';
 import { add, cross, dist, dot, normalize, rotateAbout, scale } from './geometry';
 import { syncDriverValues } from './kinematics';
 
@@ -170,9 +172,43 @@ export function foldedVertexPositions(dirs: Vec3[], sectors: number[], R: number
   return [quad(dirs[0], c0), quad(c0, c1), quad(c1, c2), quad(c2, c3)];
 }
 
+/**
+ * Miura-ori sheet built the crease-pattern way (docs/CONSTRUCTION_PLAN.md
+ * Phase 3): the classic tessellation with `rows` × `cols` interior vertices
+ * (3 × 3 by default: 4 × 4 parallelogram panels, α = 60°) comes from
+ * miuraPattern, its panels and creases from generatePanels (the pattern stays
+ * in the model, hidden, as the Generate command leaves it), the panel nearest
+ * the middle of the sheet is grounded so that the sheet folds up around it,
+ * and prefoldPattern takes the whole sheet off the singular flat state onto
+ * the drawn mountain / valley branch, every crease folded and one degree of
+ * freedom left. The fold driver the pre-fold keeps on the crease it drove (a
+ * zigzag crease at 160°) is the input; the vertex farthest from the middle, a
+ * corner of the sheet, is the displayed point.
+ */
+export function miuraSheet(rows = 3, cols = 3, alphaDeg = 60): Model {
+  const m = createModel();
+  const p = miuraPattern(m, m.settings.sketchPlaneId, rows, cols, alphaDeg, 2, 2, 'Miura-ori');
+  const r = generatePanels(m, p, { ground: false, panelName: 'Panel' });
+  p.hidden = true;
+  const centroid = (pts: Vec3[]): Vec3 => scale(pts.reduce((s, q) => add(s, q), [0, 0, 0] as Vec3), 1 / Math.max(1, pts.length));
+  const middle = centroid(Object.values(p.vertices).map((v) => v.pos));
+  const panelCentre = (id: ID): Vec3 => centroid(m.links[id].pointIds.map((pid) => m.points[pid].pos));
+  // an even number of cells has no middle panel: the one whose centre is nearest the middle of the sheet
+  const ground = r.linkIds.reduce((best, id) => (dist(panelCentre(id), middle) < dist(panelCentre(best), middle) ? id : best), r.linkIds[0]);
+  setGround(m, ground);
+  const fold = prefoldPattern(m, p.id);
+  if (fold.ok && fold.creaseId !== undefined && !m.drivers.some((d) => d.kind === 'fold' && d.jointId === fold.creaseId)) addFoldDriver(m, fold.creaseId);
+  const vertices = Object.values(m.points).filter((pt) => pt.role === 'vertex');
+  const corner = vertices.reduce((best, pt) => (dist(pt.pos, middle) > dist(best.pos, middle) ? pt : best), vertices[0]);
+  m.settings.displayPointIds = corner ? [corner.id] : [];
+  syncDriverValues(m);
+  return m;
+}
+
 export const EXAMPLE_BUILDERS: Record<string, () => Model> = {
   fourBar: fourBarCrankRocker,
   sliderCrank,
   sphericalPendulum,
   miuraVertex: () => origamiMiuraVertex(60),
+  miuraSheet: () => miuraSheet(3, 3, 60),
 };

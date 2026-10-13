@@ -8,10 +8,12 @@ import { CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import type { Positions } from '../core/kinematics';
 import { modelSize } from '../core/kinematics';
 import { linkEdges, linkFaces } from '../core/model';
-import type { ID, Joint, Link, Model, Vec3 } from '../core/types';
+import { creaseDihedralDeg, creaseMV, isCrease } from '../core/fold';
+import { patternBasis, patternExtent } from '../core/creasePattern';
+import type { CreaseClass, ID, Joint, Link, Model, Vec3 } from '../core/types';
 import { add, centroid, cross, dist, len, normalize, scale, sub } from '../core/geometry';
 import type { AppSettings } from '../ui/settings';
-import { JOINTS } from '../ui/strings';
+import { JOINTS, PATTERN, creaseLabel } from '../ui/strings';
 import type { PickResult, PickType, Viewport } from './scene';
 
 export interface EditPointView {
@@ -39,17 +41,30 @@ export interface DesignSpaceView {
   center: Vec3;
   radius: number;
 }
+/** A text label the active tool pins to a world position (CSS2D, like the model labels); `cls` is its CSS class list. */
+export interface OverlayLabel {
+  pos: Vec3;
+  text: string;
+  cls: string;
+}
 export interface OverlayView {
   rubberBand?: { a: Vec3; b: Vec3 } | null;
   circle?: { center: Vec3; normal: Vec3; radius: number } | null;
   snapPoint?: Vec3 | null;
   marker?: Vec3 | null;
   polyline?: Vec3[] | null;
+  /** Tool feedback labels (e.g. the Panel tool's sector-angle sums); shown whatever the "Show labels" setting says. */
+  labels?: OverlayLabel[] | null;
 }
+/**
+ * What is selected: a pickable feature, a whole link, or a crease pattern (`pattern`: id = the pattern; `pvertex` /
+ * `pcrease`: id = the pattern, `pointId` / `creaseId` the element).
+ */
 export interface SelectionView {
-  type: PickType | 'link';
+  type: PickType | 'link' | 'pattern';
   id: ID;
   pointId?: ID;
+  creaseId?: ID;
   pose?: number;
 }
 export interface RenderState {
@@ -74,7 +89,14 @@ const unitTorus = new THREE.TorusGeometry(1, 0.18, 10, 32);
 const unitBox = new THREE.BoxGeometry(1, 1, 1);
 const unitOcta = new THREE.OctahedronGeometry(1, 0);
 const unitCone = new THREE.ConeGeometry(1, 1, 16);
+const unitDisc = new THREE.CircleGeometry(1, 24);
 const Y = new THREE.Vector3(0, 1, 0);
+/** Colour of a crease whose panels are coplanar (no mountain / valley class yet). */
+const CREASE_FLAT_COLOR = '#8d949c';
+/** Colour of the vertex discs of a crease pattern. */
+const PATTERN_VERTEX_COLOR = '#2b2f33';
+/** Crease lines are drawn this much thicker than the panel edges they lie on (edge radius = 0.55 · r). */
+const CREASE_RADIUS_FACTOR = 1.6;
 
 function v(p: Vec3): THREE.Vector3 {
   return new THREE.Vector3(p[0], p[1], p[2]);
@@ -107,12 +129,15 @@ export class ModelRenderer {
   update(state: RenderState): void {
     this.clear();
     const { model, settings } = state;
-    const size = modelSize(model, state.positions);
+    // the size unit (disc radii, crease widths) follows the geometry drawn: the links' extent and the visible crease
+    // patterns' (a pattern-only model would otherwise be drawn at the minimum unit, hairline creases and no discs)
+    const size = Math.max(modelSize(model, state.positions), ...Object.values(model.patterns ?? {}).filter((p) => !p.hidden).map(patternExtent));
     this.r = THREE.MathUtils.clamp(size * 0.012, 0.02, 0.12);
     if (settings.showConstruction) this.buildConstruction(state);
     this.buildModel(state, state.positions, this.vp.groups.model, false);
     if (state.ghost) this.buildModel(state, state.ghost, this.vp.groups.ghost, true);
     this.buildJoints(state);
+    this.buildPatterns(state);
     this.buildPaths(state);
     this.buildSurfaces(state);
     this.buildDesignSpaces(state);
@@ -123,12 +148,12 @@ export class ModelRenderer {
 
   // ---------------------------------------------------------------------------
 
-  private material(color: string, opts: { opacity?: number; emissive?: string; flat?: boolean } = {}): THREE.Material {
+  private material(color: string, opts: { opacity?: number; emissive?: string; emissiveIntensity?: number; flat?: boolean } = {}): THREE.Material {
     const m = opts.flat
       ? new THREE.MeshBasicMaterial({ color, transparent: (opts.opacity ?? 1) < 1, opacity: opts.opacity ?? 1, depthWrite: (opts.opacity ?? 1) >= 1 })
       : new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0.05, transparent: (opts.opacity ?? 1) < 1, opacity: opts.opacity ?? 1, side: THREE.DoubleSide });
     if (!opts.flat && opts.emissive) (m as THREE.MeshStandardMaterial).emissive = new THREE.Color(opts.emissive);
-    if (!opts.flat && opts.emissive) (m as THREE.MeshStandardMaterial).emissiveIntensity = 0.55;
+    if (!opts.flat && opts.emissive) (m as THREE.MeshStandardMaterial).emissiveIntensity = opts.emissiveIntensity ?? 0.55;
     return this.track(m);
   }
 
@@ -194,14 +219,21 @@ export class ModelRenderer {
     group.add(this.cylinder(a, b, Math.max(radius, minR), proxyMat, pick));
   }
 
-  private label(text: string, at: Vec3, cls = 'label'): void {
+  /** A CSS2D label at a world position; CSS2DRenderer stacks labels by `renderOrder` first, then by camera distance. */
+  private label(text: string, at: Vec3, cls = 'label', renderOrder = 0): void {
     const div = document.createElement('div');
     div.className = cls;
     div.textContent = text;
     const obj = new CSS2DObject(div);
     obj.position.copy(v(at));
+    obj.renderOrder = renderOrder;
     this.labels.push(obj);
     this.vp.groups.labels.add(obj);
+  }
+
+  /** Is a tool label (overlay) pinned at this world position? The model label there is left out so the two do not overlap. */
+  private overlayLabelAt(state: RenderState, p: Vec3): boolean {
+    return (state.overlay.labels ?? []).some((l) => dist(l.pos, p) < 1e-6);
   }
 
   // ---------------------------------------------------------------------------
@@ -215,6 +247,9 @@ export class ModelRenderer {
     for (const c of Object.values(model.construction)) {
       const selected = this.isSelected(state, 'construction', c.id);
       const hovered = this.isHovered(state, 'construction', c.id);
+      // a datum plane or axis lights up only for a hover the user asked for (the query cycle, a tree row): the plain
+      // pointer hovers the sketch plane wherever the canvas is empty, and lighting it would flood the view
+      const hot = hovered && !!state.hover?.queried;
       const color = selected ? settings.colors.selection : settings.colors.construction;
       const emissive = hovered ? settings.colors.selection : undefined;
       if (c.kind === 'point') {
@@ -224,12 +259,13 @@ export class ModelRenderer {
         m.userData = { type: 'construction', id: c.id, sub: 0 } as Partial<PickResult> & { sub: number };
         this.pickables.push(m);
         g.add(m);
-        if (settings.showLabels) this.label(c.name, add(c.origin, [0, 0, r * 4]), 'label label--construction');
+        if (settings.showLabels && !this.overlayLabelAt(state, c.origin)) this.label(c.name, add(c.origin, [0, 0, r * 4]), 'label label--construction');
       } else if (c.kind === 'axis' && c.dir) {
         const half = c.size ?? 10;
         const a = add(c.origin, scale(c.dir, -half));
         const b = add(c.origin, scale(c.dir, half));
-        const mat = this.track(new THREE.LineDashedMaterial({ color, dashSize: 0.35, gapSize: 0.18, transparent: true, opacity: c.builtin ? 0.45 : 0.9 }));
+        // a dashed line has no emissive term: the hover highlight (query cycle) is the selection colour at full opacity
+        const mat = this.track(new THREE.LineDashedMaterial({ color: hot ? settings.colors.selection : color, dashSize: 0.35, gapSize: 0.18, transparent: true, opacity: hot || selected ? 1 : c.builtin ? 0.45 : 0.9 }));
         const geo = this.track(new THREE.BufferGeometry().setFromPoints([v(a), v(b)]));
         const line = new THREE.Line(geo, mat);
         line.computeLineDistances();
@@ -241,7 +277,8 @@ export class ModelRenderer {
       } else if (c.kind === 'plane' && c.dir) {
         const s = c.size ?? 6;
         const geo = this.track(new THREE.PlaneGeometry(2 * s, 2 * s));
-        const mat = this.track(new THREE.MeshBasicMaterial({ color, transparent: true, opacity: c.builtin ? 0.04 : 0.12, side: THREE.DoubleSide, depthWrite: false }));
+        // hovered through the query cycle: selection colour and a denser fill, since the translucent plane has no emissive term
+        const mat = this.track(new THREE.MeshBasicMaterial({ color: hot ? settings.colors.selection : color, transparent: true, opacity: hot ? 0.3 : selected ? 0.2 : c.builtin ? 0.04 : 0.12, side: THREE.DoubleSide, depthWrite: false }));
         const mesh = new THREE.Mesh(geo, mat);
         mesh.position.copy(v(c.origin));
         mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), v(c.dir));
@@ -250,7 +287,7 @@ export class ModelRenderer {
         this.pickables.push(mesh);
         g.add(mesh);
         const edges = this.track(new THREE.EdgesGeometry(geo));
-        const lmat = this.track(new THREE.LineBasicMaterial({ color, transparent: true, opacity: c.builtin ? 0.35 : 0.9 }));
+        const lmat = this.track(new THREE.LineBasicMaterial({ color: hot ? settings.colors.selection : color, transparent: true, opacity: hot || selected ? 1 : c.builtin ? 0.35 : 0.9 }));
         const border = new THREE.LineSegments(edges, lmat);
         border.position.copy(mesh.position);
         border.quaternion.copy(mesh.quaternion);
@@ -285,6 +322,12 @@ export class ModelRenderer {
       const opacity = ghost ? 0.28 : link.kind === 'polygon' || link.kind === 'prism' ? 0.85 : 1;
       const bodyMat = this.material(selected ? settings.colors.selection : baseColor, { opacity, emissive: hovered && !selected ? settings.colors.selection : undefined });
       const edgeMat = this.material(selected ? settings.colors.selection : ghost ? '#888888' : darkenHex(baseColor, 0.25), { opacity: ghost ? 0.28 : 1 });
+      // the hovered edge / face itself is lit more strongly than the rest of the link, so the query cycle can tell the
+      // edges and faces of one polygon or prism apart (the whole link keeps its emissive tint as before)
+      const hoverEdge = hovered && state.hover?.type === 'edge' ? (state.hover.pointIds ?? null) : null;
+      const hoverFace = hovered && state.hover?.type === 'face' ? (state.hover.faceIndex ?? -1) : -1;
+      const edgeHotMat = hoverEdge ? this.material(settings.colors.selection, { emissive: settings.colors.selection, emissiveIntensity: 0.8 }) : null;
+      const faceHotMat = hoverFace >= 0 ? this.material(selected ? settings.colors.selection : baseColor, { opacity, emissive: settings.colors.selection, emissiveIntensity: 1 }) : null;
       const pickBase = (type: PickType, pointIds: ID[], faceIndex?: number): Partial<PickResult> | undefined => (ghost ? undefined : { type, id: link.id, linkId: link.id, pointIds, faceIndex });
 
       if (link.kind === 'bar') {
@@ -295,14 +338,14 @@ export class ModelRenderer {
         faces.forEach((face, fi) => {
           const pts = face.map(P);
           const geo = this.track(polygonGeometry(pts));
-          const mesh = new THREE.Mesh(geo, bodyMat);
+          const mesh = new THREE.Mesh(geo, faceHotMat && fi === hoverFace ? faceHotMat : bodyMat);
           if (!ghost) {
             mesh.userData = pickBase('face', face, fi)!;
             this.pickables.push(mesh);
           }
           group.add(mesh);
         });
-        for (const [a, b] of linkEdges(model, link)) this.pickableCylinder(group, P(a), P(b), r * 0.55, edgeMat, pickBase('edge', [a, b]));
+        for (const [a, b] of linkEdges(model, link)) this.pickableCylinder(group, P(a), P(b), r * 0.55, edgeHotMat && sameEdge(hoverEdge, [a, b]) ? edgeHotMat : edgeMat, pickBase('edge', [a, b]));
       } else if (link.kind === 'cylinder') {
         const [a, b] = link.pointIds;
         const radius = link.params.radius ?? 0.5;
@@ -379,10 +422,14 @@ export class ModelRenderer {
       if (j.type === 'planar' && j.a.kind === 'body') continue; // sketch-plane constraints are implicit
       if (model.links[j.a.linkId]?.hidden) continue;
       if (!isConstructionRefLocal(j.b) && model.links[j.b.linkId]?.hidden) continue;
-      const pl = this.jointPlacement(model, j, state.positions);
-      if (!pl) continue;
       const selected = this.isSelected(state, 'joint', j.id);
       const hovered = this.isHovered(state, 'joint', j.id);
+      if (isCrease(model, j)) {
+        this.buildCrease(state, j, selected, hovered);
+        continue;
+      }
+      const pl = this.jointPlacement(model, j, state.positions);
+      if (!pl) continue;
       const color = selected ? settings.colors.selection : '#2b2f33';
       const mat = this.material(color, { emissive: hovered ? settings.colors.selection : undefined });
       const pick: Partial<PickResult> = { type: 'joint', id: j.id };
@@ -423,6 +470,85 @@ export class ModelRenderer {
       this.pickables.push(mesh);
       g.add(mesh);
       if (settings.showLabels && (selected || hovered)) this.label(JOINTS[j.type]?.label ?? j.type, add(pl.at, [0, 0, r * 4]), 'label label--joint');
+    }
+  }
+
+  /**
+   * A crease (edge–edge revolute with merged end points) is drawn as a line
+   * along the shared edge, slightly thicker than the panel edges it covers, in
+   * the mountain / valley colour of its current dihedral (creaseMV; grey while
+   * the panels are coplanar) instead of the torus glyph. The dihedral is
+   * measured in the rendered pose, so Preview and Simulation poses are coloured
+   * as they fold. It remains pickable as the joint (selection colour when
+   * selected, emissive highlight when hovered) and shows "Crease M 160°" as its
+   * label when labels are on and it is selected or hovered.
+   */
+  private buildCrease(state: RenderState, j: Joint, selected: boolean, hovered: boolean): void {
+    const { model, settings } = state;
+    const P = (id: ID): Vec3 => state.positions.get(id) ?? model.points[id].pos;
+    const [a0, a1] = j.a.pointIds.map(P);
+    const mv = creaseMV(model, j, state.positions);
+    const color = selected ? settings.colors.selection : mv === 'M' ? settings.colors.mountain : mv === 'V' ? settings.colors.valley : CREASE_FLAT_COLOR;
+    const mat = this.material(color, { emissive: hovered ? settings.colors.selection : undefined });
+    this.pickableCylinder(this.vp.groups.joints, a0, a1, this.r * 0.55 * CREASE_RADIUS_FACTOR, mat, { type: 'joint', id: j.id });
+    if (settings.showLabels && (selected || hovered)) this.label(creaseLabel(mv, creaseDihedralDeg(model, j, state.positions)), add(centroid([a0, a1]), [0, 0, this.r * 4]), 'label label--joint');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Crease patterns
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Every visible crease pattern (plan 3b): its vertices as small discs in
+   * the pattern's plane and its creases as lines coloured by class — mountain
+   * and valley in the crease colours of Settings, border in the pattern
+   * border colour (dark grey), unassigned in the pattern unassigned colour
+   * (amber) — all pickable as `pvertex` / `pcrease` carrying the pattern's
+   * id. A selected crease or vertex takes the selection colour; a selected
+   * pattern colours its vertices only, so that the classes of its creases
+   * stay readable; a hovered element gets the emissive highlight. With labels
+   * on, a selected or hovered crease reads "Crease (mountain)", a hovered or
+   * selected vertex "Pattern vertex", and the pattern's name sits at the
+   * centroid of its vertices. Hidden patterns are not drawn and not pickable.
+   */
+  private buildPatterns(state: RenderState): void {
+    const { model, settings } = state;
+    const g = this.vp.groups.joints;
+    const r = this.r;
+    const sel = state.selection;
+    const hov = state.hover;
+    for (const p of Object.values(model.patterns ?? {})) {
+      if (p.hidden) continue;
+      const basis = patternBasis(model, p);
+      const up = scale(basis.normal, r * 3);
+      const discQ = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), v(basis.normal));
+      const patternSelected = sel?.type === 'pattern' && sel.id === p.id;
+      for (const c of Object.values(p.creases)) {
+        const a = p.vertices[c.a]?.pos;
+        const b = p.vertices[c.b]?.pos;
+        if (!a || !b) continue;
+        const selected = sel?.type === 'pcrease' && sel.id === p.id && sel.creaseId === c.id;
+        const hovered = hov?.type === 'pcrease' && hov.id === p.id && hov.creaseId === c.id;
+        const mat = this.material(selected ? settings.colors.selection : patternCreaseColor(c.cls, settings), { emissive: hovered ? settings.colors.selection : undefined });
+        this.pickableCylinder(g, a, b, r * 0.55 * CREASE_RADIUS_FACTOR, mat, { type: 'pcrease', id: p.id, creaseId: c.id });
+        if (settings.showLabels && (selected || hovered)) this.label(PATTERN.creaseLabel(c.cls), add(centroid([a, b]), up), 'label label--joint');
+      }
+      for (const vtx of Object.values(p.vertices)) {
+        const selectedAlone = sel?.type === 'pvertex' && sel.id === p.id && sel.pointId === vtx.id;
+        const hovered = hov?.type === 'pvertex' && hov.id === p.id && hov.pointId === vtx.id;
+        const mat = this.material(patternSelected || selectedAlone ? settings.colors.selection : PATTERN_VERTEX_COLOR, { emissive: hovered ? settings.colors.selection : undefined });
+        const disc = new THREE.Mesh(unitDisc, mat);
+        disc.position.copy(v(vtx.pos));
+        disc.scale.setScalar(r * 1.3);
+        disc.quaternion.copy(discQ);
+        g.add(disc);
+        // invisible pick proxy of at least ~5 px radius (pattern vertices must beat the crease proxies around them)
+        const proxyMat = this.track(new THREE.MeshBasicMaterial({ visible: false }));
+        g.add(this.sphere(vtx.pos, Math.max(r * 1.3, this.vp.worldPerPixel(vtx.pos) * 5), proxyMat, { type: 'pvertex', id: p.id, pointId: vtx.id }));
+        if (settings.showLabels && (selectedAlone || hovered)) this.label(PATTERN.vertexLabel, add(vtx.pos, up), 'label label--vertex');
+      }
+      const vs = Object.values(p.vertices);
+      if (settings.showLabels && vs.length) this.label(p.name, add(centroid(vs.map((x) => x.pos)), up), 'label label--pattern');
     }
   }
 
@@ -586,7 +712,29 @@ export class ModelRenderer {
     if (o.marker) {
       g.add(this.sphere(o.marker, r * 1.1, this.material(col, { flat: true })));
     }
+    // tool labels sit at their world position (the stylesheet offsets them from the vertex they annotate) and are
+    // stacked above the model labels, so a sector sum is never hidden under a datum or link name
+    for (const l of o.labels ?? []) this.label(l.text, l.pos, l.cls, 1);
   }
+}
+
+/** Colour of a pattern crease by class: mountain / valley as the creases of the mechanism, border and unassigned their own settings colours. */
+function patternCreaseColor(cls: CreaseClass, settings: AppSettings): string {
+  switch (cls) {
+    case 'M':
+      return settings.colors.mountain;
+    case 'V':
+      return settings.colors.valley;
+    case 'B':
+      return settings.colors.patternBorder;
+    default:
+      return settings.colors.patternUnassigned;
+  }
+}
+
+/** Is `edge` (either orientation) the hovered edge `hover`? */
+function sameEdge(hover: ID[] | null, edge: [ID, ID]): boolean {
+  return !!hover && hover.length === 2 && ((hover[0] === edge[0] && hover[1] === edge[1]) || (hover[0] === edge[1] && hover[1] === edge[0]));
 }
 
 function isConstructionRefLocal(x: Joint['b']): x is { constructionId: ID } {

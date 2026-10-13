@@ -4,12 +4,14 @@
  * the Edit and Sketch tools).
  */
 import { add, cross, dist, dot, len, normalize, perpendicular, scale, sub } from './geometry';
-import { applyPositions, commitSketch, modelSize, solveSketch } from './kinematics';
+import { adaptationLimit, diagnoseJoint, isReleaseAccepted, linkPath, mergedPointGroups, restore, type Diagnosis } from './feasibility';
+import { applyPositions, commitSketch, modelSize, solveSketch, solveSketchWithRelease } from './kinematics';
 import {
   addJoint,
   attachHelper,
   bodyPlaneJoint,
   buildRigidity,
+  creaseReleasePoints,
   findFrame,
   helperBase,
   jointsAtPoint,
@@ -21,7 +23,7 @@ import {
   serializeModel,
   sketchNormal,
 } from './model';
-import type { Construction, ID, Joint, JointType, Link, Model, Vec3 } from './types';
+import type { Construction, ID, Joint, JointType, Link, Model, Point, Vec3 } from './types';
 import { isConstructionRef } from './types';
 
 export interface MoveVertexOptions {
@@ -86,7 +88,7 @@ export function moveVertex(m: Model, pointId: ID, dest: Vec3, opts: MoveVertexOp
   commitSketch(m, res, free);
   rebuildShapeRigidity(m, link.id);
   reattachHelpers(m, m.links[link.id], affected);
-  const joints = autoJoinCoincident(m, m.links[link.id], [pointId], { defaultJoint: m.settings.defaultJoint, axis: sketchNormal(m), extraPairs: opts.joinTo ? [[pointId, opts.joinTo]] : [] });
+  const { joints } = autoJoinCoincident(m, m.links[link.id], [pointId], { defaultJoint: m.settings.defaultJoint, axis: sketchNormal(m), extraPairs: opts.joinTo ? [[pointId, opts.joinTo]] : [] });
   return { ok: true, residual: res.residual, joints };
 }
 
@@ -134,13 +136,64 @@ export function reframeRigidityAway(m: Model, link: Link, pointId: ID): void {
   rebuildShapeRigidity(m, link.id, [...others, pointId], frame.length === 3 ? frame : undefined);
 }
 
+/**
+ * Distance within which two vertices count as coincident for automatic
+ * joining: one part in a million of the model size, never below 1e-6 units.
+ * Floating-point noise between positions that were computed differently (a
+ * vertex typed as a coordinate, a Polygon-tool vertex placed by centre and
+ * rotation, a point carried through a solve) is ~1e-15 relative, far below
+ * this; a vertex the user placed near, but not on, another one (the snap
+ * tolerance is several screen pixels, ~1e-2 of the view) is far above it, so
+ * only vertices that were snapped, typed or constructed onto an existing
+ * vertex are joined. autoJoinCoincident, the Panel (sketch) tool, the Polygon
+ * tool and the sector-angle preview share this one tolerance.
+ */
+export function coincidenceTolerance(m: Model): number {
+  return 1e-6 * Math.max(1, modelSize(m));
+}
+
+/**
+ * The existing vertex (a point of role vertex or axis, never a helper) that
+ * `pos` coincides with within coincidenceTolerance, nearest first; null when
+ * there is none. `excludeLinkId` ignores the vertices of one link (the link
+ * being built or edited). This is how typed coordinates and grid-snapped
+ * clicks that land exactly on an existing vertex are treated like snapped
+ * ones by the Panel and Polygon tools.
+ */
+export function coincidentVertex(m: Model, pos: Vec3, opts: { excludeLinkId?: ID; tol?: number } = {}): Point | null {
+  const tol = opts.tol ?? coincidenceTolerance(m);
+  let best: Point | null = null;
+  let bestD = Infinity;
+  for (const q of Object.values(m.points)) {
+    if (q.linkId === opts.excludeLinkId || (q.role !== 'vertex' && q.role !== 'axis')) continue;
+    const d = dist(pos, q.pos);
+    if (d <= tol && d < bestD) {
+      best = q;
+      bestD = d;
+    }
+  }
+  return best;
+}
+
 export interface AutoJoinOptions {
   defaultJoint: JointType;
   /** Hinge axis for pins between links that are not on a common sketch plane (the common plane's normal is used otherwise). */
   axis: Vec3;
   /** Extra vertex pairs [vertexOfLink, vertexOfOtherLink] to treat as coincident even if not exactly so. */
   extraPairs?: [ID, ID][];
+  /** Coincidence distance (default coincidenceTolerance). */
   tol?: number;
+}
+
+export interface AutoJoinResult {
+  /** The joints created (empty when nothing coincided or when the join was refused). */
+  joints: Joint[];
+  /**
+   * Why the joints could not be kept: the re-solve for them was not accepted, the model was restored to its state
+   * before the call and `joints` is empty. Null when nothing was refused (joints may still be empty: nothing to
+   * join). The diagnosis is made for the first joint created, as the Joint tool's pre-flight does.
+   */
+  refused: Diagnosis | null;
 }
 
 /**
@@ -148,16 +201,24 @@ export interface AutoJoinOptions {
  * other links:
  *  - two consecutive vertices of `link` that coincide with the two ends of an
  *    edge of one other link become ONE edge–edge revolute joint (a crease);
- *    vertex pins already present on that pair are replaced;
+ *    vertex pins already present on that pair are replaced. An edge is a
+ *    crease between two panels only: when the other link's edge already is a
+ *    crease with a third link, or this edge of `link` has just been creased
+ *    with another link, no second crease is made on it;
  *  - any other coincident vertex gets the default joint (hinge axis = the
  *    normal of the sketch plane both links share) or, when the links are not
- *    on a common sketch plane, a spherical joint. A link that is already
- *    attached to a crease vertex through one of the crease partners is not
- *    pinned again.
- * Returns the created joints.
+ *    on a common sketch plane, a spherical joint. A vertex that is already
+ *    merged with the other link's vertex (directly, or through the creases
+ *    and pins of its neighbours: mergedPointGroups) is not pinned again.
+ * Returns the created joints. When the re-solve for the new joints is not
+ * accepted (never expected for vertices that already coincide, but a violated
+ * pose is never committed) the model is restored as it was, `joints` is empty
+ * and `refused` names the reason (diagnoseJoint on the rigid step of the
+ * solve), so the calling tool can say why the link stayed unjoined.
  */
-export function autoJoinCoincident(m: Model, link: Link, vertexIds: ID[], opts: AutoJoinOptions): Joint[] {
-  const tol = opts.tol ?? 1e-6 * Math.max(1, modelSize(m));
+export function autoJoinCoincident(m: Model, link: Link, vertexIds: ID[], opts: AutoJoinOptions): AutoJoinResult {
+  const tol = opts.tol ?? coincidenceTolerance(m);
+  const snapshot = serializeModel(m);
   const wanted = new Set(vertexIds);
   // vertex of link -> coincident vertices of other links
   const matches = new Map<ID, ID[]>();
@@ -191,13 +252,16 @@ export function autoJoinCoincident(m: Model, link: Link, vertexIds: ID[], opts: 
       if (!qb) continue;
       const isEdge = linkEdges(m, other).some(([x, y]) => (x === qa && y === qb) || (x === qb && y === qa));
       if (!isEdge) continue;
+      const alreadyCrease = Object.values(m.joints).some((j) => j.type === 'revolute' && j.pairs && j.pairs.length === 2 && j.pairs.every(([x, y]) => ([a, b].includes(x) && [qa, qb].includes(y)) || ([a, b].includes(y) && [qa, qb].includes(x))));
+      // an edge is a crease between two panels only: a third panel on an edge that is already a crease (the other
+      // link's, or this one creased a moment ago with another link) is not creased again
+      if (!alreadyCrease && (edgeCreased(m, qa, qb) || edgeCreased(m, a, b))) continue;
       // replace vertex pins on these pairs by one crease
       for (const [v, q] of [[a, qa], [b, qb]] as [ID, ID][]) {
         for (const j of jointsAtPoint(m, v)) {
           if (j.a.kind === 'vertex' && !isConstructionRef(j.b) && j.b.kind === 'vertex' && j.pairs?.some(([x, y]) => (x === v && y === q) || (x === q && y === v))) removeJoint(m, j.id);
         }
       }
-      const alreadyCrease = Object.values(m.joints).some((j) => j.type === 'revolute' && j.pairs && j.pairs.length === 2 && j.pairs.every(([x, y]) => ([a, b].includes(x) && [qa, qb].includes(y)) || ([a, b].includes(y) && [qa, qb].includes(x))));
       if (!alreadyCrease) {
         const j = addJoint(m, 'revolute', { linkId: link.id, kind: 'edge', pointIds: [a, b] }, { linkId: other.id, kind: 'edge', pointIds: [qa, qb] });
         if (j) created.push(j);
@@ -221,6 +285,9 @@ export function autoJoinCoincident(m: Model, link: Link, vertexIds: ID[], opts: 
         return !isConstructionRef(otherSide) && partners.has(otherSide.linkId);
       });
       if (viaPartner) continue;
+      // already one merged vertex with q through the creases and pins made so far (its neighbours' included)?
+      const groups = mergedPointGroups(m);
+      if (groups.root(v) === groups.root(q)) continue;
       const shared = sharedSketchPlane(m, link.id, other.id);
       const type: JointType = shared ? opts.defaultJoint : 'spherical';
       const axis = shared?.dir ?? opts.axis;
@@ -229,10 +296,31 @@ export function autoJoinCoincident(m: Model, link: Link, vertexIds: ID[], opts: 
     }
   }
   if (created.length) {
-    const res = solveSketch(m, { maxIter: 60 });
-    commitSketch(m, res);
+    // creases between edges that coincide only within the snap tolerance: the edited link's edge adapts, by no more
+    // than the snap-sized adaptation limit (a released solve that reshapes the link closes no legitimate loop)
+    const free = new Set(created.flatMap((j) => creaseReleasePoints(m, j, link.id)));
+    const res = solveSketchWithRelease(m, free, { maxIter: 60 });
+    if (!isReleaseAccepted(m, res, adaptationLimit(m, created))) {
+      // diagnosed on the rigid step before the restore, as the Joint tool's pre-flight does; the loop is the chain
+      // that connects the two links without this joint (the other joints just made included)
+      const first = created[0];
+      const loop = isConstructionRef(first.b) ? null : linkPath(m, first.a.linkId, first.b.linkId, first.id);
+      const refused = diagnoseJoint(m, first, res.rigid.residual, loop);
+      restore(m, snapshot);
+      return { joints: [], refused };
+    }
+    commitSketch(m, res, free);
   }
-  return created;
+  return { joints: created, refused: null };
+}
+
+/** Is the edge between the two points (either order) already a crease: an edge–edge revolute whose two merged pairs contain both? */
+function edgeCreased(m: Model, x: ID, y: ID): boolean {
+  return Object.values(m.joints).some((j) => {
+    if (j.type !== 'revolute' || j.pairs?.length !== 2) return false;
+    const ids = j.pairs.flat();
+    return ids.includes(x) && ids.includes(y);
+  });
 }
 
 /** The construction plane both links are sketched on, if they share one. */
@@ -303,17 +391,43 @@ export function rayPlane(o: Vec3, d: Vec3, origin: Vec3, normal: Vec3): Vec3 | n
   return add(o, scale(dd, t));
 }
 
+/** Rays whose direction makes an angle of less than acos(0.15) ≈ 81° with a plane are placed on it; flatter ones are "grazing". */
+export const PLACEMENT_MIN_COS = 0.15;
+
+/**
+ * Where a pointer ray places a point on a plane: the ray–plane hit when the ray
+ * meets the plane at a reasonable angle (|cos| ≥ minCos) in front of its origin,
+ * otherwise `fallback`. A grazing ray would fling the point far along the plane
+ * (a pixel of pointer movement becomes a large sweep across it), and a ray that
+ * misses the plane (parallel, or the hit behind the camera) has no point on it
+ * at all; the caller supplies the position to use then, e.g. the view-plane hit
+ * through the previous point (3-D placement, plan 2c) or the orthogonal
+ * projection (free sketch vertices on a fitted plane). A hit at the ray's own
+ * origin counts as a miss too: in the Front or Right view the camera sits on
+ * the TOP plane, so every off-centre ray meets it at depth 0, at the camera,
+ * which is not where the user points; "at the camera" is a depth below a
+ * thousandth of the fallback's depth, the distance the user is working at.
+ */
+export function placementOnPlane(ray: { o: Vec3; d: Vec3 }, origin: Vec3, normal: Vec3, fallback: Vec3, minCos = PLACEMENT_MIN_COS): Vec3 {
+  const d = normalize(ray.d);
+  const grazing = Math.abs(dot(d, normalize(normal))) < minCos;
+  if (grazing) return fallback;
+  const hit = rayPlane(ray.o, d, origin, normal);
+  if (!hit) return fallback;
+  const depth = dot(sub(hit, ray.o), d);
+  const working = Math.abs(dot(sub(fallback, ray.o), d));
+  return depth > 1e-3 * working ? hit : fallback;
+}
+
 /**
  * Place a free sketch vertex on a fitted plane: along its pointer ray when the
  * ray meets the plane at a reasonable angle in front of the camera, otherwise
  * by orthogonal projection (grazing rays would fling the vertex far away).
  */
-export function placeOnFittedPlane(p: Vec3, ray: { o: Vec3; d: Vec3 } | undefined, origin: Vec3, normal: Vec3, minCos = 0.15): Vec3 {
+export function placeOnFittedPlane(p: Vec3, ray: { o: Vec3; d: Vec3 } | undefined, origin: Vec3, normal: Vec3, minCos = PLACEMENT_MIN_COS): Vec3 {
   const proj = projectToPlane(p, origin, normal);
   if (!ray) return proj;
-  const grazing = Math.abs(dot(normalize(ray.d), normalize(normal))) < minCos;
-  if (grazing) return proj;
-  return rayPlane(ray.o, ray.d, origin, normal) ?? proj;
+  return placementOnPlane(ray, origin, normal, proj, minCos);
 }
 
 export { cross };

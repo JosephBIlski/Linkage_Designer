@@ -147,6 +147,15 @@ export interface Joint {
   offsets?: { slide?: number; angle?: number; planeNormal?: Vec3 };
   /** Point pairs that coincide (merged into one solver variable). */
   pairs?: [ID, ID][];
+  /**
+   * Origami crease data (edge–edge revolute with two merged pairs; see fold.ts isCrease). Optional, so files
+   * written before it existed load unchanged.
+   *  target: fold angle the user wants (degrees, the dihedral magnitude: 180 = flat, 0 = fully closed);
+   *  mv: mountain / valley assignment in the convention of fold.ts creaseMV (valley = the second panel is bent
+   *      toward the side of the first panel's face normal), used as the sign of the target and as the preferred
+   *      side when a flat vertex is pre-folded. Neither field moves geometry by itself.
+   */
+  fold?: { target?: number; mv?: 'M' | 'V' };
 }
 
 // ---------------------------------------------------------------------------
@@ -217,6 +226,47 @@ export interface Target {
 }
 
 // ---------------------------------------------------------------------------
+// Crease patterns (crease-pattern-first construction, src/core/creasePattern.ts)
+// ---------------------------------------------------------------------------
+
+/** Class of a pattern crease: mountain, valley, border (an outer edge of the sheet) or unassigned. */
+export type CreaseClass = 'M' | 'V' | 'B' | 'U';
+
+export interface PatternVertex {
+  id: ID;
+  /** Position in world units; always on the pattern's plane. */
+  pos: Vec3;
+}
+
+export interface PatternCrease {
+  id: ID;
+  /** End vertices (pattern vertex ids). The order carries no meaning. */
+  a: ID;
+  b: ID;
+  cls: CreaseClass;
+  /** Fold angle the generated crease should reach (degrees, 180 = flat, 0 = closed); copied to joint.fold.target. */
+  targetDeg?: number;
+}
+
+/**
+ * A crease pattern: a planar straight-line graph of creases drawn on a construction plane, from which panels
+ * (one polygon per bounded face) and creases (one edge–edge revolute per interior crease) are generated.
+ * `generated` records what the last generation produced so that regenerating removes it first; `faces` maps each
+ * generated link to the pattern vertices of its face in the order of the link's points.
+ */
+export interface CreasePattern {
+  id: ID;
+  name: string;
+  /** Construction plane the pattern lies on (origin, dir = normal, xDir). */
+  planeId: ID;
+  vertices: Record<ID, PatternVertex>;
+  creases: Record<ID, PatternCrease>;
+  generated?: { linkIds: ID[]; jointIds: ID[]; faces: Record<ID, ID[]> };
+  /** Hidden patterns are not drawn or pickable. */
+  hidden?: boolean;
+}
+
+// ---------------------------------------------------------------------------
 // Model
 // ---------------------------------------------------------------------------
 
@@ -245,6 +295,8 @@ export interface Model {
   targets: Target[];
   settings: ModelSettings;
   nextId: number;
+  /** Crease patterns (optional: files written before they existed load unchanged). */
+  patterns?: Record<ID, CreasePattern>;
 }
 
 export const DEFAULT_SETTINGS: ModelSettings = {

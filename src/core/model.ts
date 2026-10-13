@@ -44,7 +44,12 @@ export function createModel(): Model {
   return m;
 }
 
-/** Creo-style default datum geometry: origin, X/Y/Z axes, TOP (XY), FRONT (XZ) and RIGHT (YZ) planes. */
+/**
+ * Creo-style default datum geometry: origin, X/Y/Z axes, TOP (XY), FRONT (XZ) and RIGHT (YZ) planes. Each plane's
+ * normal points toward the camera of the view that looks at it (scene.ts setView: Top from +Z, Front from −Y, Right
+ * from +X), so that what is drawn on a plane in its view — the winding of a panel, the mountain / valley class of a
+ * crease pattern (creasePattern.ts patternBasis, fold.ts creaseMV) — is judged from the side the user sees it from.
+ */
 export function addBuiltinDatums(m: Model): void {
   const put = (c: Construction) => (m.construction[c.id] = c);
   put({ id: 'point_origin', kind: 'point', name: 'ORIGIN', origin: [0, 0, 0], builtin: true });
@@ -52,7 +57,7 @@ export function addBuiltinDatums(m: Model): void {
   put({ id: 'axis_y', kind: 'axis', name: 'Y', origin: [0, 0, 0], dir: [0, 1, 0], size: 20, builtin: true });
   put({ id: 'axis_z', kind: 'axis', name: 'Z', origin: [0, 0, 0], dir: [0, 0, 1], size: 20, builtin: true });
   put({ id: 'plane_top', kind: 'plane', name: 'TOP', origin: [0, 0, 0], dir: [0, 0, 1], xDir: [1, 0, 0], size: 6, builtin: true });
-  put({ id: 'plane_front', kind: 'plane', name: 'FRONT', origin: [0, 0, 0], dir: [0, 1, 0], xDir: [1, 0, 0], size: 6, builtin: true });
+  put({ id: 'plane_front', kind: 'plane', name: 'FRONT', origin: [0, 0, 0], dir: [0, -1, 0], xDir: [1, 0, 0], size: 6, builtin: true });
   put({ id: 'plane_right', kind: 'plane', name: 'RIGHT', origin: [0, 0, 0], dir: [1, 0, 0], xDir: [0, 1, 0], size: 6, builtin: true });
 }
 
@@ -269,10 +274,31 @@ function baseLink(m: Model, kind: LinkKind, name: string | undefined): Link {
 function finishLink(m: Model, link: Link, opts: LinkOptions): Link {
   link.rigidity = buildRigidity(m, linkShapePointIds(m, link));
   if (opts.color) link.color = opts.color;
-  if (opts.onPlaneId && (link.kind === 'bar' || link.kind === 'polygon')) {
-    addJoint(m, 'planar', { linkId: link.id, kind: 'body', pointIds: [...link.pointIds] }, { constructionId: opts.onPlaneId });
-  }
+  if (opts.onPlaneId) setBodyPlane(m, link.id, opts.onPlaneId);
   return link;
+}
+
+/**
+ * Keep a link on a construction plane, or release it. The constraint is the planar joint between the link's 'body'
+ * feature (all of its visible points) and the plane, the same joint geometry drawn in 2-D mode receives when it is
+ * created (finishLink), which compile.ts turns into frozen coordinates for axis-aligned planes. A link is on at
+ * most one plane: an existing body planar joint is removed before the new one is added, and `planeId` null only
+ * removes it. Only bars and polygons are planar bodies (a prism or cylinder has points off every plane), and an
+ * unknown plane leaves the link as it was. Returns the body planar joint the link has after the call (null when it
+ * has none). The points are not moved onto the plane here; the caller re-solves (trySolveCommit) so that a pose
+ * which cannot satisfy the new constraint is refused instead of committed.
+ */
+export function setBodyPlane(m: Model, linkId: ID, planeId: ID | null): Joint | null {
+  const link = m.links[linkId];
+  if (!link) return null;
+  const existing = bodyPlaneJoint(m, linkId);
+  if (planeId === null) {
+    if (existing) removeJoint(m, existing.id);
+    return null;
+  }
+  if (m.construction[planeId]?.kind !== 'plane' || (link.kind !== 'bar' && link.kind !== 'polygon')) return existing;
+  if (existing) removeJoint(m, existing.id);
+  return addJoint(m, 'planar', { linkId: link.id, kind: 'body', pointIds: [...link.pointIds] }, { constructionId: planeId });
 }
 
 export function addBar(m: Model, a: Vec3, b: Vec3, opts: LinkOptions = {}): Link {
@@ -453,6 +479,9 @@ export function featureOf(link: Link, kind: FeatureKind, pointIds: ID[]): Featur
   return { linkId: link.id, kind, pointIds };
 }
 
+/** Edge and cylinder-axis features both carry a line through two end points and are treated alike by axis-type joints. */
+const axisLike = (k: FeatureKind): boolean => k === 'edge' || k === 'axis';
+
 /** Which joint types can connect two features (or a feature and construction geometry)? */
 export function jointCompatible(m: Model, type: JointType, a: Feature, b: Feature | ConstructionRef): boolean {
   if (a.kind === 'body') return type === 'planar' && isConstructionRef(b) && m.construction[b.constructionId]?.kind === 'plane';
@@ -474,7 +503,6 @@ export function jointCompatible(m: Model, type: JointType, a: Feature, b: Featur
   }
   const fb = b as Feature;
   if (fb.kind === 'body' || a.linkId === fb.linkId) return false;
-  const axisLike = (k: FeatureKind) => k === 'edge' || k === 'axis';
   switch (type) {
     case 'spherical':
       return a.kind === 'vertex' && fb.kind === 'vertex';
@@ -496,6 +524,40 @@ export interface JointOptions {
   /** Axis direction for axis-type joints created from vertex features (default: sketch plane normal / +Z). */
   axis?: Vec3;
   pitch?: number;
+  /**
+   * Relative length tolerance (fraction of the longer edge) within which two edges joined by a revolute are treated
+   * as the same length and merged into a crease (default EDGE_LENGTH_TOLERANCE).
+   */
+  lengthTolerance?: number;
+}
+
+/**
+ * Default relative tolerance for "same length" edges in an edge–edge revolute: hand-placed geometry agrees to about
+ * a snap distance (one part in a thousand of the edge), not to floating-point precision.
+ */
+export const EDGE_LENGTH_TOLERANCE = 1e-3;
+
+/**
+ * Relative difference below which two merged edge lengths are identical (floating-point noise of the Polygon tool):
+ * no link has to adapt its rest geometry when the crease is created.
+ */
+export const CREASE_EXACT_TOLERANCE = 1e-9;
+
+/**
+ * Largest change of a rest distance (relative to the longer edge) an adapting link may take when a crease merges two
+ * edges of slightly different length: twice the merge tolerance, i.e. the snap-sized noise the merge was meant to
+ * absorb. A released solve that reshapes a panel by more than this is not absorbing noise but closing a loop that
+ * rigid panels cannot close, and is refused (feasibility.ts adaptationLimit, kinematics.ts releaseDrift).
+ */
+export const CREASE_ADAPTATION_TOLERANCE = 2 * EDGE_LENGTH_TOLERANCE;
+
+/** Current-pose lengths of the two edges of an edge/axis–edge/axis revolute (la for feature a, lb for b), else null. */
+export function creaseEdgeLengths(m: Model, joint: Joint): { la: number; lb: number } | null {
+  if (joint.type !== 'revolute' || isConstructionRef(joint.b)) return null;
+  if (!axisLike(joint.a.kind) || !axisLike(joint.b.kind)) return null;
+  const ids = [...joint.a.pointIds, ...joint.b.pointIds];
+  if (ids.length < 4 || ids.some((id) => !m.points[id])) return null;
+  return { la: dist(P(m, joint.a.pointIds[0]), P(m, joint.a.pointIds[1])), lb: dist(P(m, joint.b.pointIds[0]), P(m, joint.b.pointIds[1])) };
 }
 
 /** Point of `link` farthest from the line through the two axis points (null if all collinear). */
@@ -565,7 +627,7 @@ export function addJoint(m: Model, type: JointType, a: Feature, b: Feature | Con
     if (helpers[0] || helpers[1]) joint.helpers = helpers;
 
     const axA = jointAxisPoints(m, joint, 'a')!;
-    const axB = linkB ? jointAxisPoints(m, joint, 'b')! : null;
+    let axB = linkB ? jointAxisPoints(m, joint, 'b')! : null;
 
     if (type === 'revolute' && axB) {
       const fa = a;
@@ -582,15 +644,28 @@ export function addJoint(m: Model, type: JointType, a: Feature, b: Feature | Con
         const near = dist(P(m, vertexSide[0]), P(m, edgeSide[0])) <= dist(P(m, vertexSide[0]), P(m, edgeSide[1])) ? edgeSide[0] : edgeSide[1];
         joint.pairs = [[vertexSide[0], near]];
       } else {
+        // edge/axis against edge/axis (origami crease, or a hinge along two edges of different length).
+        // The end points are always paired by proximity: straight (A0–B0, A1–B1) or crossed (A0–B1, A1–B0).
         const la = dist(P(m, axA[0]), P(m, axA[1]));
         const lb = dist(P(m, axB[0]), P(m, axB[1]));
-        if (Math.abs(la - lb) < 1e-6 * Math.max(la, lb, 1)) {
-          // equal-length edges (origami crease): end points coincide pairwise, choosing the closer matching
-          const straight = dist(P(m, axA[0]), P(m, axB[0])) + dist(P(m, axA[1]), P(m, axB[1]));
-          const crossed = dist(P(m, axA[0]), P(m, axB[1])) + dist(P(m, axA[1]), P(m, axB[0]));
+        const straight = dist(P(m, axA[0]), P(m, axB[0])) + dist(P(m, axA[1]), P(m, axB[1]));
+        const crossed = dist(P(m, axA[0]), P(m, axB[1])) + dist(P(m, axA[1]), P(m, axB[0]));
+        const tol = opts.lengthTolerance ?? EDGE_LENGTH_TOLERANCE;
+        if (Math.abs(la - lb) <= tol * Math.max(la, lb)) {
+          // same length within the snap tolerance: the end points coincide pairwise (merged solver variables).
+          // A small mismatch is absorbed by one link's rest geometry (see creaseReleasePoints), never spread
+          // over the mechanism by the least-squares solve.
           joint.pairs = straight <= crossed ? [[axA[0], axB[0]], [axA[1], axB[1]]] : [[axA[0], axB[1]], [axA[1], axB[0]]];
         } else {
-          joint.offsets = { slide: 0 };
+          // genuinely different lengths: B's end points lie on A's line and the slide along it is locked.
+          // Orient B like A first (a copy of the feature with reversed end points when the crossed pairing is
+          // closer; the caller's object is never mutated), then measure the slide offset of B's first end point
+          // along A in the units slideLock uses, (B0 − A0) · unit(A1 − A0), so the link keeps its position
+          // along the axis instead of being dragged to A's first end point.
+          if (crossed < straight) joint.b = { ...fb, pointIds: [fb.pointIds[1], fb.pointIds[0]] };
+          axB = jointAxisPoints(m, joint, 'b')!;
+          const dir = normalize(sub(P(m, axA[1]), P(m, axA[0])));
+          joint.offsets = { slide: dot(sub(P(m, axB[0]), P(m, axA[0])), dir) };
         }
       }
     }
@@ -639,6 +714,42 @@ export function addJoint(m: Model, type: JointType, a: Feature, b: Feature | Con
   return joint;
 }
 
+/**
+ * End points of the edge that must adapt ("rubber-band") after a crease merged two edges whose lengths differ
+ * slightly (within the merge tolerance but beyond CREASE_EXACT_TOLERANCE, measured in the current pose). Merging
+ * both end-point pairs makes the two links' rest lengths contradict each other by Δ, so a plain least-squares solve
+ * would spread Δ over the whole mechanism and never converge; releasing one edge lets that link take the other's
+ * length instead (commitSketch bakes it). The link of feature b adapts unless it is ground or locked, then the link
+ * of a; `preferLinkId` names the side that should adapt when it may (e.g. the link being sketched). Returns [] when
+ * no adaptation is needed (not a merged edge–edge crease, or identical lengths) or when neither side may move.
+ * Callers pass the ids as freePointIds to solveSketch / solveSketchWithRelease and to commitSketch.
+ */
+export function creaseReleasePoints(m: Model, joint: Joint, preferLinkId?: ID): ID[] {
+  if (!mergedCreaseMismatch(m, joint)) return [];
+  const fa = joint.a;
+  const fb = joint.b as Feature;
+  const mayMove = (f: Feature): boolean => {
+    const link = m.links[f.linkId];
+    return !!link && !link.ground && !link.locked;
+  };
+  const side = (preferLinkId === fa.linkId ? [fa, fb] : [fb, fa]).find(mayMove);
+  return side ? [side.pointIds[0], side.pointIds[1]] : [];
+}
+
+/**
+ * Lengths of the two edges of a merged edge/axis crease (two end-point pairs) that differ by more than
+ * CREASE_EXACT_TOLERANCE in the current pose, i.e. a crease that needs one link to adapt its rest geometry; null for
+ * identical lengths and for joints that are not merged creases. creaseReleasePoints names the link that adapts; when
+ * it names none (both panels ground or locked) the mismatch cannot be absorbed and the crease is refused
+ * (feasibility.ts unabsorbedCreaseLengths).
+ */
+export function mergedCreaseMismatch(m: Model, joint: Joint): { la: number; lb: number } | null {
+  if (joint.pairs?.length !== 2) return null;
+  const lengths = creaseEdgeLengths(m, joint);
+  if (!lengths) return null;
+  return Math.abs(lengths.la - lengths.lb) > CREASE_EXACT_TOLERANCE * Math.max(lengths.la, lengths.lb) ? lengths : null;
+}
+
 export function sketchNormal(m: Model): Vec3 {
   const pl = m.construction[m.settings.sketchPlaneId];
   return pl?.dir ? pl.dir : [0, 0, 1];
@@ -653,7 +764,7 @@ export function changeJointType(m: Model, jointId: ID, type: JointType, opts: Jo
   const axis = old.axis;
   const pitch = old.pitch;
   removeJoint(m, jointId);
-  const j = addJoint(m, type, a, b, { axis: opts.axis ?? axis, pitch: opts.pitch ?? pitch });
+  const j = addJoint(m, type, a, b, { axis: opts.axis ?? axis, pitch: opts.pitch ?? pitch, lengthTolerance: opts.lengthTolerance });
   return j;
 }
 
@@ -706,6 +817,32 @@ export function bodyPlaneJoint(m: Model, linkId: ID): Joint | null {
   return null;
 }
 
+/**
+ * Creases that the sketch-plane constraint makes rigid: edge/axis–edge/axis revolute joints with two merged pairs
+ * whose links are both kept on the same construction plane (setBodyPlane) and whose axis lies in that plane
+ * (|axis · normal| < 1e-6, measured in the current pose). Folding about an in-plane axis would lift points of both
+ * links out of the plane, so such a crease cannot rotate at all and contributes nothing to the DOF count; this is
+ * why a flat origami vertex drawn in 2-D mode reports DOF 0 although every crease is a hinge. The Mechanism panel
+ * and the DOF chip explain it with SIM.creasesLocked. Hinges between edges of different length (slide-locked, no
+ * merged pairs) and links on two different planes are not reported.
+ */
+export function creasesLockedByPlane(m: Model): ID[] {
+  const out: ID[] = [];
+  for (const j of Object.values(m.joints)) {
+    if (j.type !== 'revolute' || isConstructionRef(j.b) || j.pairs?.length !== 2) continue;
+    if (!axisLike(j.a.kind) || !axisLike(j.b.kind)) continue;
+    const pa = bodyPlaneJoint(m, j.a.linkId);
+    const pb = bodyPlaneJoint(m, j.b.linkId);
+    if (!pa || !pb || !isConstructionRef(pa.b) || !isConstructionRef(pb.b) || pa.b.constructionId !== pb.b.constructionId) continue;
+    const plane = m.construction[pa.b.constructionId];
+    const [p0, p1] = j.a.pointIds;
+    if (!plane?.dir || !m.points[p0] || !m.points[p1]) continue;
+    const axis = normalize(sub(P(m, p1), P(m, p0)));
+    if (len(axis) > 0.5 && Math.abs(dot(axis, normalize(plane.dir))) < 1e-6) out.push(j.id);
+  }
+  return out;
+}
+
 export function removeLink(m: Model, linkId: ID): void {
   const link = m.links[linkId];
   if (!link) return;
@@ -719,9 +856,20 @@ export function removeLink(m: Model, linkId: ID): void {
   delete m.links[linkId];
 }
 
+/** Does a crease pattern lie on construction plane `id`? Such a plane cannot be deleted (removeConstruction). */
+export function planeCarriesPattern(m: Model, id: ID): boolean {
+  return Object.values(m.patterns ?? {}).some((p) => p.planeId === id);
+}
+
+/**
+ * Remove a construction element with the joints and editing-point constraints that refer to it. Refused (false) for
+ * an unknown or builtin element and for a plane a crease pattern lies on: the pattern's 2-D frame, and with it the
+ * side its crease classes are judged from, is the plane's, so deleting the plane would silently re-base the pattern
+ * on world XY (or leave it without a frame); the pattern has to be deleted first.
+ */
 export function removeConstruction(m: Model, id: ID): boolean {
   const c = m.construction[id];
-  if (!c || c.builtin) return false;
+  if (!c || c.builtin || planeCarriesPattern(m, id)) return false;
   for (const j of Object.values(m.joints)) if (isConstructionRef(j.b) && j.b.constructionId === id) removeJoint(m, j.id);
   m.targets = m.targets.filter((t) => t.constructionId !== id);
   delete m.construction[id];
@@ -746,7 +894,12 @@ export function translateLink(m: Model, link: Link, delta: Vec3): void {
 // Drivers
 // ---------------------------------------------------------------------------
 
-/** Candidate angle drivers: bars / polygon edges with one end joined (directly) to the ground link or construction geometry. */
+/**
+ * Candidate angle drivers: bars / polygon edges with one end joined (directly) to the ground link or construction
+ * geometry. The tip is the point of the link farthest from the joint's axis line through the pivot (a point on that
+ * line, such as the other end of a hinged edge, would give an angle driver with no range, since rotating about the
+ * axis never moves it); a link with no point off the axis offers no candidate.
+ */
 export function candidateAngleDrivers(m: Model): { linkId: ID; pivotId: ID; tipId: ID; axis: Vec3 }[] {
   const out: { linkId: ID; pivotId: ID; tipId: ID; axis: Vec3 }[] = [];
   const ground = groundLink(m);
@@ -760,9 +913,11 @@ export function candidateAngleDrivers(m: Model): { linkId: ID; pivotId: ID; tipI
         if (!grounded) continue;
         if (j.type !== 'revolute' && j.type !== 'spherical' && j.type !== 'cylindrical') continue;
         const axis = j.axis ?? sketchNormal(m);
-        // tip: farthest other visible point of this link
+        // tip: the point of this link farthest from the axis line through the pivot (never one on that line)
+        const n = normalize(axis);
+        const perp = (q: ID): number => len(cross(sub(P(m, q), P(m, pid)), n));
         let tip: ID | null = null;
-        for (const q of link.pointIds) if (q !== pid && (!tip || dist(P(m, q), P(m, pid)) > dist(P(m, tip), P(m, pid)))) tip = q;
+        for (const q of link.pointIds) if (q !== pid && perp(q) > 1e-9 * Math.max(1, dist(P(m, q), P(m, pid))) && (!tip || perp(q) > perp(tip))) tip = q;
         if (tip) out.push({ linkId: link.id, pivotId: pid, tipId: tip, axis });
       }
     }
@@ -841,6 +996,13 @@ export function parseModel(json: string): Model {
   for (const l of Object.values(m.links)) {
     l.helperIds ??= [];
     l.rigidity ??= [];
+  }
+  // crease patterns are optional (files written before they existed have none); normalise the ones present
+  if (m.patterns) {
+    for (const p of Object.values(m.patterns)) {
+      p.vertices ??= {};
+      p.creases ??= {};
+    }
   }
   return m;
 }

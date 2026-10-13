@@ -22,17 +22,21 @@ import {
   type SweepResult,
 } from './core/kinematics';
 import { EXAMPLE_BUILDERS } from './core/examples';
-import { addAngleDriver, candidateAngleDrivers, cloneModel, createModel, parseModel, refreshRigidity, serializeModel, groundLink } from './core/model';
+import { addAngleDriver, addFoldDriver, candidateAngleDrivers, cloneModel, createModel, creasesLockedByPlane, parseModel, serializeModel, groundLink } from './core/model';
+import { solidifyRestGeometry } from './core/feasibility';
+import { findCreaseLoops, isCrease, type CreaseLoop } from './core/fold';
+import { validateCreasePattern, type VertexReport } from './core/validate';
 import { analyseDesign, applyDesign, solveDesign, symmetricEigen3, type DesignAnalysis, type DesignResult, type PointDesignSpace } from './core/synthesis';
 import { normalize, sub } from './core/geometry';
-import type { ID, JointType, Model, Target, Vec3 } from './core/types';
+import type { CreaseClass, ID, JointType, Model, Target, Vec3 } from './core/types';
 import { loadSettings, saveSettings, type AppSettings } from './ui/settings';
 import { LINK_NAMES, SIM, STATUS } from './ui/strings';
 import { ModelRenderer, type DesignSpaceView, type EditPointView, type OverlayView, type PathView, type RenderState, type SelectionView, type SurfaceView } from './viewport/render';
 import { Viewport, type PickResult } from './viewport/scene';
+import { pickKey } from './viewport/pickRank';
 
 export type Mode = 'construction' | 'simulation' | 'preview';
-export type ToolName = 'select' | 'bar' | 'sketch' | 'polygon' | 'prism' | 'cylinder' | 'edit' | 'cpoint' | 'caxis' | 'cplane' | 'joint' | 'ground' | 'driver' | 'mirror' | 'pattern' | 'delete';
+export type ToolName = 'select' | 'bar' | 'sketch' | 'cpattern' | 'polygon' | 'prism' | 'cylinder' | 'edit' | 'cpoint' | 'caxis' | 'cplane' | 'joint' | 'ground' | 'driver' | 'mirror' | 'pattern' | 'delete';
 
 export interface ToolOptions {
   sides: number;
@@ -46,6 +50,8 @@ export interface ToolOptions {
   patternKind: 'linear' | 'polar';
   patternCount: number;
   patternAngle: number;
+  /** Crease pattern tool: the class of the creases it draws. */
+  creaseClass: CreaseClass;
 }
 
 export interface SimState {
@@ -59,6 +65,12 @@ export interface SimState {
   analysis: DesignAnalysis | null;
   mobility: MobilityResult | null;
   violation: number;
+  /** Creases that cannot fold because both of their panels are kept on the same sketch plane (creasesLockedByPlane). */
+  lockedCreaseIds: ID[];
+  /** Crease loops around shared vertices (findCreaseLoops); a flat one offers the Fold command in the Mechanism panel. */
+  creaseLoops: CreaseLoop[];
+  /** Crease-pattern checks of every interior vertex (validateCreasePattern); the Mechanism panel lists them. */
+  vertexReports: VertexReport[];
   assembled: boolean;
   showDesignSpace: boolean;
   showEditPoints: boolean;
@@ -80,16 +92,22 @@ export class App {
   settings: AppSettings;
   mode: Mode = 'construction';
   tool: ToolName = 'select';
-  toolOptions: ToolOptions = { sides: 4, radius: 1, height: 1, mode2d: true, planeMode: 'three', offset: 1, jointType: 'revolute', pitch: 1, patternKind: 'linear', patternCount: 3, patternAngle: 360 };
+  toolOptions: ToolOptions = { sides: 4, radius: 1, height: 1, mode2d: true, planeMode: 'three', offset: 1, jointType: 'revolute', pitch: 1, patternKind: 'linear', patternCount: 3, patternAngle: 360, creaseClass: 'U' };
   selection: SelectionView | null = null;
   hover: PickResult | null = null;
   overlay: OverlayView = {};
   ghost: Positions | null = null;
   status = STATUS.ready;
   hint = '';
+  /**
+   * A refusal or failure message (joint pre-flight, fold, refused edit, solidify) kept in the Mechanism panel until
+   * it is dismissed or the next change succeeds: the status bar shows the same text but is replaced by the next
+   * hover description, and long diagnoses do not fit on one line there.
+   */
+  notice = '';
   viewport: Viewport;
   renderer: ModelRenderer;
-  sim: SimState = { activeDriver: 0, sweep: null, surface: null, poseValues: [], poses: [], design: null, analysis: null, mobility: null, violation: 0, assembled: true, showDesignSpace: true, showEditPoints: true, showPaths: true, message: '' };
+  sim: SimState = { activeDriver: 0, sweep: null, surface: null, poseValues: [], poses: [], design: null, analysis: null, mobility: null, violation: 0, lockedCreaseIds: [], creaseLoops: [], vertexReports: [], assembled: true, showDesignSpace: true, showEditPoints: true, showPaths: true, message: '' };
   preview: PreviewState = { value: 0, playing: false, speed: 60, direction: 1, positions: null, trace: true };
   fileName = '';
 
@@ -159,10 +177,13 @@ export class App {
   /** Call after mutating the model. */
   endChange(opts: { skipUndo?: boolean; keepSelection?: boolean } = {}): void {
     if (this.pendingSnapshot !== null) {
-      if (!opts.skipUndo && this.pendingSnapshot !== serializeModel(this.model)) {
-        this.undoStack.push(this.pendingSnapshot);
-        if (this.undoStack.length > 100) this.undoStack.shift();
-        this.redoStack = [];
+      if (this.pendingSnapshot !== serializeModel(this.model)) {
+        this.notice = ''; // a change went through: the previous refusal no longer applies
+        if (!opts.skipUndo) {
+          this.undoStack.push(this.pendingSnapshot);
+          if (this.undoStack.length > 100) this.undoStack.shift();
+          this.redoStack = [];
+        }
       }
       this.pendingSnapshot = null;
     }
@@ -195,6 +216,7 @@ export class App {
     this.redoStack.push(serializeModel(this.model));
     this.model = parseModel(s);
     this.selection = null;
+    this.notice = '';
     this.markDirty();
   }
 
@@ -204,6 +226,7 @@ export class App {
     this.undoStack.push(serializeModel(this.model));
     this.model = parseModel(s);
     this.selection = null;
+    this.notice = '';
     this.markDirty();
   }
 
@@ -245,7 +268,8 @@ export class App {
   }
 
   setHover(h: PickResult | null): void {
-    const changed = JSON.stringify(h && { t: h.type, id: h.id, p: h.pointId, k: h.pose }) !== JSON.stringify(this.hover && { t: this.hover.type, id: this.hover.id, p: this.hover.pointId, k: this.hover.pose });
+    // the full feature identity (point ids, face index included): the query cycle steps between edges of one polygon
+    const changed = (h ? pickKey(h) : '') !== (this.hover ? pickKey(this.hover) : '');
     this.hover = h;
     if (changed) {
       if (this.mode === 'simulation' && !(this.selection?.type === 'editPoint')) {
@@ -266,6 +290,18 @@ export class App {
   setHint(text: string): void {
     this.hint = text;
     this.onStatus?.();
+  }
+
+  /** Keep a message in the Mechanism panel (see `notice`); an empty string dismisses it. */
+  setNotice(text: string): void {
+    this.notice = text;
+    this.notify();
+  }
+
+  /** Report a refusal or failure: in the status bar now and in the Mechanism panel until dismissed or the next change. */
+  report(text: string): void {
+    this.setStatus(text);
+    this.setNotice(text);
   }
 
   setOverlay(o: OverlayView): void {
@@ -292,6 +328,7 @@ export class App {
     this.redoStack = [];
     this.pendingSnapshot = null;
     this.selection = null;
+    this.notice = '';
     this.sim.sweep = null;
     this.sim.design = null;
     this.sim.analysis = null;
@@ -322,6 +359,8 @@ export class App {
       .filter((p) => p.role !== 'helper')
       .map((p) => p.pos);
     for (const path of this.currentPaths()) pts.push(...path.points);
+    // the visible crease patterns are framed too, so a pattern-only model fits as well
+    for (const p of Object.values(this.model.patterns ?? {})) if (!p.hidden) for (const v of Object.values(p.vertices)) pts.push(v.pos);
     this.viewport.fit(pts);
   }
 
@@ -336,23 +375,40 @@ export class App {
   // Kinematics refresh
   // ---------------------------------------------------------------------------
 
+  /**
+   * A model without a driver gets a default one when a motion is needed: a fold driver on its first crease when it has
+   * creases (a folded pattern then previews as a fold, the input being the crease's dihedral, as the Fold command's
+   * kept driver does), else the first candidate angle driver.
+   */
   private ensureDriver(): void {
-    if (this.model.drivers.length > 0) return;
-    const cands = candidateAngleDrivers(this.model);
+    const m = this.model;
+    if (m.drivers.length > 0) return;
+    const crease = Object.values(m.joints).find((j) => isCrease(m, j));
+    if (crease && addFoldDriver(m, crease.id)) {
+      syncDriverValues(m);
+      return;
+    }
+    const cands = candidateAngleDrivers(m);
     if (cands.length === 0) return;
     const c = cands[0];
-    addAngleDriver(this.model, c.linkId, c.pivotId, c.tipId, c.axis);
+    addAngleDriver(m, c.linkId, c.pivotId, c.tipId, c.axis);
   }
 
   private recomputeKinematics(): void {
     const m = this.model;
     const sim = this.sim;
     sim.message = '';
+    // cached here so the panels and the DOF chip only read it
+    sim.lockedCreaseIds = creasesLockedByPlane(m);
     try {
+      sim.creaseLoops = findCreaseLoops(m);
+      sim.vertexReports = validateCreasePattern(m);
       sim.mobility = Object.keys(m.links).length ? computeMobility(m) : null;
       sim.violation = Object.keys(m.links).length ? currentViolation(m) : 0;
     } catch (e) {
       console.error(e);
+      sim.creaseLoops = [];
+      sim.vertexReports = [];
       sim.mobility = null;
     }
     const needMotion = this.mode !== 'construction' || m.settings.displayPointIds.length > 0;
@@ -526,11 +582,19 @@ export class App {
     this.markDirty();
   }
 
-  /** Commit the current geometry as the design (rest lengths from current positions). */
-  solidifyAssumptions(): void {
+  /**
+   * Commit the current geometry as the design (rest lengths from current
+   * positions). Refused, with the links untouched and a status message, when
+   * the pose violates the constraints: baking it would make the violation the
+   * design. Returns whether the design was solidified.
+   */
+  solidifyAssumptions(): boolean {
     this.beginChange();
-    for (const l of Object.values(this.model.links)) refreshRigidity(this.model, l);
-    this.endChange();
+    const ok = solidifyRestGeometry(this.model);
+    this.endChange(); // records nothing when the links were left alone
+    if (ok) this.setStatus(SIM.solidified);
+    else this.report(SIM.solidifyRefused(currentViolation(this.model)));
+    return ok;
   }
 
   // ---------------------------------------------------------------------------
@@ -659,9 +723,14 @@ export class App {
   // File IO
   // ---------------------------------------------------------------------------
 
-  /** Serialise the model, solidifying the current design first. */
+  /**
+   * Serialise the model, solidifying the current design first. A pose that
+   * violates the constraints is saved as it is (rest geometry untouched, so
+   * the file holds the previous design and the violated positions) and the
+   * status bar says so; CSV / OBJ exports never solidify.
+   */
   saveToJson(): string {
-    for (const l of Object.values(this.model.links)) refreshRigidity(this.model, l);
+    if (!solidifyRestGeometry(this.model)) this.report(SIM.savedUnsolidified(currentViolation(this.model)));
     return serializeModel(this.model);
   }
 

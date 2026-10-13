@@ -6,26 +6,21 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DRenderer } from 'three/addons/renderers/CSS2DRenderer.js';
-import type { ID, Vec3 } from '../core/types';
+import type { Vec3 } from '../core/types';
 import type { AppSettings } from '../ui/settings';
+import { PICK_PRIORITY, rankPickCandidates, type PickResult } from './pickRank';
+import { QUERY_CLICK_PX } from './pickCycle';
 
-export type PickType = 'vertex' | 'edge' | 'face' | 'axis' | 'joint' | 'construction' | 'editPoint';
-
-export interface PickResult {
-  type: PickType;
-  /** Link id for vertex/edge/face/axis; joint id; construction id; point id for editPoint. */
-  id: ID;
-  linkId?: ID;
-  pointIds?: ID[];
-  pointId?: ID;
-  faceIndex?: number;
-  pose?: number;
-  point: Vec3;
-  distance: number;
-}
+export type { PickResult, PickType } from './pickRank';
 
 export interface ViewportPointerEvent {
-  kind: 'down' | 'move' | 'up' | 'dblclick' | 'leave';
+  /**
+   * 'query' is a right-button click that was not an orbit drag (the pointer
+   * never strayed more than QUERY_CLICK_PX from the press while the button was
+   * down): it steps the query cycle through everything under the pointer. It
+   * is sent before the matching 'up'.
+   */
+  kind: 'down' | 'move' | 'up' | 'dblclick' | 'leave' | 'query';
   button: number;
   clientX: number;
   clientY: number;
@@ -35,16 +30,6 @@ export interface ViewportPointerEvent {
   pick: PickResult | null;
   original: PointerEvent | MouseEvent;
 }
-
-const PICK_PRIORITY: Record<PickType, number> = {
-  editPoint: 0,
-  vertex: 1,
-  joint: 2,
-  edge: 3,
-  axis: 4,
-  face: 5,
-  construction: 6,
-};
 
 export class Viewport {
   readonly container: HTMLElement;
@@ -74,6 +59,12 @@ export class Viewport {
   onPointer: ((ev: ViewportPointerEvent) => void) | null = null;
   onBeforeRender: (() => void) | null = null;
   private pickRadiusPx = 10;
+  /**
+   * Where the right button went down and whether the pointer has since strayed more than QUERY_CLICK_PX from it: a
+   * release that never did is a query click; one that did (even after returning to the press position) was an orbit
+   * drag, which OrbitControls followed all along.
+   */
+  private rightDown: { x: number; y: number; dragged: boolean } | null = null;
   private disposed = false;
 
   constructor(container: HTMLElement, settings: AppSettings) {
@@ -106,9 +97,23 @@ export class Viewport {
       const pick = kind === 'leave' ? null : this.pick(e.clientX, e.clientY);
       this.onPointer({ kind, button: (e as PointerEvent).button ?? 0, clientX: e.clientX, clientY: e.clientY, shiftKey: e.shiftKey, ctrlKey: e.ctrlKey || e.metaKey, altKey: e.altKey, pick, original: e });
     };
-    dom.addEventListener('pointerdown', forward('down'));
-    dom.addEventListener('pointermove', forward('move'));
-    dom.addEventListener('pointerup', forward('up'));
+    dom.addEventListener('pointerdown', (e) => {
+      if (e.button === 2) this.rightDown = { x: e.clientX, y: e.clientY, dragged: false };
+      forward('down')(e);
+    });
+    dom.addEventListener('pointermove', (e) => {
+      // OrbitControls captures the pointer on this same element, so the moves of a right-drag still arrive here
+      const d = this.rightDown;
+      if (d && !d.dragged && Math.hypot(e.clientX - d.x, e.clientY - d.y) > QUERY_CLICK_PX) d.dragged = true;
+      forward('move')(e);
+    });
+    dom.addEventListener('pointerup', (e) => {
+      // OrbitControls orbits on right-drag; only a right click whose pointer never left the press position is a query
+      const down = this.rightDown;
+      this.rightDown = null;
+      if (e.button === 2 && down && !down.dragged && Math.hypot(e.clientX - down.x, e.clientY - down.y) <= QUERY_CLICK_PX) forward('query')(e);
+      forward('up')(e);
+    });
     dom.addEventListener('pointerleave', forward('leave'));
     dom.addEventListener('dblclick', forward('dblclick'));
     dom.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -233,10 +238,19 @@ export class Viewport {
     };
     const dir = dirs[view];
     this.camera.position.copy(target.clone().add(dir.multiplyScalar(d)));
-    // keep Z up except for the top view where Y is "up" on screen
-    this.camera.up.set(0, 0, 1);
-    if (view === 'top') this.camera.up.set(0, 1, 0);
+    // keep Z up except for the top view where Y is "up" on screen. OrbitControls fixes its orbit axis to the camera's
+    // up vector when it is created, so the controls are rebuilt whenever that vector changes (as setOrthographic
+    // does); otherwise the top view sits at the pole of a Z-up frame, where a sideways right-drag cannot orbit.
+    // Orbiting out of the top view then keeps Y as screen-up until another view is chosen.
+    const up = view === 'top' ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, 0, 1);
+    const upChanged = !this.camera.up.equals(up);
+    this.camera.up.copy(up);
     this.camera.lookAt(target);
+    if (upChanged) {
+      this.controls.dispose();
+      this.controls = this.makeControls(this.camera);
+      this.controls.target.copy(target);
+    }
     this.controls.update();
   }
 
@@ -291,7 +305,7 @@ export class Viewport {
       let best: PickResult | null = null;
       for (let k = 0; k < 8; k++) {
         const a = (k / 8) * Math.PI * 2;
-        const r = this.castPick(clientX + rad * Math.cos(a), clientY + rad * Math.sin(a));
+        const r = this.castPick(clientX + rad * Math.cos(a), clientY + rad * Math.sin(a), false);
         if (!r || r.type === 'construction') continue;
         if (!best || PICK_PRIORITY[r.type] < PICK_PRIORITY[best.type]) best = r;
       }
@@ -301,22 +315,50 @@ export class Viewport {
     return exact;
   }
 
-  private castPick(clientX: number, clientY: number): PickResult | null {
+  /**
+   * Everything under the pointer, for the query cycle: every feature hit by
+   * the exact ray and by the same ring of rays pick() samples, de-duplicated
+   * and ranked by rankPickCandidates (the depth tolerance is the one castPick
+   * uses: twice the pick radius in world units at the nearest hit). pick() is
+   * the first choice of the normal hover; this list is what a right-click
+   * steps through when that choice is not the wanted feature.
+   */
+  pickCandidates(clientX: number, clientY: number): PickResult[] {
+    if (this.pickables.length === 0) return [];
+    const all = this.castAll(clientX, clientY, true);
+    for (const rad of [this.pickRadiusPx * 0.5, this.pickRadiusPx]) {
+      for (let k = 0; k < 8; k++) {
+        const a = (k / 8) * Math.PI * 2;
+        all.push(...this.castAll(clientX + rad * Math.cos(a), clientY + rad * Math.sin(a), false));
+      }
+    }
+    if (all.length === 0) return [];
+    const model = all.filter((r) => r.type !== 'construction');
+    const nearest = (model.length ? model : all).reduce((best, r) => (r.distance < best.distance ? r : best));
+    return rankPickCandidates(all, this.worldPerPixel(nearest.point) * this.pickRadiusPx * 2);
+  }
+
+  /** All pickable hits along the pointer ray, nearest first (three's raycaster order), flagged `exact` as given. */
+  private castAll(clientX: number, clientY: number, exact: boolean): PickResult[] {
     this.raycaster.setFromCamera(this.ndc(clientX, clientY), this.camera);
     const hits = this.raycaster.intersectObjects(this.pickables, false);
-    if (hits.length === 0) return null;
     const results: PickResult[] = [];
     for (const h of hits) {
       const ud = h.object.userData as Partial<PickResult>;
       if (!ud.type) continue;
-      results.push({ ...(ud as PickResult), point: [h.point.x, h.point.y, h.point.z], distance: h.distance });
+      results.push({ ...(ud as PickResult), point: [h.point.x, h.point.y, h.point.z], distance: h.distance, exact });
     }
+    return results;
+  }
+
+  private castPick(clientX: number, clientY: number, exact = true): PickResult | null {
+    const results = this.castAll(clientX, clientY, exact);
     if (results.length === 0) return null;
     // datum planes and the invisible pick cylinders of datum axes never occlude model geometry
     const model = results.filter((r) => r.type !== 'construction');
     if (model.length === 0) {
       // only datum geometry under the pointer: points beat axes beat planes (datums have no occlusion semantics)
-      results.sort((a, b) => ((a as PickResult & { sub?: number }).sub ?? 9) - ((b as PickResult & { sub?: number }).sub ?? 9) || a.distance - b.distance);
+      results.sort((a, b) => (a.sub ?? 9) - (b.sub ?? 9) || a.distance - b.distance);
       return results[0];
     }
     const candidates = model;

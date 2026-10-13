@@ -4,29 +4,34 @@
  * input, link-end constraint pop-up, settings dialog and help.
  * All text comes from strings.ts.
  */
+import { BUILD_INFO, buildDate } from '../buildInfo';
 import type { App, Mode, ToolName } from '../app';
 import {
   barLength,
-  changeJointType,
   jointsAtPoint,
   removeJoint,
   setGround,
 } from '../core/model';
-import { commitSketch, solveSketch } from '../core/kinematics';
-import type { Construction, ID, Joint, JointType, Link, Target, Vec3 } from '../core/types';
+import { consistencyTolerance, poseIsConsistent, tryChangeJointType, trySolveCommit } from '../core/feasibility';
+import { DEFAULT_PREFOLD_DEG, creaseDihedralDeg, creaseMV, driveCrease, foldCreaseToTarget, isCrease, prefoldFlat } from '../core/fold';
+import { generatePanels, patternBasis, patternFaces, setCreaseClass, setCreaseTarget, to2d, validatePattern } from '../core/creasePattern';
+import type { Construction, CreaseClass, CreasePattern, ID, Joint, JointType, Link, Target, Vec3 } from '../core/types';
 import { isConstructionRef } from '../core/types';
 import { createColorPicker } from './colorPicker';
 import { icon } from './icons';
 import { DEFAULT_SETTINGS, type AppSettings } from './settings';
-import { APP, EXAMPLES, HELP, JOINTS, MENU, MODES, PANEL, POPUP, PREVIEW, SETTINGS, SIM, STATUS, TOOLS, TOOL_OPTIONS, TREE } from './strings';
+import { APP, EXAMPLES, HELP, JOINTS, MENU, MODES, PANEL, PATTERN, POPUP, PREVIEW, SETTINGS, SIM, STATUS, TOOLS, TOOL_OPTIONS, TREE, jointRefusedMessage, VERSION } from './strings';
+import { jointDescription, jointEnds, jointLabel } from './labels';
 import { duplicateLink, extrudePolygon, translation } from '../core/patterns';
-import { modelSize } from '../core/kinematics';
-import { bodyPlaneJoint } from '../core/model';
+import { currentViolation, modelSize } from '../core/kinematics';
+import { bodyPlaneJoint, planeCarriesPattern, setBodyPlane } from '../core/model';
 import { add, cross, scale } from '../core/geometry';
+import type { SelectionView } from '../viewport/render';
 import { ToolManager, parseTypedPoint } from '../viewport/tools';
 
 const JOINT_TYPES: JointType[] = ['spherical', 'revolute', 'planar', 'prismatic', 'cylindrical', 'screw'];
-const TOOL_LIST: ToolName[] = ['select', 'bar', 'sketch', 'polygon', 'prism', 'cylinder', 'edit', 'cpoint', 'caxis', 'cplane', 'joint', 'ground', 'driver', 'mirror', 'pattern', 'delete'];
+const TOOL_LIST: ToolName[] = ['select', 'bar', 'sketch', 'cpattern', 'polygon', 'prism', 'cylinder', 'edit', 'cpoint', 'caxis', 'cplane', 'joint', 'ground', 'driver', 'mirror', 'pattern', 'delete'];
+const CREASE_CLASSES: CreaseClass[] = ['M', 'V', 'B', 'U'];
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: string): HTMLElementTagNameMap[K] {
   const e = document.createElement(tag);
@@ -103,7 +108,7 @@ export class UI {
   private toolOptions!: HTMLElement;
   private props!: HTMLElement;
   private tree!: HTMLElement;
-  private treeOpen: Record<string, boolean> = { links: true, joints: true, construction: false, drivers: true, targets: true };
+  private treeOpen: Record<string, boolean> = { links: true, joints: true, patterns: true, construction: false, drivers: true, targets: true };
   private modePanel!: HTMLElement;
   private statusText!: HTMLElement;
   private dofChip!: HTMLElement;
@@ -118,6 +123,8 @@ export class UI {
   private lastPanelKey = '';
   private sliderValue: HTMLInputElement | null = null;
   private previewReadout: HTMLElement | null = null;
+  /** The model object the panels were last built from; a replaced model (abortChange, undo, load) forces a rebuild. */
+  private builtFor: import('../core/types').Model | null = null;
 
   constructor(
     private app: App,
@@ -129,7 +136,7 @@ export class UI {
     app.subscribe(() => this.refresh());
     app.onStatus = () => {
       this.statusText.textContent = app.status || app.hint;
-      this.statusText.title = app.hint;
+      this.statusText.title = app.status || app.hint; // the whole message as a tooltip: long diagnoses are clipped in the bar
     };
     tools.onPopup = (pid) => this.showPopup(pid);
     this.refresh();
@@ -181,14 +188,18 @@ export class UI {
       [MENU.viewOrtho, () => app.updateSettings({ orthographic: true })],
       [MENU.viewPersp, () => app.updateSettings({ orthographic: false })],
     ]));
-    this.undoBtn = button('', () => app.undo(), { icon: 'undo', title: MENU.undo, cls: 'btn--icon' });
-    this.redoBtn = button('', () => app.redo(), { icon: 'redo', title: MENU.redo, cls: 'btn--icon' });
+    this.undoBtn = button('', () => this.undo(), { icon: 'undo', title: MENU.undo, cls: 'btn--icon' });
+    this.redoBtn = button('', () => this.redo(), { icon: 'redo', title: MENU.redo, cls: 'btn--icon' });
     menus.appendChild(this.undoBtn);
     menus.appendChild(this.redoBtn);
     menus.appendChild(button('', () => app.zoomToFit(), { icon: 'fit', title: MENU.viewFit, cls: 'btn--icon' }));
     menus.appendChild(button('', () => this.openSettings(), { icon: 'settings', title: MENU.settings, cls: 'btn--icon' }));
     menus.appendChild(button('', () => this.openHelp(), { icon: 'help', title: MENU.help, cls: 'btn--icon' }));
     top.appendChild(menus);
+    // version badge: which build is deployed (package version · short commit · build date)
+    const badge = el('span', 'version-badge', VERSION.badge(BUILD_INFO.version, BUILD_INFO.commit, buildDate()));
+    badge.title = VERSION.tooltip(BUILD_INFO.version, BUILD_INFO.commit, BUILD_INFO.branch, BUILD_INFO.builtAt);
+    top.appendChild(badge);
 
     this.toolbar = el('nav', 'toolbar');
     for (const t of TOOL_LIST) {
@@ -220,6 +231,10 @@ export class UI {
         if (tp) {
           this.tools.applyTyped(tp);
           this.coordInput.value = '';
+        } else if (this.coordInput.value.trim() === '' && app.mode === 'construction') {
+          // Enter on the empty box is the "press Enter to close it" of the Panel and Crease pattern hints, as Enter on
+          // the canvas is (finish is a no-op for every other tool); unparsable text is simply kept
+          this.tools.finish();
         }
         e.stopPropagation();
       }
@@ -265,17 +280,28 @@ export class UI {
     this.undoBtn.disabled = !app.canUndo;
     this.redoBtn.disabled = !app.canRedo;
     this.statusText.textContent = app.status || app.hint;
-    this.statusText.title = app.hint;
+    this.statusText.title = app.status || app.hint;
     const mob = app.sim.mobility;
     if (mob) {
       const extra = mob.grounded ? '' : ` (${SIM.rigidBodyModes}: ${mob.rigidBodyModes})`;
-      this.dofChip.textContent = `${STATUS.dof}: ${mob.dof}${extra}` + (app.sim.violation > 1e-5 ? ` · ${STATUS.violated}` : '');
-      this.dofChip.classList.toggle('chip--warn', app.sim.violation > 1e-5);
-    } else this.dofChip.textContent = '';
-    // avoid rebuilding panels while the user is typing in them
+      // the same tolerance that refuses Solidify / baking on Save, so the chip warns exactly when they would refuse
+      const violated = app.sim.violation > consistencyTolerance(app.model);
+      this.dofChip.textContent = `${STATUS.dof}: ${mob.dof}${extra}` + (violated ? ` · ${STATUS.violated}` : '');
+      this.dofChip.classList.toggle('chip--warn', violated);
+      const locked = app.sim.lockedCreaseIds.length;
+      this.dofChip.title = locked ? SIM.creasesLocked(locked, this.foldAvailable()) : '';
+    } else {
+      this.dofChip.textContent = '';
+      this.dofChip.title = '';
+    }
+    // avoid rebuilding panels while the user is typing in them, unless the model object was replaced (a refused
+    // edit's abortChange, undo / redo, a loaded file): the widgets and their closures then belong to a discarded
+    // model and would show the refused values and write edits into it
+    const modelReplaced = this.builtFor !== app.model;
+    this.builtFor = app.model;
     const active = document.activeElement;
     const typing = active && (active.tagName === 'INPUT' || active.tagName === 'SELECT') && (this.props.contains(active) || this.modePanel.contains(active) || this.toolOptions.contains(active) || this.tree.contains(active));
-    if (typing && active !== this.sliderValue) {
+    if (typing && active !== this.sliderValue && !modelReplaced) {
       this.updateLiveReadouts();
       return;
     }
@@ -297,14 +323,16 @@ export class UI {
     const sel = app.selection;
     const sig = [
       Object.values(m.links).map((l) => `${l.id}:${l.name}:${l.kind}:${+l.ground}${+l.locked}${+l.flexible}${+!!l.hidden}`).join(','),
-      Object.values(m.joints).map((j) => `${j.id}:${j.type}`).join(','),
+      // crease labels carry the fold angle rounded to 1° and the M/V class, so the tree follows the pose
+      Object.values(m.joints).map((j) => `${j.id}:${j.type}:${this.jointLabel(j)}`).join(','),
       Object.values(m.construction).map((c) => `${c.id}:${c.name}`).join(','),
       m.settings.sketchPlaneId,
+      Object.values(m.patterns ?? {}).map((p) => `${p.id}:${p.name}:${Object.keys(p.creases).length}:${+!!p.hidden}`).join(','),
       m.drivers.map((d) => d.id).join(','),
       m.targets.map((t) => `${t.id}:${t.kind}:${+t.locked}`).join(','),
       app.mode,
       app.sim.activeDriver,
-      sel ? `${sel.type}:${sel.id}:${sel.pointId ?? ''}:${sel.pose ?? ''}` : '',
+      sel ? `${sel.type}:${sel.id}:${sel.pointId ?? ''}:${sel.creaseId ?? ''}:${sel.pose ?? ''}` : '',
     ].join('|');
     if (sig === this.treeSignature && this.tree.childElementCount > 0) return;
     this.treeSignature = sig;
@@ -375,6 +403,7 @@ export class UI {
         if (link.locked) badges.push(TREE.locked);
         if (link.flexible) badges.push(TREE.flexible);
         if (link.hidden) badges.push(TREE.hidden);
+        if (bodyPlaneJoint(m, link.id)) badges.push(TREE.planar2d);
         const eye = el('button', `tree-eye ${link.hidden ? 'off' : ''}`);
         eye.innerHTML = icon('eye');
         eye.title = link.hidden ? TREE.show : TREE.hide;
@@ -403,12 +432,40 @@ export class UI {
     const joints = Object.values(m.joints).filter((j) => j.a.kind !== 'body');
     group('joints', TREE.joints, joints.length, (list) => {
       for (const j of joints) {
-        const a = m.links[j.a.linkId]?.name ?? '';
-        const b = isConstructionRef(j.b) ? m.construction[j.b.constructionId]?.name ?? '' : m.links[j.b.linkId]?.name ?? '';
         list.appendChild(
-          item(`${JOINTS[j.type].short} · ${a} ↔ ${b}`, sel?.type === 'joint' && sel.id === j.id, () => app.select({ type: 'joint', id: j.id }), {
+          item(jointDescription(m, j, true), sel?.type === 'joint' && sel.id === j.id, () => app.select({ type: 'joint', id: j.id }), {
             iconName: j.type,
             hover: () => app.setHover({ type: 'joint', id: j.id, point: [0, 0, 0], distance: 0 }),
+          }),
+        );
+      }
+    });
+    // crease patterns (plan 3b): name with the crease count, an eye for p.hidden; a row selects the pattern
+    const patterns = Object.values(m.patterns ?? {});
+    group('patterns', TREE.patterns, patterns.length, (list) => {
+      for (const p of patterns) {
+        const badges = [TREE.creaseCount(Object.keys(p.creases).length)];
+        if (p.hidden) badges.push(TREE.hidden);
+        const eye = el('button', `tree-eye ${p.hidden ? 'off' : ''}`);
+        eye.innerHTML = icon('eye');
+        eye.title = p.hidden ? TREE.show : TREE.hide;
+        eye.addEventListener('click', (e) => {
+          e.stopPropagation();
+          app.beginChange();
+          p.hidden = !p.hidden;
+          app.endChange();
+        });
+        const active = !!sel && (sel.type === 'pattern' || sel.type === 'pvertex' || sel.type === 'pcrease') && sel.id === p.id;
+        list.appendChild(
+          item(p.name, active, () => app.select({ type: 'pattern', id: p.id }), {
+            badges,
+            extra: eye,
+            iconName: 'cpattern',
+            rename: (v) => {
+              app.beginChange();
+              p.name = v;
+              app.endChange();
+            },
           }),
         );
       }
@@ -420,7 +477,8 @@ export class UI {
           item(`${c.name} (${c.kind})`, sel?.type === 'construction' && sel.id === c.id, () => app.select({ type: 'construction', id: c.id }), {
             iconName: c.kind === 'point' ? 'cpoint' : c.kind === 'axis' ? 'caxis' : 'cplane',
             badges: m.settings.sketchPlaneId === c.id ? [PANEL.isSketchPlane] : [],
-            hover: () => app.setHover({ type: 'construction', id: c.id, point: [0, 0, 0], distance: 0 }),
+            // a tree row is an explicit choice: the datum lights up (queried), unlike a pointer idling over a plane
+            hover: () => app.setHover({ type: 'construction', id: c.id, point: [0, 0, 0], distance: 0, queried: true }),
             rename: c.builtin
               ? undefined
               : (v) => {
@@ -468,7 +526,11 @@ export class UI {
     if (app.mode !== 'construction') return;
     box.appendChild(el('h3', 'panel__title', TOOLS[t].label));
     box.appendChild(el('p', 'hint', TOOLS[t].hint));
-    if (t === 'bar' || t === 'polygon') box.appendChild(row(TOOL_OPTIONS.mode2d, checkbox(o.mode2d, (v) => (o.mode2d = v))));
+    if (t === 'bar' || t === 'polygon') {
+      const planeRow = row(TOOL_OPTIONS.mode2d, checkbox(o.mode2d, (v) => (o.mode2d = v)));
+      planeRow.title = TOOL_OPTIONS.mode2dHelp;
+      box.appendChild(planeRow);
+    }
     if (t === 'polygon' || t === 'prism') box.appendChild(row(TOOL_OPTIONS.sides, numberInput(o.sides, (v) => (o.sides = Math.max(3, Math.round(v))), { step: 1, min: 3 })));
     if (t === 'prism') box.appendChild(row(TOOL_OPTIONS.height, numberInput(o.height, (v) => (o.height = v), { step: 0.1 })));
     if (t === 'cylinder') box.appendChild(row(TOOL_OPTIONS.radius, numberInput(o.radius, (v) => (o.radius = v), { step: 0.1, min: 0.01 })));
@@ -483,6 +545,11 @@ export class UI {
     }
     if (t === 'bar' || t === 'edit') {
       box.appendChild(row(TOOL_OPTIONS.jointType, select(JOINT_TYPES.filter((j) => j === 'revolute' || j === 'spherical').map((j) => ({ value: j, label: JOINTS[j].label })), app.model.settings.defaultJoint, (v) => (app.model.settings.defaultJoint = v))));
+    }
+    if (t === 'cpattern') {
+      const classRow = row(TOOL_OPTIONS.creaseClass, select(CREASE_CLASSES.map((c) => ({ value: c, label: PATTERN.classes[c] })), o.creaseClass, (v) => (o.creaseClass = v)));
+      classRow.title = TOOL_OPTIONS.creaseClassHelp;
+      box.appendChild(classRow);
     }
     if (t === 'pattern') {
       box.appendChild(row(TOOL_OPTIONS.patternKind, select([{ value: 'linear', label: TOOL_OPTIONS.patternLinear }, { value: 'polar', label: TOOL_OPTIONS.patternPolar }], o.patternKind, (v) => { o.patternKind = v; this.refresh(); })));
@@ -512,6 +579,32 @@ export class UI {
     summary.appendChild(el('p', 'hint', `${links.length} ${PANEL.links} · ${Object.values(m.joints).filter((j) => j.a.kind !== 'body').length} ${PANEL.joints} · ${m.settings.displayPointIds.length} ${PANEL.pointsShown}`));
     if (sim.mobility) {
       summary.appendChild(el('p', 'readout', `${SIM.motionDOF}: ${sim.mobility.dof}${sim.mobility.grounded ? '' : ` — ${SIM.notGrounded}`}`));
+    }
+    if (app.notice) {
+      const notice = el('div', 'notice');
+      notice.appendChild(el('p', 'hint warn', app.notice));
+      notice.appendChild(button(PANEL.noticeDismiss, () => app.setNotice(''), { cls: 'btn--small', title: PANEL.noticeDismissHelp }));
+      summary.appendChild(notice);
+    }
+    const flatLoops = sim.creaseLoops.filter((l) => l.flat).length;
+    if (sim.lockedCreaseIds.length) summary.appendChild(el('p', 'hint warn', SIM.creasesLocked(sim.lockedCreaseIds.length, flatLoops > 0)));
+    if (flatLoops > 0) {
+      summary.appendChild(el('p', 'hint warn', SIM.flatVertices(flatLoops)));
+      const actions = el('div', 'actions');
+      actions.appendChild(button(SIM.fold, () => this.foldFlatVertex(), { title: SIM.foldHelp }));
+      summary.appendChild(actions);
+    }
+    // crease-pattern validator (plan 2d): cached by recomputeKinematics, one line per interior vertex
+    if (sim.vertexReports.length) {
+      const block = el('div', 'crease-pattern');
+      block.title = SIM.creasePatternHelp;
+      block.appendChild(el('p', 'hint', SIM.creasePattern));
+      for (const r of sim.vertexReports) {
+        const ok = r.developable && r.flatFoldable && r.maekawa !== false;
+        block.appendChild(el('p', ok ? 'readout' : 'readout warn', SIM.vertexReport(r)));
+        if (!ok) block.appendChild(el('p', 'hint warn', SIM.vertexFails(r)));
+      }
+      summary.appendChild(block);
     }
     box.appendChild(summary);
     if (app.mode === 'construction') return;
@@ -588,11 +681,76 @@ export class UI {
     return s;
   }
 
+  /** Short label of a joint for the tree: the type letter, or "Crease M 160°" for a crease (construction pose); shared with the status bar (labels.ts). */
+  private jointLabel(j: Joint): string {
+    return jointLabel(this.app.model, j, true);
+  }
+
+  /** "<link A> ↔ <link B or datum>" for a joint, used by the tree and the status bar. */
+  private jointEnds(j: Joint): string {
+    return jointEnds(this.app.model, j);
+  }
+
+  /**
+   * Undo / redo (buttons and keys): a running query cycle and a crease polyline are ended first, so their highlight,
+   * anchor and Backspace snapshots do not outlive the model they named (the ToolManager also drops a polyline whose
+   * model was replaced, which covers New, Open and the examples).
+   */
+  private undo(): void {
+    this.tools.endQuery();
+    this.tools.endPolyline(true);
+    this.app.undo();
+  }
+
+  private redo(): void {
+    this.tools.endQuery();
+    this.tools.endPolyline(true);
+    this.app.redo();
+  }
+
+  /**
+   * Fold command (Mechanism panel): pre-fold the first flat crease loop so that every crease leaves the singular flat
+   * state, on the side the stored mountain / valley classes ask for (prefoldFlat). When every crease of that loop was
+   * generated from a crease pattern the whole pattern is folded as one sheet, so every generated crease leaves the
+   * flat state on the drawn branch; a loop mixing generated and hand-made creases is folded on its own. One undo
+   * entry on success; nothing recorded and the model untouched on failure, whose reason (naming the conflicting
+   * creases of an inconsistent assignment) is reported.
+   */
+  private foldFlatVertex(): void {
+    const app = this.app;
+    const m = app.model;
+    const hadDrivers = m.drivers.length > 0;
+    app.beginChange();
+    const r = prefoldFlat(m, { honourAssigned: true });
+    if (!r.ok || !r.creaseId) {
+      app.abortChange();
+      app.report(STATUS.foldFailed(r.reason ?? 'noBranch', this.conflictList(r.conflicts)));
+      return;
+    }
+    const pattern = r.patternId ? m.patterns?.[r.patternId] : undefined;
+    const crease = m.joints[r.creaseId];
+    app.select({ type: 'joint', id: r.creaseId });
+    const ends = crease ? this.jointEnds(crease) : '';
+    const folded = pattern ? STATUS.patternFolded(pattern.name, Object.keys(r.dihedrals ?? {}).length, ends, r.dof ?? 0) : STATUS.folded(ends, r.dof ?? 0);
+    app.setStatus(!hadDrivers && m.drivers.length > 0 ? `${folded} ${STATUS.foldedDriverKept}` : folded);
+    app.endChange();
+  }
+
+  /** The creases a mountain / valley conflict names, "Panel 1 ↔ Panel 2 (mountain), …" (empty when there are none). */
+  private conflictList(ids: ID[] | undefined): string {
+    const m = this.app.model;
+    return (ids ?? [])
+      .map((id) => m.joints[id])
+      .filter((j): j is Joint => !!j)
+      .map((j) => STATUS.conflictCrease(this.jointEnds(j), j.fold?.mv))
+      .join(', ');
+  }
+
   private driverLabel(d: import('../core/types').Driver): string {
     const m = this.app.model;
     if (d.kind === 'angle') return `${m.links[d.linkId ?? '']?.name ?? ''} · angle`;
     const j = d.jointId ? m.joints[d.jointId] : null;
-    return `${j ? JOINTS[j.type].label : ''} · ${d.kind}`;
+    return `${j ? (isCrease(m, j) ? JOINTS.crease.label : JOINTS[j.type].label) : ''} · ${d.kind}`;
   }
 
   // ---------------------------------------------------------------------------
@@ -628,7 +786,144 @@ export class UI {
       if (c) this.constructionProps(box, c);
     } else if (sel.type === 'editPoint' && sel.pointId !== undefined && sel.pose !== undefined) {
       this.editPointProps(box, sel.pointId, sel.pose);
+    } else if (sel.type === 'pattern') {
+      const p = m.patterns?.[sel.id];
+      if (p) this.patternProps(box, p);
+    } else if (sel.type === 'pvertex' && sel.pointId) {
+      const p = m.patterns?.[sel.id];
+      if (p) this.patternVertexProps(box, p, sel.pointId);
+    } else if (sel.type === 'pcrease' && sel.creaseId) {
+      const p = m.patterns?.[sel.id];
+      if (p) this.patternCreaseProps(box, p, sel.creaseId);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Crease pattern properties (plan 3b)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Properties of a crease pattern (also the tail of a pattern vertex's or crease's Properties): name, plane, the
+   * counts of vertices / creases / bounded faces, the hidden flag, the checks of validatePattern as one line per
+   * issue (clicking a line selects the vertex or crease concerned), and the actions: "Generate panels" — or
+   * "Regenerate panels" once the pattern has generated — and Delete.
+   */
+  private patternProps(box: HTMLElement, p: CreasePattern): void {
+    const app = this.app;
+    const m = app.model;
+    const change = (fn: () => void) => {
+      app.beginChange();
+      fn();
+      app.endChange();
+    };
+    box.appendChild(el('h4', 'panel__subtitle', PANEL.patternTitle(p.name)));
+    box.appendChild(row(PANEL.name, textInput(p.name, (v) => change(() => (p.name = v)))));
+    box.appendChild(row(PANEL.patternPlane, el('span', 'value', m.construction[p.planeId]?.name ?? p.planeId)));
+    const faces = patternFaces(m, p);
+    box.appendChild(row(PANEL.patternCounts, el('span', 'value', PANEL.patternCountsValue(Object.keys(p.vertices).length, Object.keys(p.creases).length, faces.faces.length))));
+    box.appendChild(row(PANEL.patternHidden, checkbox(!!p.hidden, (v) => change(() => (p.hidden = v)))));
+    const issues = validatePattern(m, p);
+    const checks = el('div', 'crease-pattern');
+    checks.appendChild(el('p', 'hint', PANEL.patternChecks));
+    if (issues.length === 0) checks.appendChild(el('p', 'hint ok', PANEL.patternValid));
+    const basis = patternBasis(m, p);
+    for (const issue of issues) {
+      const vtx = issue.vertexId ? p.vertices[issue.vertexId] : undefined;
+      const uv = vtx ? to2d(basis, vtx.pos) : null;
+      const line = el('p', 'hint warn', PATTERN.issue(issue, uv ? PATTERN.vertexAt(uv[0], uv[1]) : ''));
+      const target: SelectionView | null = issue.vertexId ? { type: 'pvertex', id: p.id, pointId: issue.vertexId } : issue.creaseIds?.length ? { type: 'pcrease', id: p.id, creaseId: issue.creaseIds[0] } : null;
+      if (target) {
+        line.classList.add('clickable');
+        line.title = PANEL.patternIssueHelp;
+        line.addEventListener('click', () => app.select(target));
+      }
+      checks.appendChild(line);
+    }
+    box.appendChild(checks);
+    const actions = el('div', 'actions');
+    actions.appendChild(button(p.generated ? PANEL.patternRegenerate : PANEL.patternGenerate, () => this.generatePattern(p), { icon: 'polygon', title: PANEL.patternGenerateHelp }));
+    actions.appendChild(button(PANEL.patternDelete, () => this.tools.deletePick({ type: 'pattern', id: p.id }), { icon: 'delete', cls: 'btn--danger btn--small' }));
+    box.appendChild(actions);
+  }
+
+  /**
+   * "Generate panels": generatePanels in one undoable change (a previous generation is replaced), then the pattern
+   * is hidden — the panels take its place; the model tree shows it again — the first panel is selected and the
+   * status bar reports the counts and, when the checks found problems, their number. A pattern that encloses no
+   * face is refused with nothing changed. A crease polyline still being drawn is ended first: generation is the
+   * natural end of the drawing, and a further click would draw into the hidden pattern.
+   */
+  private generatePattern(p: CreasePattern): void {
+    const app = this.app;
+    const m = app.model;
+    if (patternFaces(m, p).faces.length === 0) {
+      app.report(STATUS.patternNothingToGenerate);
+      return;
+    }
+    this.tools.endPolyline(true);
+    app.beginChange();
+    const r = generatePanels(m, p, { panelName: PATTERN.panelName });
+    p.hidden = true;
+    app.select(r.linkIds.length ? { type: 'link', id: r.linkIds[0] } : null);
+    const text = STATUS.patternGenerated(r.linkIds.length, r.jointIds.length);
+    app.setStatus(r.warnings.length ? `${text} ${STATUS.patternGeneratedWarnings(r.warnings.length)}` : text);
+    app.endChange();
+  }
+
+  /** A pattern vertex: its position (read-only) and Delete, followed by the pattern's Properties. */
+  private patternVertexProps(box: HTMLElement, p: CreasePattern, vertexId: ID): void {
+    const v = p.vertices[vertexId];
+    if (!v) return;
+    box.appendChild(el('h4', 'panel__subtitle', `${PANEL.patternVertex} · ${p.name}`));
+    box.appendChild(row(PANEL.patternVertexPosition, el('span', 'value', v.pos.map((x) => x.toFixed(3)).join(', '))));
+    box.appendChild(button(PANEL.patternDeleteVertex, () => this.tools.deletePick({ type: 'pvertex', id: p.id, pointId: vertexId }), { icon: 'delete', cls: 'btn--danger btn--small' }));
+    box.appendChild(el('hr'));
+    this.patternProps(box, p);
+  }
+
+  /**
+   * A pattern crease: its class as four buttons (the current one active), the target fold angle (0–180°, an empty
+   * field for none; both copied to the generated hinge) and Delete, followed by the pattern's Properties.
+   */
+  private patternCreaseProps(box: HTMLElement, p: CreasePattern, creaseId: ID): void {
+    const app = this.app;
+    const m = app.model;
+    const c = p.creases[creaseId];
+    if (!c) return;
+    box.appendChild(el('h4', 'panel__subtitle', `${PATTERN.creaseLabel(c.cls)} · ${p.name}`));
+    // a div, not a row(): a <label> would forward a click on its caption to the first button
+    const classes = el('div', 'show-points');
+    classes.title = TOOL_OPTIONS.creaseClassHelp;
+    classes.appendChild(el('span', 'prop-row__label', PANEL.patternClass));
+    for (const cls of CREASE_CLASSES) {
+      classes.appendChild(
+        button(PATTERN.classes[cls], () => {
+          app.beginChange();
+          setCreaseClass(m, p, c.id, cls);
+          app.endChange();
+        }, { cls: `btn--small ${c.cls === cls ? 'active' : ''}` }),
+      );
+    }
+    box.appendChild(classes);
+    const target = el('input');
+    target.type = 'number';
+    target.step = '5';
+    target.min = '0';
+    target.max = '180';
+    target.value = c.targetDeg === undefined ? '' : String(c.targetDeg);
+    target.addEventListener('change', () => {
+      const text = target.value.trim();
+      const n = Number(text);
+      app.beginChange();
+      setCreaseTarget(m, p, c.id, text === '' || !Number.isFinite(n) ? undefined : n);
+      app.endChange();
+    });
+    const targetRow = row(PANEL.patternTarget, target);
+    targetRow.title = PANEL.patternTargetHelp;
+    box.appendChild(targetRow);
+    box.appendChild(button(PANEL.patternDeleteCrease, () => this.tools.deletePick({ type: 'pcrease', id: p.id, creaseId: c.id }), { icon: 'delete', cls: 'btn--danger btn--small' }));
+    box.appendChild(el('hr'));
+    this.patternProps(box, p);
   }
 
   private linkProps(box: HTMLElement, link: Link): void {
@@ -645,12 +940,13 @@ export class UI {
       box.appendChild(
         row(
           PANEL.length,
-          numberInput(barLength(m, link), (v) => change(() => {
+          numberInput(barLength(m, link), (v) => {
+            // the new rest length is kept only when the mechanism can be re-assembled with it
+            app.beginChange();
             const r = link.rigidity.find((c) => c.kind === 'dist' && !c.fixed);
             if (r && r.kind === 'dist') r.length = Math.max(1e-3, v);
-            const res = solveSketch(m, {});
-            commitSketch(m, res);
-          }), { step: 0.1, min: 0.001 }),
+            this.resolveOrRevert(trySolveCommit(m, {}).ok);
+          }, { step: 0.1, min: 0.001 }),
         ),
       );
     }
@@ -660,6 +956,23 @@ export class UI {
     box.appendChild(row(PANEL.locked, checkbox(link.locked, (v) => change(() => (link.locked = v)))));
     box.appendChild(row(PANEL.hidden, checkbox(!!link.hidden, (v) => change(() => (link.hidden = v)))));
     box.appendChild(row(PANEL.ground, checkbox(link.ground, (v) => change(() => setGround(m, v ? link.id : null)))));
+    if (link.kind === 'bar' || link.kind === 'polygon') {
+      // the sketch-plane (2-D body) constraint is a hidden planar joint; it is presented as a property of the link
+      const bp = bodyPlaneJoint(m, link.id);
+      const planeName = bp && isConstructionRef(bp.b) ? m.construction[bp.b.constructionId]?.name : undefined;
+      const planeRow = row(
+        PANEL.keepOnSketchPlane,
+        checkbox(!!bp, (v) => {
+          // adding or removing the constraint re-solves the mechanism; a pose that cannot satisfy it is refused
+          app.beginChange();
+          setBodyPlane(m, link.id, v ? m.settings.sketchPlaneId : null);
+          this.resolveOrRevert(trySolveCommit(m, { allowGroundMove: link.ground }).ok);
+        }),
+      );
+      planeRow.title = PANEL.keepOnSketchPlaneHelp;
+      if (planeName) planeRow.appendChild(el('span', 'value', PANEL.onPlane(planeName)));
+      box.appendChild(planeRow);
+    }
     box.appendChild(row(PANEL.flexible, checkbox(link.flexible, (v) => change(() => (link.flexible = v)))));
     if (link.flexible) {
       const s = el('input');
@@ -697,6 +1010,11 @@ export class UI {
       const r = row(TOOL_OPTIONS.extrudeHeight, h);
       const b = button(PANEL.extrude, () => {
         this.extrudeHeight = height;
+        // extruding rebuilds the polygon's rest geometry from its current shape, which must not be a violated one
+        if (!poseIsConsistent(m)) {
+          app.setStatus(PANEL.extrudeRefused(currentViolation(m)));
+          return;
+        }
         change(() => {
           if (extrudePolygon(m, link, height)) app.setStatus(STATUS.extruded);
         });
@@ -756,6 +1074,36 @@ export class UI {
     if (this.clipboardLinkId) this.pasteCopied();
   }
 
+  /** Is the Fold command offered (a flat crease loop exists)? Keeps the locked-creases hint honest about suggesting it. */
+  private foldAvailable(): boolean {
+    return this.app.sim.creaseLoops.some((l) => l.flat);
+  }
+
+  /**
+   * Finish a re-solved Properties edit: record it when the solve was accepted, otherwise restore the pre-edit model
+   * and say so. The refused widget still has focus, so it is blurred first; refresh() then rebuilds the panel from
+   * the restored model (abortChange replaces the model object), so the widget shows the model's value instead of
+   * the refused one and later edits reach the live model.
+   */
+  private resolveOrRevert(ok: boolean): void {
+    const app = this.app;
+    if (ok) {
+      app.endChange();
+      return;
+    }
+    this.blurActive();
+    const sel = app.selection;
+    app.abortChange();
+    app.select(sel);
+    app.report(STATUS.editRefused);
+  }
+
+  /** Drop keyboard focus from the widget that triggered a refused edit (see resolveOrRevert). */
+  private blurActive(): void {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && this.root.contains(active)) active.blur();
+  }
+
   private pointProps(box: HTMLElement, pointId: ID): void {
     const app = this.app;
     const m = app.model;
@@ -770,9 +1118,7 @@ export class UI {
           const target: [number, number, number] = [...pt.pos] as [number, number, number];
           target[i] = v;
           const link = m.links[pt.linkId];
-          const res = solveSketch(m, { dragTargets: [{ pointId, pos: target, weight: 1 }], freePointIds: new Set([pointId]), allowGroundMove: link.ground });
-          commitSketch(m, res, new Set([pointId]));
-          app.endChange();
+          this.resolveOrRevert(trySolveCommit(m, { dragTargets: [{ pointId, pos: target, weight: 1 }], freePointIds: new Set([pointId]), allowGroundMove: link.ground }).ok);
         }, { step: 0.1, digits: 4 }),
       );
       pos.lastElementChild!.setAttribute('title', axis);
@@ -803,24 +1149,30 @@ export class UI {
   private jointProps(box: HTMLElement, j: Joint): void {
     const app = this.app;
     const m = app.model;
-    box.appendChild(el('h4', 'panel__subtitle', JOINTS[j.type].label));
-    box.appendChild(el('p', 'hint', JOINTS[j.type].description));
-    const a = m.links[j.a.linkId]?.name ?? '';
-    const b = isConstructionRef(j.b) ? m.construction[j.b.constructionId]?.name ?? '' : m.links[j.b.linkId]?.name ?? '';
-    box.appendChild(row(PANEL.jointLinks, el('span', 'value', `${a} ↔ ${b}`)));
+    const crease = isCrease(m, j);
+    const info = crease ? JOINTS.crease : JOINTS[j.type];
+    box.appendChild(el('h4', 'panel__subtitle', info.label));
+    box.appendChild(el('p', 'hint', info.description));
+    box.appendChild(row(PANEL.jointLinks, el('span', 'value', this.jointEnds(j))));
+    if (crease) this.creaseProps(box, j);
     if (j.a.kind !== 'body') {
       box.appendChild(
         row(
           PANEL.changeType,
           select(JOINT_TYPES.map((t) => ({ value: t, label: JOINTS[t].label })), j.type, (t) => {
+            // same pre-flight as the Joint tool: an incompatible or unsatisfiable type leaves the joint as it was
+            const sel = app.selection;
             app.beginChange();
-            const nj = changeJointType(m, j.id, t);
-            if (nj) {
-              const res = solveSketch(m, {});
-              commitSketch(m, res);
-              app.select({ type: 'joint', id: nj.id });
-            } else app.setStatus(STATUS.jointIncompatible);
-            app.endChange();
+            const r = tryChangeJointType(m, j.id, t);
+            if (r.ok && r.joint) {
+              app.select({ type: 'joint', id: r.joint.id });
+              app.endChange();
+            } else {
+              this.blurActive(); // the select keeps focus otherwise and refresh() would leave the stale panel
+              app.abortChange();
+              app.select(sel);
+              app.report(r.diagnosis?.kind === 'incompatible' ? STATUS.jointIncompatible : jointRefusedMessage(r.diagnosis ?? { kind: 'infeasible', residual: r.residual }));
+            }
           }),
         ),
       );
@@ -838,6 +1190,86 @@ export class UI {
     box.appendChild(button(PANEL.deleteItem, () => this.tools.deletePick({ type: 'joint', id: j.id }), { icon: 'delete', cls: 'btn--danger' }));
   }
 
+  /**
+   * Crease section of the joint Properties: the current fold angle and class (read-only), the mountain / valley
+   * assignment and target fold angle stored in joint.fold (which move nothing by themselves), "Fold to target"
+   * (foldCreaseToTarget inside one undoable change, restored and explained on refusal) and "Drive this crease"
+   * (driveCrease, which pre-folds a flat vertex, then the new driver becomes the active one). The target is written
+   * without rebuilding the panel (like the helper offset and default joint type), so that typing a value and
+   * clicking "Fold to target" straight away is a single click; the fold itself is the undoable change.
+   */
+  private creaseProps(box: HTMLElement, j: Joint): void {
+    const app = this.app;
+    const m = app.model;
+    const deg = creaseDihedralDeg(m, j);
+    const mv = creaseMV(m, j);
+    if (deg !== null) box.appendChild(row(PANEL.creaseAngle, el('span', 'value', PANEL.creaseAngleValue(deg, mv))));
+    const mvRow = row(
+      PANEL.creaseMV,
+      select(
+        [
+          { value: '', label: PANEL.creaseMVUnset },
+          { value: 'M', label: PANEL.creaseMountain },
+          { value: 'V', label: PANEL.creaseValley },
+        ],
+        j.fold?.mv ?? '',
+        (v) => {
+          app.beginChange();
+          if (v === '') delete j.fold?.mv;
+          else j.fold = { ...(j.fold ?? {}), mv: v };
+          if (j.fold && Object.keys(j.fold).length === 0) delete j.fold;
+          app.endChange();
+        },
+      ),
+    );
+    mvRow.title = PANEL.creaseMVHelp;
+    box.appendChild(mvRow);
+    // default target: the stored one, else 160° for a flat crease (the pre-fold angle), else the current angle
+    let target = j.fold?.target ?? (deg === null || mv === null ? DEFAULT_PREFOLD_DEG : Math.round(Math.abs(deg)));
+    const targetRow = row(
+      PANEL.creaseTarget,
+      numberInput(target, (v) => {
+        target = Math.max(0, Math.min(180, v));
+        j.fold = { ...(j.fold ?? {}), target };
+      }, { step: 5, min: 0, max: 180, digits: 1 }),
+    );
+    targetRow.title = PANEL.creaseTargetHelp;
+    box.appendChild(targetRow);
+    const actions = el('div', 'actions');
+    const foldBtn = button(PANEL.creaseFoldTo, () => {
+      const sel = app.selection;
+      app.beginChange();
+      const r = foldCreaseToTarget(m, j.id, target, j.fold?.mv);
+      if (!r.ok) {
+        app.abortChange();
+        app.select(sel);
+        app.report(STATUS.foldFailed(r.reason ?? 'unreachable', this.conflictList(r.conflicts)));
+        return;
+      }
+      app.setStatus(STATUS.creaseFolded(`${this.jointLabel(j)} · ${this.jointEnds(j)}`, r.dof ?? 0));
+      app.endChange();
+    });
+    foldBtn.title = PANEL.creaseFoldToHelp;
+    actions.appendChild(foldBtn);
+    const driveBtn = button(PANEL.creaseDrive, () => {
+      app.beginChange();
+      const r = driveCrease(m, j.id);
+      if (!r.driver) {
+        app.abortChange();
+        return;
+      }
+      app.endChange(); // records an undo entry only when the model changed (a reused driver on a folded vertex changes nothing)
+      app.setActiveDriver(m.drivers.indexOf(r.driver));
+      const sheet = r.patternId ? m.patterns?.[r.patternId] : undefined;
+      const note = r.prefold ? (r.prefold.ok ? (sheet ? STATUS.patternPrefolded(sheet.name, Object.keys(r.prefold.dihedrals ?? {}).length) : STATUS.prefolded) : STATUS.flatVertexWarning) : '';
+      const message = r.reused ? STATUS.driverReused : STATUS.driverSet;
+      app.setStatus(note ? `${message} · ${note}` : message);
+    }, { icon: 'driver' });
+    driveBtn.title = PANEL.creaseDriveHelp;
+    actions.appendChild(driveBtn);
+    box.appendChild(actions);
+  }
+
   private constructionProps(box: HTMLElement, c: Construction): void {
     const app = this.app;
     const m = app.model;
@@ -850,6 +1282,7 @@ export class UI {
       box.appendChild(isSketch ? el('p', 'hint ok', PANEL.isSketchPlane) : button(PANEL.sketchPlane, () => { app.beginChange(); m.settings.sketchPlaneId = c.id; app.endChange(); }));
     }
     if (c.builtin) box.appendChild(el('p', 'hint', PANEL.builtin));
+    else if (planeCarriesPattern(m, c.id)) box.appendChild(el('p', 'hint', PANEL.planeHasPattern)); // removeConstruction would refuse it
     else box.appendChild(button(PANEL.deleteItem, () => this.tools.deletePick({ type: 'construction', id: c.id }), { icon: 'delete', cls: 'btn--danger' }));
   }
 
@@ -920,27 +1353,36 @@ export class UI {
     const typeBtn = el('button', 'popup__btn');
     typeBtn.innerHTML = icon(j ? j.type : 'none');
     typeBtn.title = j ? `${JOINTS[j.type].label} — ${POPUP.changeConstraint}` : POPUP.noConstraint;
+    // the sketch-plane constraint is not a joint at this point, but it is why the point cannot leave the plane
+    const bp = link ? bodyPlaneJoint(m, link.id) : null;
+    const planeName = bp && isConstructionRef(bp.b) ? m.construction[bp.b.constructionId]?.name : undefined;
+    if (planeName) typeBtn.title += ` · ${POPUP.onSketchPlane(planeName)}`;
     typeBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       if (!j) {
         app.setStatus(TOOLS.joint.hint);
         return;
       }
-      // cycle through compatible joint types
+      // cycle to the next compatible joint type; a type the mechanism cannot be re-assembled with stops the cycle
+      // with an explanation and the joint stays as it was (incompatible types are skipped, nothing is removed)
       const idx = JOINT_TYPES.indexOf(j.type);
       for (let k = 1; k <= JOINT_TYPES.length; k++) {
         const t = JOINT_TYPES[(idx + k) % JOINT_TYPES.length];
+        const sel = app.selection;
         app.beginChange();
-        const nj = changeJointType(m, j.id, t);
-        if (nj) {
-          const res = solveSketch(m, {});
-          commitSketch(m, res);
+        const r = tryChangeJointType(app.model, j.id, t);
+        if (r.ok) {
           app.endChange();
           app.setStatus(`${JOINTS[t].label}`);
           this.showPopup(pointId);
           return;
         }
-        app.endChange({ skipUndo: true });
+        app.abortChange();
+        app.select(sel);
+        if (r.diagnosis?.kind !== 'incompatible') {
+          app.setStatus(jointRefusedMessage(r.diagnosis ?? { kind: 'infeasible', residual: r.residual }));
+          return;
+        }
       }
     });
     const removeBtn = el('button', 'popup__btn popup__btn--remove');
@@ -995,7 +1437,7 @@ export class UI {
     const box = el('div', 'dialog');
     box.appendChild(el('h2', 'dialog__title', SETTINGS.title));
     box.appendChild(el('h3', 'panel__title', SETTINGS.colors));
-    const colorKeys: (keyof AppSettings['colors'])[] = ['geometry', 'ground', 'construction', 'designSpace', 'outputPath', 'editPointFree', 'editPointConstrained', 'background', 'gridMajor', 'gridMinor', 'selection'];
+    const colorKeys: (keyof AppSettings['colors'])[] = ['geometry', 'ground', 'construction', 'designSpace', 'outputPath', 'editPointFree', 'editPointConstrained', 'background', 'gridMajor', 'gridMinor', 'selection', 'mountain', 'valley', 'patternBorder', 'patternUnassigned'];
     const pickers: ReturnType<typeof createColorPicker>[] = [];
     for (const key of colorKeys) {
       const p = createColorPicker(SETTINGS[key as keyof typeof SETTINGS] as string, app.settings.colors[key], (hex) => app.updateSettings({ colors: { [key]: hex } }));
@@ -1087,15 +1529,19 @@ export class UI {
     } else if (e.key === 'Backspace' && this.tools.popSketchSupported()) {
       e.preventDefault();
       this.tools.popSketchPoint();
+    } else if (e.key === 'Backspace' && (app.tool === 'cpattern' || app.tool === 'sketch')) {
+      // nothing to take back under a drawing tool (right after Enter, say): Backspace never deletes the selection
+      // there, which would be the whole pattern or the panel just closed; Del does
+      e.preventDefault();
     } else if (e.key === 'Delete' || e.key === 'Backspace') {
-      if (app.selection) this.tools.deletePick({ type: app.selection.type, id: app.selection.id, pointId: app.selection.pointId, pose: app.selection.pose });
+      if (app.selection) this.tools.deletePick({ type: app.selection.type, id: app.selection.id, pointId: app.selection.pointId, pose: app.selection.pose, creaseId: app.selection.creaseId });
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
       e.preventDefault();
-      if (e.shiftKey) app.redo();
-      else app.undo();
+      if (e.shiftKey) this.redo();
+      else this.undo();
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
       e.preventDefault();
-      app.redo();
+      this.redo();
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c' && app.mode === 'construction') {
       e.preventDefault();
       this.copySelected();
@@ -1103,9 +1549,9 @@ export class UI {
       e.preventDefault();
       this.pasteCopied();
     } else if (e.key === 'Enter' && app.mode === 'construction') {
-      this.tools.finishSketch();
+      this.tools.finish();
     } else if (app.mode === 'construction' && !e.ctrlKey && !e.metaKey) {
-      const map: Record<string, ToolName> = { '1': 'select', '2': 'bar', '3': 'polygon', '4': 'prism', '5': 'cylinder', g: 'ground', j: 'joint', d: 'driver', s: 'sketch', e: 'edit', m: 'mirror', p: 'pattern' };
+      const map: Record<string, ToolName> = { '1': 'select', '2': 'bar', '3': 'polygon', '4': 'prism', '5': 'cylinder', g: 'ground', j: 'joint', d: 'driver', s: 'sketch', c: 'cpattern', e: 'edit', m: 'mirror', p: 'pattern' };
       const t = map[e.key.toLowerCase()];
       if (t) this.tools.setTool(t);
       if (e.key.toLowerCase() === 'f') app.zoomToFit();

@@ -290,6 +290,9 @@ export interface SolveResult {
   iterations: number;
 }
 
+/** Fraction of the largest diagonal entry of JᵀJ below which the Levenberg–Marquardt damping of a column is floored. */
+export const DAMPING_FLOOR = 1e-3;
+
 export function solve(sys: CompiledSystemLike, x0: Float64Array, opts: SolveOptions = {}): SolveResult {
   const n = sys.n;
   const maxIter = opts.maxIter ?? 50;
@@ -298,8 +301,11 @@ export function solve(sys: CompiledSystemLike, x0: Float64Array, opts: SolveOpti
   const maxStep = opts.maxStep ?? Infinity;
   let x = Float64Array.from(x0);
   if (n === 0) {
-    const r0 = residualOnly(sys, x);
-    return { x, cost: 0.5 * dot(r0, r0), hardResidual: maxAbs(r0), converged: true, iterations: 0 };
+    // nothing to solve for, but the constraints can still be violated (e.g. a rest length between two frozen
+    // points): converged only when the hard residual meets the same criterion as a solved system
+    const ev0 = evaluate(sys, x);
+    const hard = maxAbs(ev0.r, ev0.hardRows);
+    return { x, cost: 0.5 * dot(ev0.r, ev0.r), hardResidual: hard, converged: hard < tol * 10, iterations: 0 };
   }
   let ev = evaluate(sys, x);
   let cost = 0.5 * dot(ev.r, ev.r);
@@ -309,12 +315,23 @@ export function solve(sys: CompiledSystemLike, x0: Float64Array, opts: SolveOpti
   const gtol = tol * 1e-2;
   let { A, g } = normalEquations(ev, n);
   let converged = maxAbs(ev.r, ev.hardRows) < tol && maxAbs(g) < gtol;
+  // Damping: Marquardt's diagonal scaling (λ·A_ii) keeps the step scale-aware, but a column whose Jacobian entries
+  // are nearly zero (a coordinate the residuals hardly depend on, e.g. the x of a point on an almost vertical
+  // distance) would be left almost undamped and the step would move it by a large amount for no gain, so the
+  // scaling is floored at a small fraction of the largest diagonal entry: in such directions the step is then the
+  // minimum-norm (damped pseudo-inverse) step, which is what a projection onto the constraint manifold wants.
+  const dampFloor = () => {
+    let mx = 0;
+    for (let i = 0; i < n; i++) mx = Math.max(mx, A[i * n + i]);
+    return DAMPING_FLOOR * mx + 1e-9;
+  };
+  let floor = dampFloor();
   while (!converged && iterations < maxIter) {
     iterations++;
     let accepted = false;
     for (let attempt = 0; attempt < 12 && !accepted; attempt++) {
       const Ad = Float64Array.from(A);
-      for (let i = 0; i < n; i++) Ad[i * n + i] += lambda * (A[i * n + i] + 1e-9) + 1e-12;
+      for (let i = 0; i < n; i++) Ad[i * n + i] += lambda * (A[i * n + i] + floor) + 1e-12;
       const negg = new Float64Array(n);
       for (let i = 0; i < n; i++) negg[i] = -g[i];
       const dx = choleskySolve(Ad, negg, n);
@@ -350,6 +367,7 @@ export function solve(sys: CompiledSystemLike, x0: Float64Array, opts: SolveOpti
     if (!converged) {
       ev = evaluate(sys, x);
       ({ A, g } = normalEquations(ev, n));
+      floor = dampFloor();
       converged = maxAbs(ev.r, ev.hardRows) < tol && maxAbs(g) < gtol;
     }
   }
