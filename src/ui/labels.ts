@@ -6,7 +6,7 @@
  * come from strings.ts; the measurements from core/fold.
  */
 import { creaseDihedralDeg, creaseMV, isCrease } from '../core/fold';
-import type { Joint, Model } from '../core/types';
+import type { Driver, Joint, Model } from '../core/types';
 import { isConstructionRef } from '../core/types';
 import { JOINTS, creaseLabel } from './strings';
 
@@ -26,4 +26,11 @@ export function jointEnds(m: Model, j: Joint): string {
 /** "<label> · <ends>": the one-line description of a joint (tree item with `short`, status bar and query cycle without). */
 export function jointDescription(m: Model, j: Joint, short = false): string {
   return `${jointLabel(m, j, short)} · ${jointEnds(m, j)}`;
+}
+
+/** "<link> · angle" for angle drivers, "<joint label> · fold / slide" for joint drivers (tree, driver list, handle). */
+export function driverLabel(m: Model, d: Driver): string {
+  if (d.kind === 'angle') return `${m.links[d.linkId ?? '']?.name ?? ''} · angle`;
+  const j = d.jointId ? m.joints[d.jointId] : null;
+  return `${j ? (isCrease(m, j) ? JOINTS.crease.label : JOINTS[j.type].label) : ''} · ${d.kind}`;
 }

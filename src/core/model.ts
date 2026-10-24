@@ -750,6 +750,21 @@ export function mergedCreaseMismatch(m: Model, joint: Joint): { la: number; lb: 
   return Math.abs(lengths.la - lengths.lb) > CREASE_EXACT_TOLERANCE * Math.max(lengths.la, lengths.lb) ? lengths : null;
 }
 
+/**
+ * Joint created when a vertex of `linkA` is placed on a vertex of `linkB`:
+ * polygon / prism panels are joined by a coincident (spherical) constraint so
+ * origami-like assemblies can be built by freely joining panels (two coincident
+ * vertices on a shared edge make that edge a crease); anything involving a bar
+ * or cylinder uses the model's default joint (a pin by default).
+ */
+export function defaultVertexJoint(m: Model, linkA: ID, linkB: ID): JointType {
+  const panel = (id: ID): boolean => {
+    const k = m.links[id]?.kind;
+    return k === 'polygon' || k === 'prism';
+  };
+  return panel(linkA) && panel(linkB) ? 'spherical' : m.settings.defaultJoint;
+}
+
 export function sketchNormal(m: Model): Vec3 {
   const pl = m.construction[m.settings.sketchPlaneId];
   return pl?.dir ? pl.dir : [0, 0, 1];

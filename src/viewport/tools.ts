@@ -5,7 +5,7 @@
  */
 import type { App, ToolName } from '../app';
 import { add, dist, dot, len, normalize, perpendicular, scale, sub, cross } from '../core/geometry';
-import { solveSketch, syncDriverValues } from '../core/kinematics';
+import { positionsFromModel, solveSketch, syncDriverValues } from '../core/kinematics';
 import { tryAddJoint, trySolveCommit } from '../core/feasibility';
 import { driveCrease, findCreaseLoops, isCrease } from '../core/fold';
 import {
@@ -35,11 +35,12 @@ import type { ConstructionRef, CreasePattern, Feature, ID, JointType, Model, Tar
 import { PLACEMENT_MIN_COS, autoJoinCoincident, coincidenceTolerance, coincidentVertex, fitSketchPlane, moveVertex, placeOnFittedPlane, placementOnPlane, projectToPlane } from '../core/edit';
 import { sketchSectors, type SectorStatus } from '../core/sector';
 import { duplicateLink, hasCollinearTriple, linearArray, mirrorAcrossPlane, polarArray } from '../core/patterns';
-import { addPolygonFromPoints, parseModel, serializeModel } from '../core/model';
+import { addPolygonFromPoints, defaultVertexJoint, parseModel, serializeModel } from '../core/model';
+import { driverHandle, driverValueFromPoint } from '../core/driverHandle';
 import { addPattern, removePattern, removePatternCrease, removePatternVertex } from '../core/creasePattern';
 import { isConstructionRef } from '../core/types';
-import { FEATURES, OVERLAY, PATTERN, STATUS, TOOLS, CONSTRUCTION_NAMES, jointRefusedMessage } from '../ui/strings';
-import { jointDescription } from '../ui/labels';
+import { DRIVER_HANDLE, FEATURES, OVERLAY, PATTERN, STATUS, TOOLS, CONSTRUCTION_NAMES, jointRefusedMessage } from '../ui/strings';
+import { driverLabel, jointDescription } from '../ui/labels';
 import type { OverlayLabel, OverlayView } from './render';
 import type { PickResult, ViewportPointerEvent } from './scene';
 import { PickCycle } from './pickCycle';
@@ -91,7 +92,8 @@ type DragState =
   | { kind: 'pending'; pick: PickResult; startX: number; startY: number }
   | { kind: 'point'; pointId: ID; linkId: ID; plane: { o: Vec3; n: Vec3 }; moved: boolean }
   | { kind: 'link'; linkId: ID; grab: Vec3; start: Map<ID, Vec3>; plane: { o: Vec3; n: Vec3 }; moved: boolean }
-  | { kind: 'editPoint'; pointId: ID; pose: number; target: Target; created: boolean; mode: 'plane' | 'line' | 'free' | 'none'; dirs: Vec3[]; origin: Vec3; moved: boolean };
+  | { kind: 'editPoint'; pointId: ID; pose: number; target: Target; created: boolean; mode: 'plane' | 'line' | 'free' | 'none'; dirs: Vec3[]; origin: Vec3; moved: boolean }
+  | { kind: 'driver'; index: number; moved: boolean };
 
 export class ToolManager {
   private points: PlacedPoint[] = [];
@@ -474,6 +476,10 @@ export class ToolManager {
   private describePick(p: PickResult): string {
     const m = this.app.model;
     if (p.type === 'editPoint') return `${STATUS.pose} ${p.pose} · ${m.points[p.pointId!]?.name ?? ''}`;
+    if (p.type === 'driver') {
+      const d = m.drivers[Number(p.id)];
+      return d ? `${DRIVER_HANDLE.label(driverLabel(m, d))} — ${DRIVER_HANDLE.hint}` : '';
+    }
     if (p.type === 'joint') {
       const j = m.joints[p.id];
       return j ? jointDescription(m, j) : '';
@@ -970,7 +976,7 @@ export class ToolManager {
       const joinTo = (newPid: ID, snap: PlacedPoint) => {
         if (snap.snappedPointId && m.points[snap.snappedPointId]) {
           const other = m.points[snap.snappedPointId];
-          if (other.linkId !== link.id) addJoint(m, m.settings.defaultJoint, { linkId: link.id, kind: 'vertex', pointIds: [newPid] }, { linkId: other.linkId, kind: 'vertex', pointIds: [other.id] }, { axis: sketchNormal(m) });
+          if (other.linkId !== link.id) addJoint(m, defaultVertexJoint(m, link.id, other.linkId), { linkId: link.id, kind: 'vertex', pointIds: [newPid] }, { linkId: other.linkId, kind: 'vertex', pointIds: [other.id] }, { axis: sketchNormal(m) });
         } else if (snap.snappedConstructionId) {
           addJoint(m, m.settings.defaultJoint === 'spherical' ? 'spherical' : 'revolute', { linkId: link.id, kind: 'vertex', pointIds: [newPid] }, { constructionId: snap.snappedConstructionId }, { axis: sketchNormal(m) });
         }
@@ -1293,6 +1299,18 @@ export class ToolManager {
     const app = this.app;
     const m = app.model;
     const vp = app.viewport;
+    if (pick.type === 'driver') {
+      const index = Number(pick.id);
+      if (!m.drivers[index] || app.mode === 'simulation') {
+        this.drag = { kind: 'none' };
+        return;
+      }
+      if (app.mode === 'construction') app.beginChange();
+      else app.preview.playing = false;
+      this.drag = { kind: 'driver', index, moved: false };
+      app.setStatus(DRIVER_HANDLE.hint);
+      return;
+    }
     if (pick.type === 'editPoint' && app.mode === 'simulation' && pick.pointId && pick.pose !== undefined) {
       const existing = app.targetFor(pick.pointId, pick.pose);
       if (existing?.locked) {
@@ -1403,6 +1421,18 @@ export class ToolManager {
       if ((this.drag as DragState).kind === 'none') return;
     }
     const d = this.drag as DragState;
+    if (d.kind === 'driver') {
+      const driver = m.drivers[d.index];
+      if (!driver) return;
+      // the handle geometry follows the pose being dragged (a hinge axis or a floating pivot moves with the mechanism)
+      const positions = app.mode === 'preview' && app.preview.positions ? app.preview.positions : positionsFromModel(m);
+      const h = driverHandle(m, driver, d.index, positions);
+      if (!h) return;
+      const p = h.kind === 'slide' ? vp.projectToLine(ev.clientX, ev.clientY, h.pivot, h.axis) : vp.projectToPlane(ev.clientX, ev.clientY, h.pivot, h.axis);
+      if (!p) return;
+      if (app.applyDriverValue(d.index, driverValueFromPoint(h, p))) d.moved = true;
+      return;
+    }
     if (d.kind === 'point') {
       const dp = this.dragPointer(ev, d.plane);
       if (!dp) return;
@@ -1458,9 +1488,21 @@ export class ToolManager {
     const d = this.drag;
     this.drag = { kind: 'none' };
     app.setOverlay({});
+    if (d.kind === 'driver') {
+      if (app.mode === 'construction') {
+        if (d.moved) app.endChange();
+        else app.abortChange();
+      }
+      app.setActiveDriver(d.index);
+      return;
+    }
     if (d.kind === 'pending') {
       // click without drag: select
       const pick = d.pick;
+      if (pick.type === 'driver') {
+        app.setActiveDriver(Number(pick.id));
+        return;
+      }
       if (pick.type === 'vertex' && pick.pointId) {
         app.select({ type: 'vertex', id: pick.linkId ?? pick.id, pointId: pick.pointId });
         this.onPopup?.(pick.pointId);
@@ -1481,7 +1523,7 @@ export class ToolManager {
         const other = m.points[ev.pick.pointId];
         const already = jointsAtPoint(m, d.pointId).some((j) => j.pairs?.some(([a, b]) => a === other.id || b === other.id));
         if (other.linkId !== d.linkId && !already) {
-          addJoint(m, m.settings.defaultJoint, { linkId: d.linkId, kind: 'vertex', pointIds: [d.pointId] }, { linkId: other.linkId, kind: 'vertex', pointIds: [other.id] }, { axis: sketchNormal(m) });
+          addJoint(m, defaultVertexJoint(m, d.linkId, other.linkId), { linkId: d.linkId, kind: 'vertex', pointIds: [d.pointId] }, { linkId: other.linkId, kind: 'vertex', pointIds: [other.id] }, { axis: sketchNormal(m) });
         }
       }
       // exact solve on release (the drag preview used soft targets); a pose that cannot satisfy the constraints is

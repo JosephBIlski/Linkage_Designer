@@ -287,6 +287,16 @@ datum planes freeze coordinates. Every joint contributes to the numerical DOF
 (rank of the constraint Jacobian), so redundant / parallel constraints are
 counted correctly.
 
+**Coincident vertices (v0.6).** Snapping a vertex of a polygon or prism onto a
+vertex of another panel (Link, Polygon, Panel, Edit tools and vertex drags)
+creates a *coincident* constraint (the spherical joint: the two points become
+one, rotations stay free) rather than a pin, so origami-like assemblies can be
+built by freely joining panels. Two coincident vertices on a shared edge are
+upgraded to a crease (edge–edge revolute) automatically. Joins involving bars
+or cylinders still use the default joint of the tool options. Every connection
+at a vertex is listed in the link-end pop-up with its own ✕ ("Break the
+connection to …"), so a join is undone with one click.
+
 ## 6. Ground link and degrees of freedom
 
 **Original:** "specifying a ground link (that can be later changed). The user
@@ -477,6 +487,19 @@ range of a selected link."
   (`Space`), speed (units per second), trace toggle. Cranks loop, rockers
   ping-pong. The driver is chosen in the panel (a link's angle = "the selected
   link"). Creases change colour as they fold (§17.2).
+
+**Driver handle (v0.6).** The driven point of the active driver (the link tip
+of an angle driver, the moving panel's far point of a fold driver, the sliding
+edge of a slide driver) is drawn as an orange handle with a ring around its
+axis. Dragging it moves the input directly: in Preview the preview value
+follows the pointer (clamped to a rocker's range) and playback pauses; in
+Construction the mechanism is re-assembled at the dragged value and the result
+becomes the construction pose (one undo step). Clicking a handle makes its
+driver the active one.
+
+**Play / Pause.** Animation frames no longer rebuild the Preview panel (they
+update the slider and readout in place), which is what made the Pause button
+miss clicks.
 
 ## 11. Settings
 

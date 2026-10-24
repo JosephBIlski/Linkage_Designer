@@ -6,7 +6,7 @@
 import type { ID, Vec3 } from '../core/types';
 
 /** `pvertex` / `pcrease`: a vertex / crease of a crease pattern (id = the pattern, `pointId` / `creaseId` the element). */
-export type PickType = 'vertex' | 'edge' | 'face' | 'axis' | 'joint' | 'construction' | 'editPoint' | 'pvertex' | 'pcrease';
+export type PickType = 'vertex' | 'edge' | 'face' | 'axis' | 'joint' | 'construction' | 'editPoint' | 'pvertex' | 'pcrease' | 'driver';
 
 export interface PickResult {
   type: PickType;
@@ -46,6 +46,7 @@ export interface PickResult {
  * its thin elements must stay reachable over a panel's edges and faces.
  */
 export const PICK_PRIORITY: Record<PickType, number> = {
+  driver: 0,
   editPoint: 0,
   vertex: 1,
   pvertex: 2,

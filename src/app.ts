@@ -24,6 +24,7 @@ import {
 import { EXAMPLE_BUILDERS } from './core/examples';
 import { addAngleDriver, addFoldDriver, candidateAngleDrivers, cloneModel, createModel, creasesLockedByPlane, parseModel, serializeModel, groundLink } from './core/model';
 import { solidifyRestGeometry } from './core/feasibility';
+import { driverHandle, type DriverHandle } from './core/driverHandle';
 import { findCreaseLoops, isCrease, type CreaseLoop } from './core/fold';
 import { validateCreasePattern, type VertexReport } from './core/validate';
 import { analyseDesign, applyDesign, solveDesign, symmetricEigen3, type DesignAnalysis, type DesignResult, type PointDesignSpace } from './core/synthesis';
@@ -281,6 +282,8 @@ export class App {
 
   /** Lightweight listener for status / hint text (avoids rebuilding panels on every pointer move). */
   onStatus: (() => void) | null = null;
+  /** Lightweight channel for preview animation frames: the panels update the slider and readout in place instead of rebuilding (a rebuild every frame swallowed clicks on the Play / Pause button). */
+  onPreviewTick: (() => void) | null = null;
 
   setStatus(text: string): void {
     this.status = text;
@@ -605,7 +608,56 @@ export class App {
     this.preview.value = v;
     this.updatePreviewPositions();
     this.requestRender();
-    this.notify();
+    this.onPreviewTick?.();
+  }
+
+  /**
+   * Drag of a driver handle: in Preview the value becomes the preview value
+   * (clamped to a rocker's range, unwrapped onto a crank's range), in
+   * Construction the mechanism is re-assembled at that driver value and the
+   * result becomes the construction pose (the caller brackets the drag with
+   * beginChange / endChange). Returns false when no pose was found.
+   */
+  applyDriverValue(index: number, value: number): boolean {
+    const m = this.model;
+    if (this.mode === 'preview') {
+      const sweep = this.sim.sweep;
+      if (!sweep || sweep.driverIndex !== index) return false;
+      const [lo, hi] = sweep.range;
+      let v = value;
+      if (m.drivers[index]?.kind !== 'slide') {
+        // the sweep range may span more than one turn or sit outside (−180, 180]: pick the representative nearest the current value
+        while (v - this.preview.value > 180) v -= 360;
+        while (v - this.preview.value < -180) v += 360;
+      }
+      if (!sweep.isCrank) v = Math.max(lo, Math.min(hi, v));
+      else if (v < lo) v += 360;
+      else if (v > hi) v -= 360;
+      this.preview.playing = false;
+      this.setPreviewValue(v);
+      return true;
+    }
+    const vals = m.drivers.map((d) => d.value);
+    vals[index] = value;
+    const res = solveForward(m, vals, positionsFromModel(m), { maxIter: 30 });
+    if (!res.converged) return false;
+    applyPositions(m, res.positions);
+    syncDriverValues(m);
+    this.requestRender();
+    return true;
+  }
+
+  /** Handles of the drivers the user may drag in the current mode and pose. */
+  private currentDriverHandles(positions: Positions): DriverHandle[] {
+    const m = this.model;
+    if (this.mode === 'simulation') return [];
+    const indices = this.mode === 'preview' ? (this.sim.sweep ? [this.sim.sweep.driverIndex] : []) : m.drivers.map((_, i) => i);
+    const out: DriverHandle[] = [];
+    for (const i of indices) {
+      const h = driverHandle(m, m.drivers[i], i, positions);
+      if (h) out.push(h);
+    }
+    return out;
   }
 
   private advancePreview(dt: number): void {
@@ -627,7 +679,7 @@ export class App {
     }
     this.preview.value = v;
     this.updatePreviewPositions();
-    this.notify();
+    this.onPreviewTick?.();
   }
 
   private updatePreviewPositions(): void {
@@ -713,6 +765,7 @@ export class App {
       surfaces: this.sim.showPaths && this.sim.surface ? this.currentSurfaces() : [],
       designSpaces: this.currentDesignSpaces(),
       editPoints: this.currentEditPoints(),
+      driverHandles: this.currentDriverHandles(positions),
       ghost: this.mode === 'simulation' ? this.ghost : null,
       overlay: this.overlay,
       displayPointIds: this.model.settings.displayPointIds,

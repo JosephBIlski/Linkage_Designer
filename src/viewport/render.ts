@@ -10,6 +10,7 @@ import { modelSize } from '../core/kinematics';
 import { linkEdges, linkFaces } from '../core/model';
 import { creaseDihedralDeg, creaseMV, isCrease } from '../core/fold';
 import { patternBasis, patternExtent } from '../core/creasePattern';
+import { handleRadius, type DriverHandle } from '../core/driverHandle';
 import type { CreaseClass, ID, Joint, Link, Model, Vec3 } from '../core/types';
 import { add, centroid, cross, dist, len, normalize, scale, sub } from '../core/geometry';
 import type { AppSettings } from '../ui/settings';
@@ -77,6 +78,8 @@ export interface RenderState {
   surfaces: SurfaceView[];
   designSpaces: DesignSpaceView[];
   editPoints: EditPointView[];
+  /** Draggable driver handles (Construction: every driver; Preview: the active driver). */
+  driverHandles: DriverHandle[];
   ghost: Positions | null;
   overlay: OverlayView;
   /** Points whose paths/design spaces are displayed (drawn with a marker). */
@@ -91,6 +94,8 @@ const unitOcta = new THREE.OctahedronGeometry(1, 0);
 const unitCone = new THREE.ConeGeometry(1, 1, 16);
 const unitDisc = new THREE.CircleGeometry(1, 24);
 const Y = new THREE.Vector3(0, 1, 0);
+/** Colour of the draggable driver handles. */
+const DRIVER_HANDLE_COLOR = '#e67e22';
 /** Colour of a crease whose panels are coplanar (no mountain / valley class yet). */
 const CREASE_FLAT_COLOR = '#8d949c';
 /** Colour of the vertex discs of a crease pattern. */
@@ -142,6 +147,7 @@ export class ModelRenderer {
     this.buildSurfaces(state);
     this.buildDesignSpaces(state);
     this.buildEditPoints(state);
+    this.buildDriverHandles(state);
     this.buildOverlay(state);
     this.vp.setPickables(this.pickables);
   }
@@ -665,6 +671,41 @@ export class ModelRenderer {
         const n = this.vp.viewDirection();
         ring.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), v(normalize(n)));
         g.add(ring);
+      }
+    }
+  }
+
+  /**
+   * Driver handles: a sphere at the driven point (pickable as type 'driver', id =
+   * driver index), with a thin ring around the axis at the handle's radius for
+   * rotations or a short bar along the axis for slides, so the user sees which
+   * motion dragging it produces.
+   */
+  private buildDriverHandles(state: RenderState): void {
+    const g = this.vp.groups.editPoints;
+    const { settings } = state;
+    const r = this.r;
+    for (const h of state.driverHandles) {
+      const id = String(h.index);
+      const hovered = this.isHovered(state, 'driver', id);
+      const mat = this.material(hovered ? settings.colors.selection : DRIVER_HANDLE_COLOR, { emissive: hovered ? settings.colors.selection : undefined });
+      const s = this.sphere(h.pos, r * (hovered ? 2.2 : 1.8), mat, { type: 'driver', id });
+      s.renderOrder = 3;
+      g.add(s);
+      const hint = this.material(DRIVER_HANDLE_COLOR, { opacity: 0.45, flat: true });
+      const radius = handleRadius(h);
+      if (h.kind !== 'slide' && radius > r * 2) {
+        const ring = new THREE.Mesh(new THREE.TorusGeometry(radius, r * 0.25, 8, 64), hint);
+        this.track(ring.geometry);
+        ring.position.copy(v(h.pivot));
+        ring.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), v(h.axis));
+        g.add(ring);
+      } else if (h.kind === 'slide') {
+        const bar = new THREE.Mesh(unitCylinder, hint);
+        bar.scale.set(r * 0.25, r * 10, r * 0.25);
+        bar.position.copy(v(h.pos));
+        bar.quaternion.setFromUnitVectors(Y, v(h.axis));
+        g.add(bar);
       }
     }
   }

@@ -7,6 +7,7 @@ import { add, cross, dist, dot, len, normalize, perpendicular, scale, sub } from
 import { adaptationLimit, diagnoseJoint, isReleaseAccepted, linkPath, mergedPointGroups, restore, type Diagnosis } from './feasibility';
 import { applyPositions, commitSketch, modelSize, solveSketch, solveSketchWithRelease } from './kinematics';
 import {
+  defaultVertexJoint,
   addJoint,
   attachHelper,
   bodyPlaneJoint,
@@ -289,7 +290,7 @@ export function autoJoinCoincident(m: Model, link: Link, vertexIds: ID[], opts: 
       const groups = mergedPointGroups(m);
       if (groups.root(v) === groups.root(q)) continue;
       const shared = sharedSketchPlane(m, link.id, other.id);
-      const type: JointType = shared ? opts.defaultJoint : 'spherical';
+      const type: JointType = shared ? defaultVertexJoint(m, link.id, other.id) : 'spherical';
       const axis = shared?.dir ?? opts.axis;
       const j = addJoint(m, type, { linkId: link.id, kind: 'vertex', pointIds: [v] }, { linkId: other.id, kind: 'vertex', pointIds: [q] }, { axis });
       if (j) created.push(j);

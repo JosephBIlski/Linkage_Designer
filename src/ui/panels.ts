@@ -20,8 +20,8 @@ import { isConstructionRef } from '../core/types';
 import { createColorPicker } from './colorPicker';
 import { icon } from './icons';
 import { DEFAULT_SETTINGS, type AppSettings } from './settings';
-import { APP, EXAMPLES, HELP, JOINTS, MENU, MODES, PANEL, PATTERN, POPUP, PREVIEW, SETTINGS, SIM, STATUS, TOOLS, TOOL_OPTIONS, TREE, jointRefusedMessage, VERSION } from './strings';
-import { jointDescription, jointEnds, jointLabel } from './labels';
+import { APP, DRIVER_HANDLE, EXAMPLES, HELP, JOINTS, MENU, MODES, PANEL, PATTERN, POPUP, PREVIEW, SETTINGS, SIM, STATUS, TOOLS, TOOL_OPTIONS, TREE, jointRefusedMessage, VERSION } from './strings';
+import { driverLabel, jointDescription, jointEnds, jointLabel } from './labels';
 import { duplicateLink, extrudePolygon, translation } from '../core/patterns';
 import { currentViolation, modelSize } from '../core/kinematics';
 import { bodyPlaneJoint, planeCarriesPattern, setBodyPlane } from '../core/model';
@@ -139,6 +139,7 @@ export class UI {
       this.statusText.title = app.status || app.hint; // the whole message as a tooltip: long diagnoses are clipped in the bar
     };
     tools.onPopup = (pid) => this.showPopup(pid);
+    app.onPreviewTick = () => this.updateLiveReadouts();
     this.refresh();
     document.addEventListener('keydown', (e) => this.onKey(e));
     // keep popup glued to its point
@@ -510,8 +511,13 @@ export class UI {
   }
 
   private updateLiveReadouts(): void {
-    if (this.previewReadout) this.previewReadout.textContent = this.app.preview.value.toFixed(1);
+    const app = this.app;
+    if (this.previewReadout) this.previewReadout.textContent = app.preview.value.toFixed(1);
+    if (this.sliderValue && document.activeElement !== this.sliderValue) this.sliderValue.value = String(app.preview.value);
+    if (this.playBtn && this.playBtn.dataset.playing !== String(app.preview.playing)) this.renderModePanel();
   }
+
+  private playBtn: HTMLButtonElement | null = null;
 
   // ---------------------------------------------------------------------------
   // Tool options
@@ -668,7 +674,10 @@ export class UI {
       r.appendChild(readout);
       box.appendChild(r);
       const play = button(app.preview.playing ? PREVIEW.pause : PREVIEW.play, () => { app.preview.playing = !app.preview.playing; this.refresh(); }, { icon: app.preview.playing ? 'pause' : 'play' });
+      play.dataset.playing = String(app.preview.playing);
+      this.playBtn = play;
       box.appendChild(play);
+      box.appendChild(el('p', 'hint', DRIVER_HANDLE.hint));
       box.appendChild(row(PREVIEW.speed, numberInput(app.preview.speed, (v) => (app.preview.speed = v), { step: 10 })));
       box.appendChild(row(PREVIEW.trace, checkbox(sim.showPaths, (v) => { sim.showPaths = v; app.requestRender(); })));
     }
@@ -747,10 +756,7 @@ export class UI {
   }
 
   private driverLabel(d: import('../core/types').Driver): string {
-    const m = this.app.model;
-    if (d.kind === 'angle') return `${m.links[d.linkId ?? '']?.name ?? ''} · angle`;
-    const j = d.jointId ? m.joints[d.jointId] : null;
-    return `${j ? (isCrease(m, j) ? JOINTS.crease.label : JOINTS[j.type].label) : ''} · ${d.kind}`;
+    return driverLabel(this.app.model, d);
   }
 
   // ---------------------------------------------------------------------------
@@ -1385,18 +1391,30 @@ export class UI {
         }
       }
     });
-    const removeBtn = el('button', 'popup__btn popup__btn--remove');
-    removeBtn.innerHTML = icon('close');
-    removeBtn.title = POPUP.removeConstraint;
-    removeBtn.disabled = !j;
-    removeBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      if (!j) return;
-      app.beginChange();
-      removeJoint(m, j.id);
-      app.endChange();
-      this.showPopup(pointId);
-    });
+    // one break button per connection at this point (a coincident vertex can be joined to several panels), so a
+    // connection made by snapping vertices together is undone with one click
+    const removeBtns: HTMLElement[] = [];
+    const mkRemove = (joint: Joint | undefined) => {
+      const removeBtn = el('button', 'popup__btn popup__btn--remove');
+      removeBtn.innerHTML = icon('close');
+      if (joint) {
+        const otherSide = joint.a.linkId === link?.id ? joint.b : joint.a;
+        const otherName = isConstructionRef(otherSide) ? m.construction[otherSide.constructionId]?.name ?? '' : m.links[otherSide.linkId]?.name ?? '';
+        removeBtn.title = js.length > 1 ? POPUP.breakConnection(otherName) : POPUP.removeConstraint;
+      } else removeBtn.title = POPUP.removeConstraint;
+      removeBtn.disabled = !joint;
+      removeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (!joint) return;
+        app.beginChange();
+        removeJoint(m, joint.id);
+        app.endChange();
+        this.showPopup(pointId);
+      });
+      removeBtns.push(removeBtn);
+    };
+    if (js.length === 0) mkRemove(undefined);
+    else for (const jj of js) mkRemove(jj);
     const lockBtn = el('button', 'popup__btn popup__btn--lock');
     lockBtn.innerHTML = icon(link?.locked ? 'lock' : 'unlock');
     lockBtn.title = link?.locked ? POPUP.unlockLink : POPUP.lockLink;
@@ -1408,7 +1426,7 @@ export class UI {
       app.endChange();
       this.showPopup(pointId);
     });
-    this.popup.append(typeBtn, removeBtn, lockBtn);
+    this.popup.append(typeBtn, ...removeBtns, lockBtn);
     this.popup.classList.remove('hidden');
     this.positionPopup();
   }

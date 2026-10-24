@@ -166,7 +166,7 @@ export const PATTERN = {
 };
 
 export const JOINTS: Record<string, { label: string; short: string; dof: string; description: string }> = {
-  spherical: { label: 'Spherical joint', short: 'S', dof: '3 DOF', description: 'Ball joint: two vertices coincide; all rotations free.' },
+  spherical: { label: 'Coincident (spherical)', short: 'S', dof: '3 DOF', description: 'The two vertices coincide; all rotations stay free. The default when polygon vertices are joined: two coincident vertices on a shared edge make that edge a crease.' },
   revolute: { label: 'Revolute joint', short: 'R', dof: '1 DOF', description: 'Pin / hinge: rotation about one axis (vertex–vertex pin, or edge–edge crease).' },
   planar: { label: 'Planar constraint', short: 'E', dof: '3 DOF', description: 'A face, edge or vertex stays in a plane (another face or a construction plane).' },
   prismatic: { label: 'Prismatic joint', short: 'P', dof: '1 DOF', description: 'Slider: translation along an axis without rotation.' },
@@ -564,6 +564,13 @@ export const POPUP = {
   onSketchPlane: (planeName: string): string => `on sketch plane ${planeName}`,
   lockLink: 'Lock link',
   unlockLink: 'Unlock link',
+  breakConnection: (other: string): string => `Break the connection to ${other}`,
+};
+
+/** Draggable handle on the driving joint / link in Construction and Preview mode. */
+export const DRIVER_HANDLE = {
+  hint: 'Drag the handle to move the driven link; the whole mechanism follows.',
+  label: (driver: string): string => `Driver handle · ${driver}`,
 };
 
 export const SETTINGS = {
