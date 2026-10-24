@@ -173,6 +173,7 @@ export const JOINTS: Record<string, { label: string; short: string; dof: string;
   cylindrical: { label: 'Cylindrical joint', short: 'C', dof: '2 DOF', description: 'Rotation about and translation along a common axis.' },
   screw: { label: 'Screw joint', short: 'H', dof: '1 DOF', description: 'Helical: translation coupled to rotation by the pitch.' },
   // not a joint type: the presentation of an edge–edge revolute whose end points are merged (fold.ts isCrease)
+  hinge: { label: 'Hinge (edges become a crease)', short: 'Hg', dof: '1 DOF', description: 'Click an edge of one panel, then an edge of another: the second panel moves so the two edges coincide and the shared edge becomes a crease (two coincident vertices at once).' },
   crease: { label: 'Crease', short: 'Cr', dof: '1 DOF', description: 'Origami crease: two panels share an edge and fold about it. Drawn along the edge in the mountain (M) / valley (V) colour of its current fold angle, grey while flat.' },
 };
 
@@ -222,6 +223,8 @@ export const PANEL = {
   extrudeRefused: (gap: number): string =>
     `Not extruded: the current pose violates the constraints (gap ${num(gap)} units), so the polygon's shape cannot be taken as its design. Undo the last edit or release a joint first.`,
   copyLink: 'Duplicate',
+  detachAll: 'Detach from all neighbours',
+  detachAllHelp: 'Remove every connection (coincident vertices, creases, pins) between this link and other links, so it can be moved and re-joined.',
   hidden: 'Hidden (not drawn, still simulated)',
   position: 'Position',
   pointConstraints: 'Constraints at this point',
@@ -499,6 +502,9 @@ export const STATUS = {
   pasted: 'Pasted',
   nothingToCopy: 'Select a link to copy.',
   extruded: 'Polygon extruded to a prism',
+  detached: (n: number): string => (n ? `${n} connection${n === 1 ? '' : 's'} removed.` : 'This link has no connections to remove.'),
+  hingeNeedsEdges: 'Hinge: click an edge of one panel, then an edge of another panel.',
+  breakBadge: 'Break the connections at this vertex',
   // Crease pattern tool (plan 3b): the polyline of creases and the generation
   patternNext: 'click the next vertex · Enter ends the polyline · Backspace removes the last crease',
   patternVertexPlaced: (patternName: string): string => `Vertex placed in ${patternName} — ${STATUS.patternNext}`,

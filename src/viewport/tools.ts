@@ -1105,11 +1105,23 @@ export class ToolManager {
         app.setStatus(TOOLS.joint.hint);
         return;
       }
+      if (app.toolOptions.jointType === 'hinge' && f.kind !== 'edge' && f.kind !== 'axis') {
+        app.setStatus(STATUS.hingeNeedsEdges);
+        return;
+      }
       this.featureA = f;
       app.setStatus(`${this.describeFeature(f)} — ${STATUS.pickSecondFeature}`);
       return;
     }
-    const type = app.toolOptions.jointType;
+    const uiType = app.toolOptions.jointType;
+    const type: JointType = uiType === 'hinge' ? 'revolute' : uiType;
+    const isEdge = (x: Feature | ConstructionRef): boolean => !isConstructionRef(x) && (x.kind === 'edge' || x.kind === 'axis');
+    // Hinge: both picks must be edges (a same-link pick is re-routed to another link's edge below)
+    if (uiType === 'hinge' && (!isEdge(this.featureA) || (!isEdge(f) && !(!isConstructionRef(f) && f.linkId === this.featureA.linkId)))) {
+      app.setStatus(STATUS.hingeNeedsEdges);
+      if (!isEdge(this.featureA)) this.featureA = null;
+      return;
+    }
     let prefix = '';
     if (!isConstructionRef(f) && f.linkId === this.featureA.linkId) {
       // the hover found the first link again (coincident edges, a shared vertex): use the best-ranked compatible feature

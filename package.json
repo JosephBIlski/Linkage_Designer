@@ -1,6 +1,6 @@
 {
   "name": "linkage-designer",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "private": true,
   "description": "Inverse-design tool for linkages and 3D origami mechanisms (prototype)",
   "type": "module",

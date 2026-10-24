@@ -545,7 +545,7 @@ export class UI {
       if (o.planeMode === 'offset') box.appendChild(row(TOOL_OPTIONS.offset, numberInput(o.offset, (v) => (o.offset = v))));
     }
     if (t === 'joint') {
-      box.appendChild(row(TOOL_OPTIONS.jointType, select(JOINT_TYPES.map((j) => ({ value: j, label: `${JOINTS[j].label} (${JOINTS[j].dof})` })), o.jointType, (v) => { o.jointType = v; this.refresh(); })));
+      box.appendChild(row(TOOL_OPTIONS.jointType, select((['hinge', ...JOINT_TYPES] as (JointType | 'hinge')[]).map((j) => ({ value: j, label: `${JOINTS[j].label} (${JOINTS[j].dof})` })), o.jointType, (v) => { o.jointType = v as JointType | 'hinge'; this.refresh(); })));
       box.appendChild(el('p', 'hint', JOINTS[o.jointType].description));
       if (o.jointType === 'screw') box.appendChild(row(TOOL_OPTIONS.pitch, numberInput(o.pitch, (v) => (o.pitch = v))));
     }
@@ -1031,6 +1031,10 @@ export class UI {
     }
     const actions = el('div', 'actions');
     actions.appendChild(button(PANEL.copyLink, () => this.duplicateSelected(), { icon: 'polygon', cls: 'btn--small' }));
+    const detach = button(PANEL.detachAll, () => app.detachLink(link.id), { icon: 'close', cls: 'btn--small' });
+    detach.title = PANEL.detachAllHelp;
+    detach.disabled = app.connectionsOf(link.id).length === 0;
+    actions.appendChild(detach);
     actions.appendChild(button(PANEL.deleteItem, () => this.tools.deletePick({ type: 'link', id: link.id }), { icon: 'delete', cls: 'btn--danger btn--small' }));
     box.appendChild(actions);
   }

@@ -22,7 +22,7 @@ import {
   type SweepResult,
 } from './core/kinematics';
 import { EXAMPLE_BUILDERS } from './core/examples';
-import { addAngleDriver, addFoldDriver, candidateAngleDrivers, cloneModel, createModel, creasesLockedByPlane, parseModel, serializeModel, groundLink } from './core/model';
+import { addAngleDriver, addFoldDriver, candidateAngleDrivers, cloneModel, createModel, creasesLockedByPlane, jointsAtPoint, linkAllPointIds, parseModel, removeJoint, serializeModel, groundLink } from './core/model';
 import { solidifyRestGeometry } from './core/feasibility';
 import { driverHandle, type DriverHandle } from './core/driverHandle';
 import { findCreaseLoops, isCrease, type CreaseLoop } from './core/fold';
@@ -32,7 +32,7 @@ import { normalize, sub } from './core/geometry';
 import type { CreaseClass, ID, JointType, Model, Target, Vec3 } from './core/types';
 import { loadSettings, saveSettings, type AppSettings } from './ui/settings';
 import { LINK_NAMES, SIM, STATUS } from './ui/strings';
-import { ModelRenderer, type DesignSpaceView, type EditPointView, type OverlayView, type PathView, type RenderState, type SelectionView, type SurfaceView } from './viewport/render';
+import { ModelRenderer, type DesignSpaceView, type EditPointView, type OverlayLabel, type OverlayView, type PathView, type RenderState, type SelectionView, type SurfaceView } from './viewport/render';
 import { Viewport, type PickResult } from './viewport/scene';
 import { pickKey } from './viewport/pickRank';
 
@@ -46,7 +46,8 @@ export interface ToolOptions {
   mode2d: boolean;
   planeMode: 'three' | 'offset';
   offset: number;
-  jointType: JointType;
+  /** Joint type for the Joint tool; 'hinge' is the edge–edge crease (a revolute between two edges) under a clearer name. */
+  jointType: JointType | 'hinge';
   pitch: number;
   patternKind: 'linear' | 'polar';
   patternCount: number;
@@ -647,6 +648,54 @@ export class App {
     return true;
   }
 
+  /** Connections (joints other than the sketch-plane constraint) between `linkId` and other links or datum geometry. */
+  connectionsOf(linkId: ID): ID[] {
+    const seen = new Set<ID>();
+    for (const pid of linkAllPointIds(this.model.links[linkId])) for (const j of jointsAtPoint(this.model, pid)) if (j.a.kind !== 'body') seen.add(j.id);
+    for (const j of Object.values(this.model.joints)) if (j.a.kind !== 'body' && (j.a.linkId === linkId || (!('constructionId' in j.b) && j.b.linkId === linkId))) seen.add(j.id);
+    return [...seen];
+  }
+
+  /** Remove every connection at one vertex (the ✕ badge) — one undo step. Returns how many were removed. */
+  breakVertex(pointId: ID): number {
+    const js = jointsAtPoint(this.model, pointId).filter((j) => j.a.kind !== 'body');
+    if (js.length === 0) return 0;
+    this.beginChange();
+    for (const j of js) removeJoint(this.model, j.id);
+    this.endChange({ keepSelection: true });
+    this.setStatus(STATUS.detached(js.length));
+    return js.length;
+  }
+
+  /** Remove every connection of a link ("Detach from all neighbours") — one undo step. */
+  detachLink(linkId: ID): number {
+    const ids = this.connectionsOf(linkId);
+    if (ids.length === 0) {
+      this.setStatus(STATUS.detached(0));
+      return 0;
+    }
+    this.beginChange();
+    for (const id of ids) removeJoint(this.model, id);
+    this.endChange({ keepSelection: true });
+    this.setStatus(STATUS.detached(ids.length));
+    return ids.length;
+  }
+
+  /** ✕ badges on the joined vertices of the selected panel (Construction mode): one click breaks that vertex's connections. */
+  private currentBadges(): OverlayLabel[] {
+    const sel = this.selection;
+    if (this.mode !== 'construction' || !sel || (sel.type !== 'link' && sel.type !== 'vertex' && sel.type !== 'edge' && sel.type !== 'face')) return [];
+    const link = this.model.links[sel.id];
+    if (!link || (link.kind !== 'polygon' && link.kind !== 'prism')) return [];
+    const out: OverlayLabel[] = [];
+    for (const pid of link.pointIds) {
+      if (jointsAtPoint(this.model, pid).some((j) => j.a.kind !== 'body')) {
+        out.push({ pos: this.model.points[pid].pos, text: '✕', cls: 'label label--break', title: STATUS.breakBadge, onClick: () => this.breakVertex(pid) });
+      }
+    }
+    return out;
+  }
+
   /** Handles of the drivers the user may drag in the current mode and pose. */
   private currentDriverHandles(positions: Positions): DriverHandle[] {
     const m = this.model;
@@ -768,6 +817,7 @@ export class App {
       driverHandles: this.currentDriverHandles(positions),
       ghost: this.mode === 'simulation' ? this.ghost : null,
       overlay: this.overlay,
+      badges: this.currentBadges(),
       displayPointIds: this.model.settings.displayPointIds,
     };
   }

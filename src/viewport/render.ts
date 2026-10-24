@@ -47,6 +47,9 @@ export interface OverlayLabel {
   pos: Vec3;
   text: string;
   cls: string;
+  /** Clickable badge (e.g. the ✕ that breaks a vertex's connections); plain labels take no pointer events. */
+  onClick?: () => void;
+  title?: string;
 }
 export interface OverlayView {
   rubberBand?: { a: Vec3; b: Vec3 } | null;
@@ -80,6 +83,8 @@ export interface RenderState {
   editPoints: EditPointView[];
   /** Draggable driver handles (Construction: every driver; Preview: the active driver). */
   driverHandles: DriverHandle[];
+  /** Clickable badges pinned to model points (✕ on the joined vertices of the selected panel). */
+  badges: OverlayLabel[];
   ghost: Positions | null;
   overlay: OverlayView;
   /** Points whose paths/design spaces are displayed (drawn with a marker). */
@@ -226,10 +231,20 @@ export class ModelRenderer {
   }
 
   /** A CSS2D label at a world position; CSS2DRenderer stacks labels by `renderOrder` first, then by camera distance. */
-  private label(text: string, at: Vec3, cls = 'label', renderOrder = 0): void {
+  private label(text: string, at: Vec3, cls = 'label', renderOrder = 0, onClick?: () => void, title?: string): void {
     const div = document.createElement('div');
     div.className = cls;
     div.textContent = text;
+    if (title) div.title = title;
+    if (onClick) {
+      div.style.pointerEvents = 'auto';
+      div.style.cursor = 'pointer';
+      div.addEventListener('pointerdown', (e) => e.stopPropagation());
+      div.addEventListener('click', (e) => {
+        e.stopPropagation();
+        onClick();
+      });
+    }
     const obj = new CSS2DObject(div);
     obj.position.copy(v(at));
     obj.renderOrder = renderOrder;
@@ -756,6 +771,7 @@ export class ModelRenderer {
     // tool labels sit at their world position (the stylesheet offsets them from the vertex they annotate) and are
     // stacked above the model labels, so a sector sum is never hidden under a datum or link name
     for (const l of o.labels ?? []) this.label(l.text, l.pos, l.cls, 1);
+    for (const b of state.badges) this.label(b.text, b.pos, b.cls, 2, b.onClick, b.title);
   }
 }
 

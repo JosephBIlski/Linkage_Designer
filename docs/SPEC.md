@@ -297,6 +297,14 @@ or cylinders still use the default joint of the tool options. Every connection
 at a vertex is listed in the link-end pop-up with its own ✕ ("Break the
 connection to …"), so a join is undone with one click.
 
+**Joining and detaching panels (v0.6.1).** The Joint tool offers *Hinge*: click
+an edge of one panel, then an edge of another; the second panel moves so the
+edges coincide and the shared edge becomes a crease in one gesture. When a
+panel is selected in Construction mode, every joined vertex carries a red ✕
+badge in the viewport; clicking it breaks the connections at that vertex (one
+undo step). The panel's Properties offer *Detach from all neighbours*, which
+removes every connection of the panel so it can be moved and re-joined.
+
 ## 6. Ground link and degrees of freedom
 
 **Original:** "specifying a ground link (that can be later changed). The user
